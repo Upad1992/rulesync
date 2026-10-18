@@ -11,7 +11,9 @@
       "Bash(rm -rf ~/**)",
       "Read(.env*)"
     ],
-    "allow": [],
+    "allow": [
+      "mcp__codegraph__*"
+    ],
     "defaultMode": "auto"
   },
   "statusLine": {
@@ -50,6 +52,16 @@
           {
             "type": "command",
             "command": "git pull && pnpm i"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codegraph prompt-hook"
           }
         ]
       }
