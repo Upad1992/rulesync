@@ -1,6 +1,6 @@
 # Decisions
 
-<!-- cspell:ignore agentsync traecn -->
+<!-- cspell:ignore agentsync traecn Doubao -->
 
 Append-only decision log for this fork. New entries get the next `D-NNN`; do not rewrite old entries.
 Each entry records context, the decision, the alternatives considered, the consequences, and the evidence.
@@ -121,6 +121,34 @@ Pitfalls are collected at the end.
 **Consequences:** A future change needs a new class, a tuple/factory registration, tests, and docs. Trae requires `description`, uses a comma-separated `tools` allowlist plus `disallowedTools`, pins vendor-specific model names, and supports project and user scope. Only automatic delegation by `description` is documented; there is no @mention or slash command and no documented nesting.
 
 **Evidence:** `subagentsProcessorToolTargetTuple` has no `trae`; there is no `trae-subagent.ts`; `docs.trae.cn/ide_subagents`.
+
+**Spec notes (for a future change):**
+
+- Locations: project `.trae/agents/<name>.md`; user `~/.trae-cn/agents/<name>.md` on Trae CN (international is expected to be `~/.trae/agents/`, but the published docs reuse the CN path, so verify at runtime before implementing global). The directory is flat; subdirectories are not documented.
+- Frontmatter keys:
+  - `name` (required): starts with a letter, then letters/digits/`-`, ends with a letter or digit, at most 50 characters.
+  - `description` (required): a file without it cannot be parsed by Trae.
+  - `model` (optional): a Trae vendor model name (for example `Doubao-Seed-2.1-Pro`, `DeepSeek-V4-Pro`, `glm-5.2`, `minimax-m3`, `kimi-k2.7-code`, `qwen-3.8-max` on CN; the international list differs). Omit it to inherit the current model.
+  - `tools` (optional): comma-separated allowlist. An empty string disables every tool; omitting the key loads all tools.
+  - `disallowedTools` (optional): comma-separated denylist; takes precedence over `tools`.
+  - `mcpServers` (optional): list.
+- Tool names: `Bash`, `Edit`, `Glob`, `Grep`, `Read`, `Skill`, `TodoWrite`, `WebFetch`, `WebSearch`, `Write`, `LSP`, `mcp__<server>__<tool>`.
+- Body: the Markdown body is the system prompt.
+- Invocation: automatic delegation by `description`; only the built-in Agent can call a subagent. No @mention, no slash command, and nesting is not documented.
+- Scope: project and user are both supported. A project-level agent overrides a user-level agent with the same `name`.
+- Unsupported keys: `hooks`, `permissionMode`, `skills`, `color`, `memory`, `effort`, `isolation`, `maxTurns`, `background`.
+- Implementation sketch:
+  - Add `"trae"` to `subagentsProcessorToolTargetTuple`.
+  - Add `src/features/subagents/trae-subagent.ts` extending `ToolSubagent` (extract a shared Markdown base only if a second target needs it).
+  - Implement `getSettablePaths({ global })`: project `.trae/agents`; global `join(getTraeUserDir(), "agents")`, reusing `src/utils/trae.ts`.
+  - Map shared `name`/`description`; keep Trae-specific keys under a `trae:` block (`tools` string, `disallowedTools`, `model`, `mcpServers`). See D-006 for the missing shared `tools` field.
+  - Validate that `description` is present; warn or skip when a rulesync subagent has none.
+  - Register in `toolSubagentFactories` with `supportsProject: true` and `supportsGlobal: true`.
+  - Add unit tests, project/global E2E coverage, a docs note, and regenerate the supported-tools tables.
+- Open questions:
+  - Whether Trae uses the file name or the frontmatter `name` when they differ.
+  - Whether the international edition also reads `~/.trae-cn/agents/`; the binary scans both roots, but the docs do not distinguish them.
+  - Whether Trae subagents can call other subagents; no nesting is documented.
 
 ## D-011: Trae MCP generation replaces the whole `mcpServers` object
 

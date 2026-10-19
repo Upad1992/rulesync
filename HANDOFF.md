@@ -39,7 +39,7 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 1. Before the first real global generate, remove the symlink that points into the old aggregation repo:
    `rm ~/.trae-cn/skills/grill-with-docs`
    Otherwise rulesync writes through it into `~/Workspace/IndependentProject/Agent`.
-2. Optional: add Trae subagent support. It is not implemented; see D-010 for the format and gaps.
+2. Optional: add Trae subagent support. It is not implemented; read D-010's Spec notes before starting.
 3. Consolidate MCP servers into `.rulesync/mcp.jsonc`. Trae generation replaces the whole `mcpServers` object (D-011).
 4. Distribute subagents to the platforms whose agent directories are still empty.
 5. Keep the CodeArts fallback on the rsync script; rulesync has no CodeArts target.
