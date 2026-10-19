@@ -39,11 +39,10 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 
 ## Next steps
 
-1. Run `pnpm cicheck` (stage docs first, P-005) and commit on `feat/codearts-cli`.
-2. Merge the branch into `dev`.
-3. Before any real global generate, replace the `~/.codeartsdoer/AGENTS.md` symlink into the old aggregation repo; otherwise generation writes through it (P-002).
-4. Later: add a `codearts-ide` target only for the IDE-specific MCP file (`.codeartsdoer/mcp/mcp_settings.json`); do not duplicate the shared skills/agents/commands paths.
-5. Hooks (TypeScript plugins) and permissions (global storage) remain out of scope.
+1. `feat/codearts-ide` is checked out at `45ec2d8a`; start the IDE adaptation by verifying the IDE MCP and rule-center surfaces before choosing a target shape.
+2. Before any real global generate, replace the `~/.codeartsdoer/AGENTS.md` symlink into the old aggregation repo; otherwise generation writes through it (P-002).
+3. Add a `codearts-ide` target only for IDE-specific surfaces (MCP at `.codeartsdoer/mcp/mcp_settings.json`, and the `.codeartsdoer/rule/*.mdc` center if verified); do not duplicate the shared skills/agents/commands paths already emitted by `codearts-cli`.
+4. Hooks (TypeScript plugins) and permissions (global storage) remain out of scope.
 
 ## Environment facts
 
