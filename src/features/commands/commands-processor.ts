@@ -44,6 +44,7 @@ import { BobCommand } from "./bob-command.js";
 import { ClaudecodeCommand } from "./claudecode-command.js";
 import { ClaudecodePluginCommand } from "./claudecode-plugin-command.js";
 import { ClineCommand } from "./cline-command.js";
+import { CodeartsCliCommand } from "./codearts-cli-command.js";
 import { CodebuddyCommand } from "./codebuddy-command.js";
 import { CodewhaleCommand } from "./codewhale-command.js";
 import { CodexcliCommand } from "./codexcli-command.js";
@@ -347,6 +348,22 @@ export const toolCommandFactories = new Map<CommandsProcessorToolTarget, ToolCom
         supportsGlobal: true,
         isSimulated: false,
         supportsSubdirectory: false,
+      },
+    },
+  ],
+  [
+    "codearts-cli",
+    {
+      class: CodeartsCliCommand,
+      meta: {
+        // CodeArts CLI reads Markdown commands from `.codeartsdoer/commands/`
+        // (subdirectories become `/a/b`) and `~/.codeartsdoer/commands/`.
+        // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0010.html
+        extension: "md",
+        supportsProject: true,
+        supportsGlobal: true,
+        isSimulated: false,
+        supportsSubdirectory: true,
       },
     },
   ],

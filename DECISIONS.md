@@ -174,6 +174,34 @@ Pitfalls are collected at the end.
 
 **Evidence:** `https://docs.trae.ai/ide/subagents` and `https://docs.trae.cn/ide_subagents` both list `~/.trae-cn/agents/`; the Trae CN client contains a "peer product global directory (e.g. `.trae` ↔ `.trae-cn`)" setting; `src/utils/trae.ts`, `src/features/subagents/trae-subagent.ts`, and the Trae unit/E2E tests.
 
+## D-013: CodeArts CLI is a first-class target for rules, skills, commands, subagents and MCP
+
+**Context:** CodeArts CLI is an OpenCode fork shipped by Huawei. It shares `.codeartsdoer/` with the CodeArts Agent IDE for rules, skills, commands and subagents, but reads a different MCP file. Its instruction model has no modular rules directory, its skills loader keeps only `name` and `description`, and its subagent `tools` field is a name→boolean map. The fork needs it as a generation target because the old symlink aggregation cannot express these files.
+
+**Decision:** Add a `codearts-cli` target with project and global scope for rules, skills, commands, subagents and MCP.
+
+- Rules: project `./AGENTS.md`, global `~/.codeartsdoer/AGENTS.md`, `collisionPolicy: "fold"`. The CLI walks up and stops at the first of `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`, so there is no nested or modular rule surface.
+- Skills: `.codeartsdoer/skills/<name>/SKILL.md` in both scopes. Only `name` and `description` are written; supporting files are copied. A description shorter than 10 characters is the author's responsibility, not a generation error.
+- Commands: `.codeartsdoer/commands/<name>.md` in both scopes. `description` is canonical; `agent`, `model` and `subtask` come from the `codearts-cli:` block.
+- Subagents: `.codeartsdoer/agents/<name>.md` in both scopes. `mode` defaults to `subagent`, `model` is `provider/model`, `tools` is a map, and the rest of the block is passed through. A missing description falls back to the name with a warning.
+- MCP: the `mcp` key of `.codeartsdoer/codearts_cli.json` (project) and `~/.codeartsdoer/codearts_cli.json` (global). `local` carries `command: string[]` and `environment`; `remote` carries `url` and `headers`. Other top-level keys are preserved, the `mcp` object is replaced wholesale, and the file is never deleted.
+- Out of scope: hooks (CodeArts implements them as TypeScript plugins, not declarative config), permissions (the effective store is `~/.codeartsdoer/cli-data/storage/permission/global.json`, outside the project), ignore (no `.codeartsdoerignore`; `.codebaseignore` only feeds the index), and `.codeartsdoer/rule/*.mdc` (IDE cloud rule center).
+- The IDE MCP file `.codeartsdoer/mcp/mcp_settings.json` is not written. A later `codearts-ide` target can add it; the shared directories must not be written twice.
+
+**Alternatives:** one neutral `codearts` target (rejected: the IDE MCP path differs, so the split is real); project scope only (rejected: the CLI supports both scopes); a shared top-level `tools` field (rejected by D-006); symlink detection in the shared write layer (rejected: cross-tool behavior change and merge cost).
+
+**Consequences:** Adding `codearts-cli` to `rulesync.jsonc` changes the owner of the project-root `AGENTS.md` (last target in config order wins, `src/lib/generate.ts:1071`). The fork does not add the target to its own config yet. `~/.codeartsdoer/AGENTS.md` is currently a symlink into the old aggregation repo, so a real global generate must replace it first; E2E uses a fake home.
+
+**Evidence:** `src/features/rules/codearts-cli-rule.ts`, `src/features/skills/codearts-cli-skill.ts`, `src/features/commands/codearts-cli-command.ts`, `src/features/subagents/codearts-cli-subagent.ts`, `src/features/mcp/codearts-cli-mcp.ts`, `src/constants/codearts-cli-paths.ts`; local binary `~/.codeartsdoer/installers/bin/codearts` strings (`OPENCODE_CONFIG_FILE=codearts_cli.json,codearts_cli.jsonc`, local/remote MCP schemas, 21 hook events); `~/.codeartsdoer/AGENTS.md` symlink; `https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0019.html` (skills), `..._0031.html` (agents), `..._0010.html` (commands), `..._0035.html` (MCP).
+
+**Spec notes (for a future change):**
+
+- `.codeartsdoer/rule/<name>.mdc` + `metadata.properties` is the IDE rule center; whether the CLI injects it into the prompt is unverified. Do not generate it.
+- The CLI also reads `CLAUDE.md` and `CONTEXT.md` as fallbacks; rulesync writes only `AGENTS.md`, which the CLI checks first.
+- Global instructions also fall back to `~/.claude/CLAUDE.md`; this target does not write it.
+- `codearts_cli.jsonc` is accepted by the CLI, but rulesync writes only `.json` so a project never holds both.
+- The CLI merges user-level and project-level `mcp` maps, project winning on a name clash.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
@@ -207,3 +235,7 @@ It described plural file names, nonexistent hooks/permissions targets, and the w
 ### P-008: `.codebuddy/settings.local.json` breaks `oxfmt --check`
 
 The committed JSON is not in oxfmt format, so `pnpm check` and `pnpm cicheck` fail until it is formatted: `pnpm exec oxfmt .codebuddy/settings.local.json`.
+
+### P-009: CodeArts subagents do not appear in the agent picker
+
+`mode: subagent` agents are only reachable through delegation by the main agent; the TUI's "Select agent" list shows primary agents only. Verify a subagent by delegating to it and checking the reply, not by looking for it in the picker. Use `mode: all` if it must be selectable.

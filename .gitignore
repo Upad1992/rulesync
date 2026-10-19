@@ -352,6 +352,7 @@ rulesync.local.jsonc
 **/.bob/commands/
 **/.claude/commands/
 **/.clinerules/workflows/
+**/.codeartsdoer/commands/
 **/.codebuddy/commands/
 **/.codewhale/commands/
 **/.commandcode/commands/
@@ -384,6 +385,7 @@ rulesync.local.jsonc
 **/.bob/skills/
 **/.claude/skills/
 **/.cline/skills/
+**/.codeartsdoer/skills/
 **/.codebuddy/skills/
 **/.codewhale/skills/
 **/.commandcode/skills/
@@ -422,6 +424,7 @@ rulesync.local.jsonc
 **/.bob/custom_modes.yaml
 **/.claude/agents/
 **/.cline/agents/
+**/.codeartsdoer/agents/
 **/.codebuddy/agents/
 **/.codewhale/agents/
 **/.codex/agents/
@@ -456,6 +459,7 @@ rulesync.local.jsonc
 **/.augment/settings.json
 **/.bob/mcp.json
 **/.mcp.json
+**/.codeartsdoer/codearts_cli.json
 **/.agents/mcp.json
 **/.codewhale/mcp.json
 **/.continue/mcpServers/mcp.json

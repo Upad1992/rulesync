@@ -35,6 +35,10 @@ const commandsGenerateTargets = [
   { target: "omp", outputPath: join(".omp", "commands", "review-pr.md") },
   { target: "opencode", outputPath: join(".opencode", "commands", "review-pr.md") },
   { target: "cline", outputPath: join(".clinerules", "workflows", "review-pr.md") },
+  {
+    target: "codearts-cli",
+    outputPath: join(".codeartsdoer", "commands", "review-pr.md"),
+  },
   { target: "codebuddy", outputPath: join(".codebuddy", "commands", "review-pr.md") },
   { target: "codewhale", outputPath: join(".codewhale", "commands", "review-pr.md") },
   { target: "kilo", outputPath: join(".kilo", "commands", "review-pr.md") },
@@ -90,6 +94,10 @@ const commandsGlobalTargets = [
   { target: "opencode", outputPath: join(".config", "opencode", "commands", "review-pr.md") },
   { target: "codexcli", outputPath: join(".codex", "prompts", "review-pr.md") },
   { target: "cline", outputPath: join("Documents", "Cline", "Workflows", "review-pr.md") },
+  {
+    target: "codearts-cli",
+    outputPath: join(".codeartsdoer", "commands", "review-pr.md"),
+  },
   { target: "codebuddy", outputPath: join(".codebuddy", "commands", "review-pr.md") },
   { target: "codewhale", outputPath: join(".codewhale", "commands", "review-pr.md") },
   { target: "kilo", outputPath: join(".config", "kilo", "commands", "review-pr.md") },

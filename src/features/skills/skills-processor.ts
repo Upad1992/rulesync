@@ -44,6 +44,7 @@ import { BobSkill } from "./bob-skill.js";
 import { ClaudecodePluginSkill } from "./claudecode-plugin-skill.js";
 import { ClaudecodeSkill } from "./claudecode-skill.js";
 import { ClineSkill } from "./cline-skill.js";
+import { CodeartsCliSkill } from "./codearts-cli-skill.js";
 import { CodebuddySkill } from "./codebuddy-skill.js";
 import { CodewhaleSkill } from "./codewhale-skill.js";
 import { CodexCliSkill } from "./codexcli-skill.js";
@@ -382,6 +383,17 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
     "cline",
     {
       class: ClineSkill,
+      meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
+    },
+  ],
+  [
+    "codearts-cli",
+    {
+      class: CodeartsCliSkill,
+      // CodeArts CLI reads <name>/SKILL.md directories from
+      // .codeartsdoer/skills/ (project) and ~/.codeartsdoer/skills/ (user).
+      // Only `name` and `description` are loaded from the frontmatter.
+      // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0019.html
       meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
     },
   ],

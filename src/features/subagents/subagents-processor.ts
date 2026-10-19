@@ -37,6 +37,7 @@ import { BobSubagent } from "./bob-subagent.js";
 import { ClaudecodePluginSubagent } from "./claudecode-plugin-subagent.js";
 import { ClaudecodeSubagent } from "./claudecode-subagent.js";
 import { ClineSubagent } from "./cline-subagent.js";
+import { CodeartsCliSubagent } from "./codearts-cli-subagent.js";
 import { CodebuddySubagent } from "./codebuddy-subagent.js";
 import { CodewhaleSubagent } from "./codewhale-subagent.js";
 import { CodexCliSubagent } from "./codexcli-subagent.js";
@@ -365,6 +366,21 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
         supportsSimulated: false,
         supportsGlobal: true,
         filePattern: "*.{yaml,yml}",
+      },
+    },
+  ],
+  [
+    "codearts-cli",
+    {
+      // CodeArts CLI subagents are Markdown files under `.codeartsdoer/agents/`
+      // (project) and `~/.codeartsdoer/agents/` (global).
+      // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0031.html
+      class: CodeartsCliSubagent,
+      meta: {
+        supportsProject: true,
+        supportsSimulated: false,
+        supportsGlobal: true,
+        filePattern: "*.md",
       },
     },
   ],

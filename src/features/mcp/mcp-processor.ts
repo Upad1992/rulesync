@@ -19,6 +19,7 @@ import { BobMcp } from "./bob-mcp.js";
 import { ClaudecodeMcp } from "./claudecode-mcp.js";
 import { ClaudecodePluginMcp } from "./claudecode-plugin-mcp.js";
 import { ClineMcp } from "./cline-mcp.js";
+import { CodeartsCliMcp } from "./codearts-cli-mcp.js";
 import { CodebuddyMcp } from "./codebuddy-mcp.js";
 import { CodebuffMcp } from "./codebuff-mcp.js";
 import { CodewhaleMcp } from "./codewhale-mcp.js";
@@ -284,6 +285,24 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       class: ClineMcp,
       meta: {
         supportsProject: false,
+        supportsGlobal: true,
+        supportsEnabledTools: false,
+        supportsDisabledTools: false,
+      },
+    },
+  ],
+  [
+    "codearts-cli",
+    {
+      // CodeArts CLI reads the `mcp` block of `.codeartsdoer/codearts_cli.json`
+      // (project) and `~/.codeartsdoer/codearts_cli.json` (user), using
+      // `{type: "local"}` / `{type: "remote"}` server shapes. The same file
+      // carries other CLI settings, so rulesync only owns the `mcp` key. It has
+      // no per-server tool allow/deny lists.
+      // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0035.html
+      class: CodeartsCliMcp,
+      meta: {
+        supportsProject: true,
         supportsGlobal: true,
         supportsEnabledTools: false,
         supportsDisabledTools: false,

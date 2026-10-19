@@ -2638,6 +2638,7 @@ Content that would fail parsing`;
         "claudecode",
         "claudecode-legacy",
         "cline",
+        "codearts-cli",
         "codebuddy",
         "codebuff",
         "codewhale",
@@ -2712,6 +2713,7 @@ Content that would fail parsing`;
       expect(globalTargets).toContain("claudecode");
       expect(globalTargets).toContain("claudecode-legacy");
       expect(globalTargets).toContain("cline");
+      expect(globalTargets).toContain("codearts-cli");
       expect(globalTargets).toContain("codebuddy");
       expect(globalTargets).toContain("codexcli");
       expect(globalTargets).toContain("copilot");
@@ -2745,7 +2747,7 @@ Content that would fail parsing`;
       expect(globalTargets).toContain("commandcode");
       expect(globalTargets).toContain("openclaw");
       expect(globalTargets).toContain("qoder");
-      expect(globalTargets.length).toBe(48);
+      expect(globalTargets.length).toBe(49);
 
       // These targets should NOT be in global mode
       expect(globalTargets).not.toContain("cursor");
@@ -5766,6 +5768,7 @@ targets: ["factorydroid"]
 
     it("should expose every global-capable folded target to the regression matrix", () => {
       expect(globalFoldTargets).toEqual([
+        "codearts-cli",
         "codebuff",
         "codewhale",
         "codexcli",

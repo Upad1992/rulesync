@@ -29,6 +29,7 @@ describe("tool targets", () => {
         "claudecode",
         "claudecode-legacy",
         "cline",
+        "codearts-cli",
         "codebuddy",
         "codebuff",
         "codewhale",

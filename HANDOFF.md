@@ -9,42 +9,47 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 
 ## Current state
 
-- `dev` now contains the Trae subagent work at `7cea952a` (fast-forwarded from `feat/trae-subagent`).
-- `feat/codearts-cli` was created from `dev` at `7cea952a` and is the working branch for the CodeArts CLI adaptation. No CodeArts implementation has started.
+- `feat/codearts-cli` carries the CodeArts CLI implementation (D-013): rules, skills, commands, subagents and MCP, project and global scope. It is uncommitted at the time of writing.
+- `dev` still points at `7cea952a` (Trae subagent support). `feat/codearts-cli` was branched from it and has not been merged back.
 - `main` is still the upstream mirror at `66422332`, identical to `origin/main`.
-- `.codebuddy/settings.local.json` was formatted in `0b9f50bd`; `pnpm cicheck` passes on the merged tree.
-- The only uncommitted change is the pre-existing local hook edit in `.claude/settings.json`; leave it alone.
+- The only unrelated change is the pre-existing local hook edit in `.claude/settings.json`; leave it alone.
 
 ## Completed
 
-- Trae subagent support is merged into `dev` (D-012). The previous session's unit, E2E and `pnpm cicheck` results still describe the merged tree.
-- Read-only CodeArts CLI research for the next session (no code changes):
-  - Binary: `~/.codeartsdoer/installers/codearts`. User config root: `~/.codeartsdoer/`; project root: `.codeartsdoer/`.
-  - Skills: `.codeartsdoer/skills/<name>/SKILL.md` (project) and `~/.codeartsdoer/skills/` (user).
-  - Commands: `.codeartsdoer/commands/<name>.md` (project) and `~/.codeartsdoer/commands/` (user); `codearts_cli.json(c)` also has a `command` block.
-  - Agents: `.codeartsdoer/agents/<name>.md` (project) and `~/.codeartsdoer/agents/` (user). `description` and `mode` (`subagent` | `primary`) are required; `model` and `tools` (a tool-name map) are optional.
-  - MCP: `codearts_cli.json(c)` at the project and user roots, under an `mcp` key; Claude Code format is supported.
-  - Rules: project `AGENTS.md` and `~/.codeartsdoer/AGENTS.md` appear to be the rule surfaces; `~/.codeartsdoer/rule/` and cache directories exist. The exact rule resolution order still needs to be read.
-  - Docs: `https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0019.html` (skills), `.../codeartsagent_cli_0031.html` (agents), `.../codeartsagent_cli_0010.html` (commands). The PDF user guide covers permissions (section 4), hooks (section 9) and MCP (section 10).
-  - Local `~/.codeartsdoer/` has `skills/`, an empty `agents/`, `codearts_cli.json`, `rule/`, and a symlinked `AGENTS.md`; there is no project `.codeartsdoer/` in rulesync yet.
+- Added the `codearts-cli` target:
+  - Rules: project `./AGENTS.md`, global `~/.codeartsdoer/AGENTS.md`, `collisionPolicy: "fold"`.
+  - Skills: `.codeartsdoer/skills/<name>/SKILL.md`, only `name` + `description` written.
+  - Commands: `.codeartsdoer/commands/<name>.md`, `description` + `codearts-cli:` block (`agent`/`model`/`subtask`).
+  - Subagents: `.codeartsdoer/agents/<name>.md`, `mode` defaults to `subagent`, `tools` is a map.
+  - MCP: `mcp` key of `.codeartsdoer/codearts_cli.json`, local/remote mapping, other top-level keys preserved.
+- Registration: five tuples, `TOOL_DISPLAY`, processor factories and meta.
+- Tests: 20 new unit tests; processor and target-enum expectations updated; five E2E specs cover project and global scope (943 tests passed).
+- Docs and generated artifacts: `docs/reference/file-formats.md`, cspell entries, supported-tools tables, README, `docs-content.ts`, `.gitignore`.
+- Real CLI probe: generation into `/tmp/codearts-verify` produced the five expected files, and a manual TUI run in this repository confirmed all five features load (see Verification).
 
 ## Verification
 
-- The merged `dev` tree passed `pnpm cicheck` (15,197 passed, 4 skipped) before the merge; the merge was a fast-forward with no conflicts.
-- CodeArts research was read-only; nothing to verify yet.
+- `pnpm typecheck`: clean.
+- New unit tests: 20 passed.
+- Processor + enum tests: 760 passed, 1 skipped.
+- E2E (`e2e-rules`, `e2e-skills`, `e2e-commands`, `e2e-subagents`, `e2e-mcp`): 943 passed.
+- `oxlint` and `oxfmt --check` on the new files: clean.
+- `pnpm cicheck`: passed (573 files, 15,221 passed, 4 skipped; docs-content, gitignore and supported-tools drift checks clean). One earlier run hit the flaky `src/lib/watch.test.ts` symlink case; it passed alone and in the next full run.
+- Manual CodeArts TUI verification in this repository passed: the model quoted `# Rulesync Project Overview`, `/probe` returned `PROBE_COMMAND_OK`, `probe-skill` returned `PROBE_SKILL_OK`, both MCP servers showed `Connected`, and delegating to `code-reviewer` returned `SUBAGENT_CODE_REVIEWER_OK`.
 
 ## Next steps
 
-1. Start a new session on `feat/codearts-cli`.
-2. Decide the feature scope for CodeArts (rules, skills, commands, subagents, MCP, hooks, permissions, ignore) before writing code.
-3. Read the remaining official docs (permissions, hooks, MCP, rules) and inspect files the local CodeArts CLI actually reads or writes.
-4. Implement with the same constraints as the Trae work: small diff, project/user scope where supported, tests, docs, generated tables, and no changes to shared output-root logic without evidence.
-5. Before a real global generate, remove the `~/.trae-cn/skills/grill-with-docs` symlink (P-002).
+1. Run `pnpm cicheck` (stage docs first, P-005) and commit on `feat/codearts-cli`.
+2. Merge the branch into `dev`.
+3. Before any real global generate, replace the `~/.codeartsdoer/AGENTS.md` symlink into the old aggregation repo; otherwise generation writes through it (P-002).
+4. Later: add a `codearts-ide` target only for the IDE-specific MCP file (`.codeartsdoer/mcp/mcp_settings.json`); do not duplicate the shared skills/agents/commands paths.
+5. Hooks (TypeScript plugins) and permissions (global storage) remain out of scope.
 
 ## Environment facts
 
-- `~/.codeartsdoer/installers/codearts` is the CLI binary. The shell also defines a `codearts` function that injects `CODEARTS_CLI_AK` / `CODEARTS_CLI_SK` from Keychain.
+- `~/.codeartsdoer/installers/bin/codearts` is the CLI binary. The shell also defines a `codearts` function that injects `CODEARTS_CLI_AK` / `CODEARTS_CLI_SK` from Keychain.
 - `~/.codeartsdoer/AGENTS.md` is a symlink into the old aggregation repo. Do not write through it without checking the link target.
+- CodeArts CLI and the CodeArts Agent IDE share `.codeartsdoer/` for rules, skills, commands and agents; the IDE reads MCP from `.codeartsdoer/mcp/mcp_settings.json`.
 - `~/.trae/` is still an empty stub; `~/.trae-cn/` remains the real Trae user config.
 
 ## Known issues

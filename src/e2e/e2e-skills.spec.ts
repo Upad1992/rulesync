@@ -32,6 +32,10 @@ const skillsGenerateTargets = [
     outputPath: join(".augment", "skills", "test-skill", "SKILL.md"),
   },
   {
+    target: "codearts-cli",
+    outputPath: join(".codeartsdoer", "skills", "test-skill", "SKILL.md"),
+  },
+  {
     target: "bob",
     outputPath: join(".bob", "skills", "test-skill", "SKILL.md"),
   },
@@ -1117,6 +1121,10 @@ const skillsGlobalTargets = [
   {
     target: "augmentcode",
     outputPath: join(".augment", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "codearts-cli",
+    outputPath: join(".codeartsdoer", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "bob",

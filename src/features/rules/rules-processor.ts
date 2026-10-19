@@ -72,6 +72,7 @@ import { ClaudecodeLanguageSettings } from "./claudecode-language-settings.js";
 import { ClaudecodeLegacyRule } from "./claudecode-legacy-rule.js";
 import { ClaudecodeRule } from "./claudecode-rule.js";
 import { ClineRule } from "./cline-rule.js";
+import { CodeartsCliRule } from "./codearts-cli-rule.js";
 import { CodebuddyRule } from "./codebuddy-rule.js";
 import { CodebuffRule } from "./codebuff-rule.js";
 import { CodewhaleRule } from "./codewhale-rule.js";
@@ -632,6 +633,25 @@ export const toolRuleFactories = new Map<RulesProcessorToolTarget, ToolRuleFacto
         extension: "md",
         supportsGlobal: true,
         ruleDiscoveryMode: "auto",
+      },
+    },
+  ],
+  [
+    "codearts-cli",
+    {
+      class: CodeartsCliRule,
+      meta: {
+        // CodeArts CLI walks up from the working directory and stops at the
+        // first of `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`, so the project
+        // root file is the only project instruction surface. Its user-level
+        // file is `~/.codeartsdoer/AGENTS.md`. There is no modular rules
+        // directory on the CLI side (`.codeartsdoer/rule/*.mdc` belongs to the
+        // IDE's cloud rule center), so topic rules fold into the root file.
+        // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0001.html
+        extension: "md",
+        supportsGlobal: true,
+        ruleDiscoveryMode: "auto",
+        collisionPolicy: "fold",
       },
     },
   ],
