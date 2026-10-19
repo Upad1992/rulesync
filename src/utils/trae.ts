@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  TRAE_AGENTS_DIR_NAME,
+  TRAE_AGENTS_DIR_PATH,
   TRAE_CN_USER_DIR,
   TRAE_COMMANDS_DIR_NAME,
   TRAE_COMMANDS_DIR_PATH,
@@ -27,4 +29,8 @@ export function getTraeSkillsDirPath({ global }: { global: boolean }): string {
 
 export function getTraeCommandsDirPath({ global }: { global: boolean }): string {
   return global ? join(getTraeUserDir(), TRAE_COMMANDS_DIR_NAME) : TRAE_COMMANDS_DIR_PATH;
+}
+
+export function getTraeAgentsDirPath({ global }: { global: boolean }): string {
+  return global ? join(getTraeUserDir(), TRAE_AGENTS_DIR_NAME) : TRAE_AGENTS_DIR_PATH;
 }

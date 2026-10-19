@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
   RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+  RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
 } from "../constants/rulesync-paths.js";
 import { ensureDir, fileExists, readFileContent, writeFileContent } from "../utils/file.js";
 import { runGenerate, useGlobalTestDirectories } from "./e2e-helper.js";
@@ -29,6 +30,20 @@ const writeSources = async (projectDir: string): Promise<void> => {
       'description: "Generated command"',
       "---",
       "Generated Trae command.",
+    ].join("\n"),
+  );
+};
+
+const writeSubagentSource = async (projectDir: string): Promise<void> => {
+  await writeFileContent(
+    join(projectDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH, "planner.md"),
+    [
+      "---",
+      "name: planner",
+      'description: "Plans implementation tasks"',
+      'targets: ["trae"]',
+      "---",
+      "Generated Trae subagent.",
     ].join("\n"),
   );
 };
@@ -77,6 +92,43 @@ describe("E2E: Trae CN user directory", () => {
     expect(
       await readFileContent(join(homeDir, ".trae", "commands", "generated-command.md")),
     ).toContain("Generated Trae command");
+    expect(await fileExists(join(homeDir, ".trae-cn"))).toBe(false);
+  });
+
+  it("should write global subagents under ~/.trae-cn/agents when it exists", async () => {
+    const projectDir = getProjectDir();
+    const homeDir = getHomeDir();
+    await ensureDir(join(homeDir, ".trae-cn"));
+    await writeSubagentSource(projectDir);
+
+    await runGenerate({
+      target: "trae",
+      features: "subagents",
+      global: true,
+      env: { HOME_DIR: homeDir },
+    });
+
+    expect(await readFileContent(join(homeDir, ".trae-cn", "agents", "planner.md"))).toContain(
+      "Generated Trae subagent",
+    );
+    expect(await fileExists(join(homeDir, ".trae", "agents"))).toBe(false);
+  });
+
+  it("should fall back to ~/.trae/agents when ~/.trae-cn does not exist", async () => {
+    const projectDir = getProjectDir();
+    const homeDir = getHomeDir();
+    await writeSubagentSource(projectDir);
+
+    await runGenerate({
+      target: "trae",
+      features: "subagents",
+      global: true,
+      env: { HOME_DIR: homeDir },
+    });
+
+    expect(await readFileContent(join(homeDir, ".trae", "agents", "planner.md"))).toContain(
+      "Generated Trae subagent",
+    );
     expect(await fileExists(join(homeDir, ".trae-cn"))).toBe(false);
   });
 });

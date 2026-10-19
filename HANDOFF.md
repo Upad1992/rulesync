@@ -7,42 +7,40 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 
 ## Current state
 
-- Branch: `dev` (tracks `origin/dev`). The Trae CN work ended at `a1cbe253`; this handoff and `DECISIONS.md` are a follow-up commit.
+- Branch: `feat/trae-subagent`, based on `dev` at `6a99bcba`. The Trae subagent feature is implemented and verified here; `dev` does not contain it yet.
 - `main` is the upstream mirror at `66422332`, identical to `origin/main`.
-- `feat/trae-cn-path-detection` is kept as a historical snapshot at `16906cc2`.
-- Working tree is clean.
+- `.codebuddy/settings.local.json` was formatted in `0b9f50b` so `pnpm cicheck` passes.
+- The only uncommitted change is a pre-existing local hook edit in `.claude/settings.json`; it is intentionally not part of the feature commits.
 
 ## Completed
 
-- Trae CN user-level path support:
-  - `~/.trae-cn` is preferred for global scope; falls back to `~/.trae`.
-  - Project scope always uses `.trae/`, for both editions.
-  - Applies to skills and commands only, the only Trae features with global support.
-  - Implemented in `src/utils/trae.ts`, `src/constants/trae-paths.ts`, and the two `getSettablePaths` methods.
-- Unit tests and `src/e2e/e2e-trae-home.spec.ts` cover both the CN-hit and fallback paths.
-- `docs/reference/file-formats.md` updated; `src/generated/docs-content.ts` regenerated.
-- `IMPLEMENTATION.md` deleted; it was stale and contradicted the code.
-- Fork workflow documented in `AGENTS.md`.
+- Native Trae subagent support:
+  - Project `.trae/agents/<name>.md`; user scope resolves through `getTraeUserDir()` (`~/.trae-cn/agents/` when the CN directory exists, otherwise `~/.trae/agents/`).
+  - YAML frontmatter + Markdown body; `name`/`description` required, optional `model`, `tools` (comma-separated string, `""` disables every tool), `disallowedTools` and `mcpServers`.
+  - Unknown keys in the `trae:` block are dropped with a warning. A missing or whitespace-only description falls back to the name with a warning; an invalid name is warned about but still written.
+  - Flat directory only; nested sources are skipped by the processor.
+- Registration: `subagentsProcessorToolTargetTuple`, `toolSubagentFactories`, canonical `trae:` section in `RulesyncSubagentFrontmatterSchema`.
+- Unit tests, project/global E2E coverage (including CN hit and `~/.trae` fallback), docs note, generated tables and `docs-content`, and the derived `.gitignore` entry.
+- Decision recorded as D-012.
 
 ## Verification
 
-- `pnpm test`: 15,180 passed, 4 skipped.
-- `pnpm exec vitest run --config vitest.e2e.config.ts --silent=false src/e2e/e2e-trae-home.spec.ts`: 2 passed.
-- Typecheck and oxlint pass.
-- Manual CLI check with a temporary HOME:
-  - CN home -> `.trae-cn/skills`, `.trae-cn/commands`
-  - no CN directory -> `.trae/skills`, `.trae/commands`
-  - project scope -> `project/.trae/...`
+- `pnpm cicheck`: 15,197 passed, 4 skipped; formatting, oxlint, typecheck and all content checks pass.
+- `pnpm exec vitest run --config vitest.e2e.config.ts src/e2e/e2e-subagents.spec.ts src/e2e/e2e-trae-home.spec.ts`: 166 passed.
+- `src/features/subagents/trae-subagent.test.ts`: 17 passed.
+- `src/features/subagents/subagents-processor.test.ts`: 104 passed, 1 skipped.
+- Manual CLI check has not been run against a real Trae installation yet.
 
 ## Next steps
 
-1. Before the first real global generate, remove the symlink that points into the old aggregation repo:
+1. Merge `feat/trae-subagent` into `dev` after review; do not push without an explicit request.
+2. Enable `Settings > Beta > Subagents` in Trae CN, run `rulesync generate --targets trae --features subagents`, and confirm the generated agents appear in Trae.
+3. The international `~/.trae/agents/` path remains inferred: both published docs spell `~/.trae-cn/agents/`, and only the CN app is installed here. Verify on an international install when available.
+4. Before the first real global generate, remove the symlink that points into the old aggregation repo:
    `rm ~/.trae-cn/skills/grill-with-docs`
-   Otherwise rulesync writes through it into `~/Workspace/IndependentProject/Agent`.
-2. Optional: add Trae subagent support. It is not implemented; read D-010's Spec notes before starting.
-3. Consolidate MCP servers into `.rulesync/mcp.jsonc`. Trae generation replaces the whole `mcpServers` object (D-011).
-4. Distribute subagents to the platforms whose agent directories are still empty.
-5. Keep the CodeArts fallback on the rsync script; rulesync has no CodeArts target.
+5. Consolidate MCP servers into `.rulesync/mcp.jsonc`. Trae generation replaces the whole `mcpServers` object (D-011).
+6. Distribute subagents to the platforms whose agent directories are still empty.
+7. Keep the CodeArts fallback on the rsync script; rulesync has no CodeArts target.
 
 ## Environment facts
 
@@ -53,5 +51,5 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 
 ## Known issues
 
-- `.codebuddy/settings.local.json` fails `oxfmt --check`, so `pnpm cicheck` currently fails on formatting. Run `pnpm exec oxfmt .codebuddy/settings.local.json`.
-- `dev` was pushed manually after the previous session. Check `git status -sb` before starting work.
+- `.claude/settings.json` carries an uncommitted local `UserPromptSubmit` hook; leave it alone unless the user asks.
+- P-005 still applies: `check:docs-content` compares the worktree to the index, so stage documentation changes before running `pnpm cicheck`.

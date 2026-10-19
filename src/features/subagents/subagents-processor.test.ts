@@ -1929,6 +1929,7 @@ Second global content`;
         "rovodev",
         "tabnine",
         "takt",
+        "trae",
         "vibe",
         "zcode",
       ]);
@@ -2007,6 +2008,7 @@ Second global content`;
           "rovodev",
           "tabnine",
           "takt",
+          "trae",
           "vibe",
           "vibe-plugin",
           "zcode",

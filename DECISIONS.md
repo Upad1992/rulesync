@@ -162,6 +162,18 @@ Pitfalls are collected at the end.
 
 **Evidence:** `src/features/mcp/trae-mcp.ts` builds `{ ...json, mcpServers }`.
 
+## D-012: Trae subagents use the `trae:` block and CN-first user paths
+
+**Context:** Trae documents user-defined subagents as Markdown files with YAML frontmatter, but rulesync had no Trae subagent target. The canonical subagent schema has no top-level `tools`, and Trae's user-level path is ambiguous: both the CN and international docs spell it as `~/.trae-cn/agents/`, while the existing Trae skills/commands support resolves `~/.trae-cn` first and falls back to `~/.trae`.
+
+**Decision:** Add a native `trae` subagent target with project and global scope. Project files go to `.trae/agents/<name>.md`; global files resolve through `getTraeUserDir()`, so `~/.trae-cn/agents/` wins when that directory exists and `~/.trae/agents/` is the fallback. Keep Trae-specific keys in the `trae:` block (`model`, `tools` and `disallowedTools` as comma-separated strings, `mcpServers` as a string list). Do not add a shared top-level `tools` field. A missing or whitespace-only `description` falls back to the subagent name with a warning rather than aborting the run, and an invalid `name` is warned about but still written. Any other key in the `trae:` block is dropped with a warning because Trae silently ignores unknown keys. Nested sources are skipped for Trae (flat directory only).
+
+**Alternatives:** project scope only; hardcode `~/.trae-cn/agents/` for every edition; add a shared canonical `tools` field (rejected by D-006); throw on a missing description; implement a shared skip hook in the processor; validate `model` against a vendor list; rename output files to the frontmatter `name`.
+
+**Consequences:** The international `~/.trae/agents/` path remains inferred, not documented; the docs note records that. A Trae-targeted subagent without a description produces a parseable file but may route poorly until the author adds one. A Trae user who writes `hooks`/`permissionMode`/`skills`/`color`/`memory` inside the `trae:` block gets a warning and loses the key. The diff stays inside Trae plus two registration points.
+
+**Evidence:** `https://docs.trae.ai/ide/subagents` and `https://docs.trae.cn/ide_subagents` both list `~/.trae-cn/agents/`; the Trae CN client contains a "peer product global directory (e.g. `.trae` ↔ `.trae-cn`)" setting; `src/utils/trae.ts`, `src/features/subagents/trae-subagent.ts`, and the Trae unit/E2E tests.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub

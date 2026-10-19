@@ -211,6 +211,10 @@ const subagentsGenerateTargets = [
     target: "zcode",
     outputPath: join(".zcode", "agents", "planner.md"),
   },
+  {
+    target: "trae",
+    outputPath: join(".trae", "agents", "planner.md"),
+  },
 ] as const;
 
 const subagentsGlobalTargets = [
@@ -266,6 +270,7 @@ const subagentsGlobalTargets = [
     outputPath: join(getHermesagentGlobalDir(), "rulesync", "subagents", "planner.json"),
   },
   { target: "zcode", outputPath: join(".zcode", "agents", "planner.md") },
+  { target: "trae", outputPath: join(".trae", "agents", "planner.md") },
 ] as const;
 
 describe("E2E: subagents", () => {

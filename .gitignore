@@ -448,6 +448,7 @@ rulesync.local.jsonc
 **/.rovodev/subagents/
 **/.tabnine/agent/agents/
 **/.takt/facets/personas/
+**/.trae/agents/
 **/.vibe/agents/
 **/.zcode/agents/
 **/.ai/mcp/mcp.json

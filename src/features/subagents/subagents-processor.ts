@@ -80,6 +80,7 @@ import {
   ToolSubagentFromRulesyncSubagentParams,
   ToolSubagentSettablePaths,
 } from "./tool-subagent.js";
+import { TraeSubagent } from "./trae-subagent.js";
 import { VibePluginSubagent } from "./vibe-plugin-subagent.js";
 import { VibeSubagent } from "./vibe-subagent.js";
 import { ZcodePluginSubagent } from "./zcode-plugin-subagent.js";
@@ -861,6 +862,22 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
     "takt",
     {
       class: TaktSubagent,
+      meta: {
+        supportsProject: true,
+        supportsSimulated: false,
+        supportsGlobal: true,
+        filePattern: "*.md",
+      },
+    },
+  ],
+  [
+    "trae",
+    {
+      // Trae subagents are Markdown files with YAML frontmatter under
+      // `.trae/agents/` (project) and the user-level agents directory
+      // (global). Trae is flat; nested agent directories are not documented.
+      // https://docs.trae.ai/ide/subagents
+      class: TraeSubagent,
       meta: {
         supportsProject: true,
         supportsSimulated: false,

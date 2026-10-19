@@ -35,5 +35,17 @@ export const TRAE_COMMANDS_DIR_NAME = "commands";
  */
 export const TRAE_COMMANDS_DIR_PATH = join(TRAE_DIR, TRAE_COMMANDS_DIR_NAME);
 
+export const TRAE_AGENTS_DIR_NAME = "agents";
+
+/**
+ * Subagents: Markdown files with YAML frontmatter under `.trae/agents/`
+ * (project) and the user-level agents directory (global). The layout is flat:
+ * Trae documents no nested agent directories.
+ *
+ * @see https://docs.trae.ai/ide/subagents
+ * @see https://docs.trae.cn/ide_subagents
+ */
+export const TRAE_AGENTS_DIR_PATH = join(TRAE_DIR, TRAE_AGENTS_DIR_NAME);
+
 /** Indexing ignore list (gitignore syntax), `.trae/.ignore`, project scope only. */
 export const TRAE_IGNORE_FILE_NAME = ".ignore";

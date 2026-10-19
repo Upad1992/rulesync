@@ -70,6 +70,18 @@ export const RulesyncSubagentFrontmatterSchema = z.looseObject({
       mcpServers: z.optional(z.array(z.string())),
     }),
   ),
+  // Trae's documented subagent keys. `tools` and `disallowedTools` are
+  // comma-separated strings, and `""` is meaningful for `tools` (disable every
+  // tool), so they are typed as strings rather than arrays. Unknown keys still
+  // ride through, as everywhere else.
+  trae: z.optional(
+    z.looseObject({
+      model: z.optional(z.string()),
+      tools: z.optional(z.string()),
+      disallowedTools: z.optional(z.string()),
+      mcpServers: z.optional(z.array(z.string())),
+    }),
+  ),
   // Pool's documented per-agent keys (`subagents.agents.<name>` of its
   // settings file), spelled out so their types are checked when the rulesync
   // file is read. `description`/`instructions` override the shared field and
