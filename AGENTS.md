@@ -139,3 +139,8 @@ This repository is a fork of `dyoshikawa/rulesync`:
 - `dev` is the long-lived personal integration branch and the base for new feature branches.
 - Branch new work off `dev` and merge it back into `dev`.
 - Bring upstream changes in through `main`, then merge `main` into `dev`; do not rebase `dev`.
+
+# Session Handoff
+
+- Read `HANDOFF.md` for the current state and next steps, then `DECISIONS.md` for the rationale and known pitfalls.
+- Update `HANDOFF.md` at the end of each session; append durable decisions to `DECISIONS.md` instead of rewriting history.
