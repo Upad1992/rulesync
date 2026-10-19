@@ -12,17 +12,28 @@ import { join } from "node:path";
  */
 export const TRAE_DIR = ".trae";
 
+/**
+ * Trae CN (the mainland-China edition) keeps its user-level configuration
+ * under `~/.trae-cn/` instead of `~/.trae/`. Both editions share the
+ * project-level `.trae/` directory.
+ */
+export const TRAE_CN_USER_DIR = ".trae-cn";
+
 /** Project MCP servers (`mcpServers` object), project scope only. */
 export const TRAE_MCP_FILE_NAME = "mcp.json";
 
+export const TRAE_SKILLS_DIR_NAME = "skills";
+
 /** Skills: `.trae/skills/<name>/SKILL.md` (project) and `~/.trae/skills/` (global). */
-export const TRAE_SKILLS_DIR_PATH = join(TRAE_DIR, "skills");
+export const TRAE_SKILLS_DIR_PATH = join(TRAE_DIR, TRAE_SKILLS_DIR_NAME);
+
+export const TRAE_COMMANDS_DIR_NAME = "commands";
 
 /**
  * Custom commands: Markdown files under `.trae/commands/` (project, up to three nested
  * directory levels) and `~/.trae/commands/` (global).
  */
-export const TRAE_COMMANDS_DIR_PATH = join(TRAE_DIR, "commands");
+export const TRAE_COMMANDS_DIR_PATH = join(TRAE_DIR, TRAE_COMMANDS_DIR_NAME);
 
 /** Indexing ignore list (gitignore syntax), `.trae/.ignore`, project scope only. */
 export const TRAE_IGNORE_FILE_NAME = ".ignore";

@@ -2,13 +2,13 @@ import { basename, join } from "node:path";
 
 import { z } from "zod/mini";
 
-import { TRAE_COMMANDS_DIR_PATH } from "../../constants/trae-paths.js";
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { quoteForLog } from "../../utils/control-characters.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent, toPosixPath } from "../../utils/file.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
 import type { Logger } from "../../utils/logger.js";
+import { getTraeCommandsDirPath } from "../../utils/trae.js";
 import { RulesyncCommand, RulesyncCommandFrontmatter } from "./rulesync-command.js";
 import {
   ToolCommand,
@@ -45,12 +45,12 @@ export type TraeCommandParams = {
  * Custom command for Trae.
  *
  * Trae reads Markdown command files under `.trae/commands/` (project, up to
- * three levels of nested directories) and `~/.trae/commands/` (global). The
- * YAML frontmatter carries `name` and `description`, and the body below the
- * closing `---` holds the instructions. rulesync writes the rulesync
- * `description`, a `name` equal to the file name stem (as Trae's editor does),
- * plus any fields of the `trae` section (which win over the derived ones), and
- * keeps nested command paths.
+ * three levels of nested directories) and `~/.trae/commands/` (global;
+ * `~/.trae-cn/commands/` on Trae CN). The YAML frontmatter carries `name` and
+ * `description`, and the body below the closing `---` holds the instructions.
+ * rulesync writes the rulesync `description`, a `name` equal to the file name
+ * stem (as Trae's editor does), plus any fields of the `trae` section (which win
+ * over the derived ones), and keeps nested command paths.
  *
  * @see https://docs.trae.ai/ide/slash-commands?_lang=en
  */
@@ -77,11 +77,12 @@ export class TraeCommand extends ToolCommand {
     this.body = body;
   }
 
-  // Both scopes share the same relative path; the home-directory root is
-  // applied by the generate pipeline in global mode.
-  static getSettablePaths(_options: { global?: boolean } = {}): ToolCommandSettablePaths {
+  // Both scopes share the same relative path unless Trae CN redirects the
+  // user-level root; the home-directory root is applied by the generate
+  // pipeline in global mode.
+  static getSettablePaths({ global = false }: { global?: boolean } = {}): ToolCommandSettablePaths {
     return {
-      relativeDirPath: TRAE_COMMANDS_DIR_PATH,
+      relativeDirPath: getTraeCommandsDirPath({ global }),
     };
   }
 

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
-import { writeFileContent } from "../../utils/file.js";
+import { ensureDir, writeFileContent } from "../../utils/file.js";
 import { RulesyncSkill } from "./rulesync-skill.js";
 import { TraeSkill } from "./trae-skill.js";
 
@@ -15,11 +15,13 @@ describe("TraeSkill", () => {
   beforeEach(async () => {
     ({ testDir, cleanup } = await setupTestDirectory());
     vi.spyOn(process, "cwd").mockReturnValue(testDir);
+    vi.stubEnv("HOME_DIR", testDir);
   });
 
   afterEach(async () => {
     await cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   const makeRulesyncSkill = (targets: string[]) =>
@@ -36,10 +38,19 @@ describe("TraeSkill", () => {
       validate: true,
     });
 
-  it("should resolve .trae/skills for both scopes", () => {
+  it("should resolve .trae/skills for both scopes without Trae CN", () => {
     expect(TraeSkill.getSettablePaths().relativeDirPath).toBe(join(".trae", "skills"));
     expect(TraeSkill.getSettablePaths({ global: true }).relativeDirPath).toBe(
       join(".trae", "skills"),
+    );
+  });
+
+  it("should resolve .trae-cn/skills for global scope when Trae CN is present", async () => {
+    await ensureDir(join(testDir, ".trae-cn"));
+
+    expect(TraeSkill.getSettablePaths().relativeDirPath).toBe(join(".trae", "skills"));
+    expect(TraeSkill.getSettablePaths({ global: true }).relativeDirPath).toBe(
+      join(".trae-cn", "skills"),
     );
   });
 

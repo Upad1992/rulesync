@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
-import { writeFileContent } from "../../utils/file.js";
+import { ensureDir, writeFileContent } from "../../utils/file.js";
 import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { CommandsProcessor } from "./commands-processor.js";
 import { RulesyncCommand } from "./rulesync-command.js";
@@ -18,11 +18,13 @@ describe("TraeCommand", () => {
   beforeEach(async () => {
     ({ testDir, cleanup } = await setupTestDirectory());
     vi.spyOn(process, "cwd").mockReturnValue(testDir);
+    vi.stubEnv("HOME_DIR", testDir);
   });
 
   afterEach(async () => {
     await cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   const createRulesyncCommand = ({
@@ -43,10 +45,19 @@ describe("TraeCommand", () => {
     });
   };
 
-  it("should use .trae/commands for both scopes", () => {
+  it("should use .trae/commands for both scopes without Trae CN", () => {
     expect(TraeCommand.getSettablePaths().relativeDirPath).toBe(join(".trae", "commands"));
     expect(TraeCommand.getSettablePaths({ global: true }).relativeDirPath).toBe(
       join(".trae", "commands"),
+    );
+  });
+
+  it("should use .trae-cn/commands for global scope when Trae CN is present", async () => {
+    await ensureDir(join(testDir, ".trae-cn"));
+
+    expect(TraeCommand.getSettablePaths().relativeDirPath).toBe(join(".trae", "commands"));
+    expect(TraeCommand.getSettablePaths({ global: true }).relativeDirPath).toBe(
+      join(".trae-cn", "commands"),
     );
   });
 
