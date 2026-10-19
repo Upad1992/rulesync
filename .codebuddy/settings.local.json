@@ -1,7 +1,5 @@
 {
   "enableAllProjectMcpServers": true,
-  "enabledMcpjsonServers": [
-    "codegraph"
-  ],
+  "enabledMcpjsonServers": ["codegraph"],
   "disabledMcpjsonServers": []
 }
