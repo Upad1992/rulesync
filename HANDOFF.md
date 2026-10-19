@@ -12,7 +12,7 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 - `feat/codearts-cli` carries the CodeArts CLI implementation (D-013): rules, skills, commands, subagents and MCP, project and global scope. It is uncommitted at the time of writing.
 - `dev` still points at `7cea952a` (Trae subagent support). `feat/codearts-cli` was branched from it and has not been merged back.
 - `main` is still the upstream mirror at `66422332`, identical to `origin/main`.
-- The only unrelated change is the pre-existing local hook edit in `.claude/settings.json`; leave it alone.
+- The CodeGraph `UserPromptSubmit` hook in `.claude/settings.json` is committed (`8ee6e05`); the working tree is clean.
 
 ## Completed
 
@@ -54,5 +54,4 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 
 ## Known issues
 
-- `.claude/settings.json` carries an uncommitted local `UserPromptSubmit` hook; leave it alone unless the user asks.
 - P-005 still applies: `check:docs-content` compares the worktree to the index, so stage documentation changes before running `pnpm cicheck`.
