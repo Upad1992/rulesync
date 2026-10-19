@@ -130,3 +130,12 @@ This is Rulesync, a Node.js CLI tool that automatically generates configuration 
     - When you want to log in test, use `console.log` and run `npx vitest run --silent=false` to see the logs.
   - `getHomeDirectory()` in `src/utils/file.ts` throws an error if `HOME_DIR` is not set, to enforce explicit mocking.
   - `isEnvTest()` in `src/utils/vitest.ts` is a function that dynamically checks `process.env.NODE_ENV === "test"` at call time. Note: bun compiled binaries may not respect runtime `NODE_ENV` changes, so prefer `HOME_DIR` for E2E tests.
+
+# Fork Workflow
+
+This repository is a fork of `dyoshikawa/rulesync`:
+
+- `main` mirrors `upstream/main` and carries no local feature work. Update it only by fast-forwarding from upstream.
+- `dev` is the long-lived personal integration branch and the base for new feature branches.
+- Branch new work off `dev` and merge it back into `dev`.
+- Bring upstream changes in through `main`, then merge `main` into `dev`; do not rebase `dev`.
