@@ -80,6 +80,7 @@ describe("tool targets", () => {
         "dsh",
         "lettacode",
         "claudecode-plugin",
+        "codearts-ide",
         "vibe-plugin",
         "warpcli",
         "zcode-plugin",

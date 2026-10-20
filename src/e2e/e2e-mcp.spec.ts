@@ -43,6 +43,7 @@ const mcpGenerateTargets = [
   { target: "codebuff", outputPath: join(".agents", "mcp.json") },
   { target: "cursor", outputPath: join(".cursor", "mcp.json") },
   { target: "codearts-cli", outputPath: join(".codeartsdoer", "codearts_cli.json") },
+  { target: "codearts-ide", outputPath: join(".codeartsdoer", "mcp", "mcp_settings.json") },
   { target: "trae", outputPath: join(".trae", "mcp.json") },
   { target: "qwencode", outputPath: join(".qwen", "settings.json") },
   { target: "codexcli", outputPath: join(".codex", "config.toml") },
@@ -121,6 +122,41 @@ describe("E2E: mcp", () => {
 
     const generatedContent = await readFileContent(join(testDir, outputPath));
     expect(generatedContent).toContain("test-server");
+  });
+
+  it("should write the CodeArts Agent IDE MCP file under mcpServers", async () => {
+    const testDir = getTestDir();
+    await writeFileContent(
+      join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH),
+      JSON.stringify({
+        mcpServers: {
+          local: {
+            type: "stdio",
+            command: "node",
+            args: ["server.js"],
+            env: { API_KEY: "value" },
+          },
+          remote: { type: "sse", url: "https://example.com/mcp/sse" },
+        },
+      }),
+    );
+
+    await runGenerate({ target: "codearts-ide", features: "mcp" });
+
+    const generated = JSON.parse(
+      await readFileContent(join(testDir, ".codeartsdoer", "mcp", "mcp_settings.json")),
+    );
+    expect(generated.mcpServers).toEqual({
+      local: {
+        command: "node",
+        args: ["server.js"],
+        env: { API_KEY: "value" },
+      },
+      remote: {
+        url: "https://example.com/mcp/sse",
+        type: "sse",
+      },
+    });
   });
 
   it("should point rovodev config.yml at the generated project mcp.json", async () => {

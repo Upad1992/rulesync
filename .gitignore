@@ -460,6 +460,7 @@ rulesync.local.jsonc
 **/.bob/mcp.json
 **/.mcp.json
 **/.codeartsdoer/codearts_cli.json
+**/.codeartsdoer/mcp/mcp_settings.json
 **/.agents/mcp.json
 **/.codewhale/mcp.json
 **/.continue/mcpServers/mcp.json

@@ -1,6 +1,6 @@
 # Decisions
 
-<!-- cspell:ignore agentsync traecn Doubao -->
+<!-- cspell:ignore agentsync traecn Doubao agentkernel codemate -->
 
 Append-only decision log for this fork. New entries get the next `D-NNN`; do not rewrite old entries.
 Each entry records context, the decision, the alternatives considered, the consequences, and the evidence.
@@ -202,6 +202,26 @@ Pitfalls are collected at the end.
 - `codearts_cli.jsonc` is accepted by the CLI, but rulesync writes only `.json` so a project never holds both.
 - The CLI merges user-level and project-level `mcp` maps, project winning on a name clash.
 
+## D-014: CodeArts Agent IDE is a separate MCP-only target
+
+**Context:** The CodeArts Agent IDE is a VS Code/Code-OSS fork that embeds the same agent kernel as CodeArts CLI. Runtime logs and the bundled extension confirm it reads the CLI's shared surfaces for rules, skills, commands and subagents, but a different MCP file. It also has an IDE-only rule center whose metadata format is undocumented. A full `codearts-ide` target would write the same paths as `codearts-cli` twice, which D-013 forbids.
+
+**Decision:** Add a `codearts-ide` target that supports **MCP only, project scope only**. `codearts-cli` remains the owner of `AGENTS.md`, `.codeartsdoer/skills/`, `.codeartsdoer/commands/` and `.codeartsdoer/agents/`; a user of the IDE enables both targets, and no path is written twice.
+
+- File: `.codeartsdoer/mcp/mcp_settings.json`, the file the IDE's MCP panel edits. The `codearts-cli` file `codearts_cli.json` is not touched.
+- Key: `mcpServers`, which is what the IDE UI reads and writes. The kernel also accepts a newer `mcp` shape and migrates the file to it; imports read either.
+- Local server: `{command: string, args, env, disabled, timeout}`. The canonical command array is split into the program and `args`; `disabled` is written as the IDE's own flag, not `enabled: false`.
+- Remote server: `{url, headers, type, disabled, timeout}` where `type` is `sse` or `streamableHttp`; a URL containing `/sse` or `/stream` is treated as SSE, otherwise Streamable HTTP. WebSocket servers are skipped with a warning.
+- Only `mcpServers` is replaced; every other top-level key (notably `autoApprove`) is preserved and the file is never removed by `--delete`.
+- Global MCP is not generated: the IDE documents only the project file, and its personal path is hard-coded to `~/.config/opencode/mcp/mcp_settings.json`, which belongs to another tool.
+- The rule center (`.codeartsdoer/rule/*.mdc` + `metadata.properties`) is not generated yet. It needs a manual verification of `triggerType` and injection before it can be modelled, and its metadata file is rewritten by the IDE.
+
+**Alternatives:** a full five-feature `codearts-ide` target (rejected: double writes, and inconsistent content would be last-target-wins); a `codeartsMcp: "cli" | "ide"` switch on `codearts-cli` (rejected: rulesync has no per-target option, and it would make `--targets codearts-cli` behave differently per project); writing `~/.config/opencode` (rejected: cross-tool pollution); writing `.codeartsdoer/codearts.json` (rejected: the kernel reads it, but the IDE documents neither it nor its `mcp` key).
+
+**Consequences:** An IDE user lists `codearts-cli` and `codearts-ide` together; the generated `.gitignore` entry for `mcp_settings.json` is derived automatically. `--global` skips `codearts-ide` because the target declares `supportsGlobal: false`. The rule center stays a known gap.
+
+**Evidence:** `src/features/mcp/codearts-ide-mcp.ts`, `src/constants/codearts-ide-paths.ts`; the IDE's `out/extension.js` (`getMcpKey`, `getMcpSettingsFilePath`, `getPersonMcpSettingsFilePath`, `getProjectRulePathConfig` callers) and `agentkernelServer-darwin-arm64` (`getProjectRulePathConfig`, `MN1`, `getAllMcpConfigs`); runtime log lines `Instructions from: ~/.codeartsdoer/AGENTS.md` and `getProjectMcpCurrent: checking path .../.codeartsdoer/mcp/mcp_settings.json`; `https://support.huaweicloud.com/usermanual-codeartsagent/codeartsagent_ug_0010.html` (MCP), `..._0019.html` (rules / AGENTS.md), `..._0024.html` (skills), `..._0051.html` (agents).
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
@@ -239,3 +259,7 @@ The committed JSON is not in oxfmt format, so `pnpm check` and `pnpm cicheck` fa
 ### P-009: CodeArts subagents do not appear in the agent picker
 
 `mode: subagent` agents are only reachable through delegation by the main agent; the TUI's "Select agent" list shows primary agents only. Verify a subagent by delegating to it and checking the reply, not by looking for it in the picker. Use `mode: all` if it must be selectable.
+
+### P-010: The IDE's rule migration uses `rules`, the rule center uses `rule`
+
+The IDE's `.codemate` migration writes rule files to `.codeartsdoer/rules/`, while the rule-center UI and the official docs use `.codeartsdoer/rule/`. The directory that exists in practice and that the UI reads is singular. Generate `rule/`, and do not use the migration path as a reference.

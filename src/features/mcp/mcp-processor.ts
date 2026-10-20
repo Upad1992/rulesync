@@ -20,6 +20,7 @@ import { ClaudecodeMcp } from "./claudecode-mcp.js";
 import { ClaudecodePluginMcp } from "./claudecode-plugin-mcp.js";
 import { ClineMcp } from "./cline-mcp.js";
 import { CodeartsCliMcp } from "./codearts-cli-mcp.js";
+import { CodeartsIdeMcp } from "./codearts-ide-mcp.js";
 import { CodebuddyMcp } from "./codebuddy-mcp.js";
 import { CodebuffMcp } from "./codebuff-mcp.js";
 import { CodewhaleMcp } from "./codewhale-mcp.js";
@@ -304,6 +305,24 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       meta: {
         supportsProject: true,
         supportsGlobal: true,
+        supportsEnabledTools: false,
+        supportsDisabledTools: false,
+      },
+    },
+  ],
+  [
+    "codearts-ide",
+    {
+      // CodeArts Agent IDE reads the `mcpServers` block of
+      // `.codeartsdoer/mcp/mcp_settings.json`, the same file its MCP panel
+      // edits. Rules, skills, commands and subagents share the `codearts-cli`
+      // target's paths, so this target owns only the IDE MCP file. The IDE
+      // documents no user-scope path for it.
+      // https://support.huaweicloud.com/usermanual-codeartsagent/codeartsagent_ug_0010.html
+      class: CodeartsIdeMcp,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: false,
         supportsEnabledTools: false,
         supportsDisabledTools: false,
       },

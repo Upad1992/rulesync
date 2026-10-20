@@ -93,6 +93,7 @@ The tables below show whether each tool supports a given feature (✅ = supporte
 | Claude Code               |  ✅   |   ✅   | ✅  |    ✅    |    ✅     |   ✅   |  ✅   |     ✅      |        |
 | Claude Code plugin        |       |        | ✅  |    ✅    |    ✅     |   ✅   |  ✅   |             |        |
 | CodeArts CLI              |  ✅   |        | ✅  |    ✅    |    ✅     |   ✅   |       |             |        |
+| CodeArts Agent IDE        |       |        | ✅  |          |           |        |       |             |        |
 | CodeBuddy Code            |  ✅   |        | ✅  |    ✅    |    ✅     |   ✅   |  ✅   |     ✅      |        |
 | Codewhale                 |  ✅   |        | ✅  |    ✅    |    ✅     |   ✅   |  ✅   |     ✅      |        |
 | Codex CLI                 |  ✅   |        | ✅  |    ✅    |    ✅     |   ✅   |  ✅   |     ✅      |        |

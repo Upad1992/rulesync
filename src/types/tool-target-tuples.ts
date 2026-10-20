@@ -114,6 +114,7 @@ export const mcpProcessorToolTargetTuple = [
   "claudecode-legacy",
   "cline",
   "codearts-cli",
+  "codearts-ide",
   "codebuddy",
   "codebuff",
   "codewhale",

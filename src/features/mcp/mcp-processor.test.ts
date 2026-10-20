@@ -1258,6 +1258,7 @@ describe("McpProcessor", () => {
       expect(targets).toContain("bob");
       expect(targets).toContain("tabnine");
       expect(targets).toContain("codebuff"); // .agents/mcp.json
+      expect(targets).toContain("codearts-ide"); // .codeartsdoer/mcp/mcp_settings.json
     });
 
     it("should include kilo in global tool targets", () => {
@@ -1274,6 +1275,8 @@ describe("McpProcessor", () => {
       expect(globalTargets).toContain("bob"); // ~/.bob/settings/mcp.json
       expect(globalTargets).toContain("tabnine"); // ~/.tabnine/agent/settings.json
       expect(globalTargets).toContain("codebuff"); // ~/.agents/mcp.json
+      // The IDE documents only the project-scoped MCP file.
+      expect(globalTargets).not.toContain("codearts-ide");
     });
   });
 
