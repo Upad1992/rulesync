@@ -250,6 +250,18 @@ Pitfalls are collected at the end.
 
 **Evidence:** HANDOFF.md Next steps 1-10; D-015/D-016/D-017; this session's `pnpm cicheck` (exit 0) and E2E results.
 
+## D-019: Defer real-platform verification to a new session and keep it isolated
+
+**Context:** After the 43.9.0 merge landed on `dev` as `309aa38`, the user asked whether the locally adapted platforms had been tested. The automated suite covers them (E2E 28 files / 1538 tests for `codearts-cli`, `codearts-ide`, `trae`; the Q12 unit assertion), but HANDOFF Next steps 8 had deferred B1. The user approved doing the real-platform verification, then chose to end the session and hand execution to a new one.
+
+**Decision:** Do not run the verification in the handoff session; record the approved plan in `HANDOFF.md` and execute it in the next session. Use an isolated project directory plus a pseudo-home via `HOME_DIR`; never generate into the real `~/.trae-cn` / `~/.codeartsdoer` trees. Select the six targets (`zcode`, `trae`, `codebuddy`, `claudecode`, `codearts-cli`, `codearts-ide`) through CLI `--targets` / `--features` instead of editing the committed `rulesync.jsonc`. GUI-only checks in the platform manuals stay with the user; the agent must not perform them or mark them verified. End the handoff session on `dev` with `HANDOFF.md` / `DECISIONS.md` committed, so the new session reads the current state.
+
+**Alternatives:** generate directly into the real home directories (rejected: `delete: true` plus `~/.codeartsdoer/AGENTS.md` and `~/.trae-cn/user_rules` symlinks would write through into the aggregation repo, P-002); activate local targets in `rulesync.jsonc` (rejected: pollutes the committed config); re-run only the E2E subset (rejected: does not exercise the real CLI or the manuals).
+
+**Consequences:** The new session starts on `dev` with a green `pnpm cicheck` state. Every `pnpm` command runs `prepare` -> `pnpm generate`, so `AGENTS.md` and `.claude/settings.json` must be verified and restored after the last `pnpm` command and before the commit (P-014). The manuals were last verified against `2d93b7cd` (2026-10-20), so their path / frontmatter sections need a drift review against 43.9.0. The two handoff-document versions and numbering stay unreconciled (P-013).
+
+**Evidence:** HANDOFF.md Next steps; `dev:package.json` (`"prepare": "vp config --no-agent && pnpm generate"`); `dev:rulesync.jsonc` (`"delete": true`, object-form `targets`); `dev:docs/reference/cli-commands.md`; `/Users/hezi/Workspace/IndependentProject/Agent/user-agents/platforms/rulesync/README.md` (last checked 2026-10-20, `2d93b7cd`); user approval on 2026-11-18.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
