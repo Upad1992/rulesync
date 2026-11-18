@@ -1,6 +1,6 @@
 # Decisions
 
-<!-- cspell:ignore agentsync traecn Doubao forwardable codegraph -->
+<!-- cspell:ignore agentsync traecn Doubao forwardable codegraph hezi -->
 
 Append-only decision log for this fork. New entries get the next `D-NNN`; do not rewrite old entries.
 Each entry records context, the decision, the alternatives considered, the consequences, and the evidence.
@@ -262,6 +262,18 @@ Pitfalls are collected at the end.
 
 **Evidence:** HANDOFF.md Next steps; `dev:package.json` (`"prepare": "vp config --no-agent && pnpm generate"`); `dev:rulesync.jsonc` (`"delete": true`, object-form `targets`); `dev:docs/reference/cli-commands.md`; `/Users/hezi/Workspace/IndependentProject/Agent/user-agents/platforms/rulesync/README.md` (last checked 2026-10-20, `2d93b7cd`); user approval on 2026-11-18.
 
+## D-020: Execute D-019 with isolated real-CLI runs; record 43.9.0 Trae drift without fixing source
+
+**Context:** D-019 deferred real-platform verification to a new session. The automated suite (E2E 28 files / 1538 tests) covers `codearts-cli`, `codearts-ide` and `trae`, but exercises the processors rather than the installed CLI plus the platform manuals. The manuals were last checked against `2d93b7cd` (2026-10-20), 1020 commits behind 43.9.0. `dev:rulesync.jsonc` has `"delete": true`, and real-home symlinks make a real global generate unsafe (P-002, D-013).
+
+**Decision:** Run the real `generate` CLI for six targets (`zcode`, `trae`, `codebuddy`, `claudecode`, `codearts-cli`, `codearts-ide`) in an isolated project under `/tmp/rulesync-platform-check/`, with `HOME_DIR` pointing to a pseudo-home and `--config` / `--input-roots` / `--output-roots` pinning every input and output inside the isolated tree. Select targets via CLI `--targets` / `--features` instead of editing the committed `rulesync.jsonc`. Produce a drift list and a GUI verification checklist in `PLATFORM-VERIFICATION.md`, update only the external platform manuals (Chinese), and do not change fork source or the committed config. Record discovered defects; fix none in this round. GUI-only checks stay with the user.
+
+**Alternatives:** generate into the real home (rejected: symlink write-through); re-run the E2E subset (rejected: does not exercise the CLI entrypoint or the manuals); activate local targets in `rulesync.jsonc` (rejected: pollutes the committed config).
+
+**Consequences:** Six targets pass dry-run / generate / check with no drift; global outputs land in the pseudo-home and the real home is unchanged. An invocation gotcha (P-015) and two 43.9.0 Trae defects (P-016) surfaced that unit/E2E tests miss, plus major manual drift on Trae (43.9.0 added hooks and permissions). These are recorded, not fixed — a source fix is a separate, separately authorized change.
+
+**Evidence:** `PLATFORM-VERIFICATION.md`; `src/constants/trae-paths.ts:28,60-62`; `src/features/permissions/trae-permissions.ts:436`; `src/features/shared/shared-config-gateway.ts:1408`; `src/features/hooks/trae-hooks.ts:80`; `src/config/config-resolver.ts:480-510`.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
@@ -315,3 +327,11 @@ The `dev` worktree is left with `git merge main` in progress and 11 unresolved c
 ### P-014: `pnpm generate` overwrites generated files holding fork-only content
 
 When `pnpm`'s `verifyDepsBeforeRun` triggers an install, the `prepare` hook runs `pnpm generate`, and `rulesync.jsonc` regenerates the root `AGENTS.md` and `.claude/settings.json`. Content added by hand to those two files — the `Fork Workflow` / `Session Handoff` sections (D-008) and the `UserPromptSubmit` codegraph hook (8ee6e0594) — is dropped whenever that regeneration happens (observed on the first `pnpm typecheck` after the 43.9.0 sync, but not on every command). Verify the two files before committing, and restore/stage that content after the last command that regenerates them and right before `git commit`, which does not run `prepare`. The `pnpm cicheck` drift checks do not cover these files, so a green cicheck is unaffected. Moving the content into `.rulesync/` sources is the durable fix but is out of scope here.
+
+### P-015: `pnpm -C` plus an absolute `--config` is rejected by the traversal guard
+
+`ConfigResolver.resolve()` validates `configPath` against `resolve(process.cwd())` (`src/config/config-resolver.ts:480-510`, `src/utils/file.ts:451-468`), so an absolute `--config` outside cwd throws `Path traversal detected`. `pnpm -C <repo>` keeps cwd at the repo root, so `pnpm -C <repo> dev generate --config /tmp/.../rulesync.jsonc` fails. For isolated verification, run the exact CLI that `pnpm dev` wraps — `./node_modules/.bin/tsx src/cli/index.ts` — with cwd set to the isolated project and a relative `--config rulesync.jsonc`; then `--input-roots` / `--output-roots` stay inside the isolated tree and no `pnpm` `prepare` is re-triggered (P-014). `--global` also overrides `outputRoots` with `getHomeDirectory()`, which honors `HOME_DIR`.
+
+### P-016: Trae CN-first + global permissions fails, and global hooks ignore CN-first
+
+43.9.0 added Trae hooks (`trae-hooks.ts`) and permissions (`trae-permissions.ts`). `TraePermissions.getSettablePaths()` resolves CN-first through `getTraeUserDir()`, producing `.trae-cn/permission/global.json` when `~/.trae-cn/` exists, but `SHARED_CONFIG_OWNERSHIP` (`src/features/shared/shared-config-gateway.ts:1408`) declares only the international `.trae/permission/global.json`, so `generate --global --targets trae --features permissions` exits 1 on a CN machine. `TraeHooks.getSettablePaths()` hardcodes `.trae/hooks.json`, so global hooks are **not** CN-first even though skills / commands / subagents are. The Q12 unit test (`trae-permissions.test.ts:80`) only asserts `getSettablePaths`, and the E2E permissions test uses a fresh home without `.trae-cn`, so neither reaches the gateway write. Verify Trae global permissions on a CN home with the real CLI before trusting a green suite. Recorded in `PLATFORM-VERIFICATION.md`; not fixed here (source change is out of scope for D-019/D-020).
