@@ -1,6 +1,6 @@
 import { isAbsolute, join, resolve } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_CONFIG_RELATIVE_FILE_PATH } from "../constants/rulesync-paths.js";
 import { ALL_FEATURES } from "../types/features.js";
@@ -64,6 +64,12 @@ describe("Config", () => {
       );
     });
 
+    it("should throw error when opencode and opencodev1 are both specified", () => {
+      expect(() => createConfig({ targets: ["opencode", "opencodev1"] })).toThrow(
+        "Conflicting targets: 'opencode' and 'opencodev1' cannot be used together. Please choose one.",
+      );
+    });
+
     it("should allow claudecode without claudecode-legacy", () => {
       expect(() => createConfig({ targets: ["claudecode"] })).not.toThrow();
     });
@@ -107,6 +113,7 @@ describe("Config", () => {
         (t) =>
           t !== "claudecode-legacy" &&
           t !== "augmentcode-legacy" &&
+          t !== "opencodev1" &&
           t !== "claudecode-plugin" &&
           t !== "antigravity-plugin" &&
           t !== "augmentcode-plugin" &&
@@ -117,6 +124,13 @@ describe("Config", () => {
       );
 
       expect(targets).toEqual(expectedTargets);
+    });
+
+    it("should replace opencode with an explicit opencodev1 next to the wildcard", () => {
+      const targets = createConfig({ targets: ["*", "opencodev1"] }).getTargets();
+
+      expect(targets).toContain("opencodev1");
+      expect(targets).not.toContain("opencode");
     });
 
     it("should return explicit targets when no wildcard", () => {
@@ -386,13 +400,6 @@ describe("Config", () => {
       expect(features).not.toContain("*");
     });
 
-    it("should report hasPerTargetFeatures true for object-form targets", () => {
-      const config = createConfig({
-        targets: { claudecode: ["rules"] },
-      });
-      expect(config.hasPerTargetFeatures()).toBe(true);
-    });
-
     it("should detect conflicting targets within the object form keys", () => {
       expect(() =>
         createConfig({
@@ -625,7 +632,7 @@ describe("Config", () => {
           source: "@acme/skills",
           transport: "npm",
           registry: "https://acme.jfrog.io/artifactory/api/npm/npm-local/",
-          tokenEnv: "ACME_REGISTRY_TOKEN",
+          tokenEnv: "ACME_NPM_TOKEN",
         },
       ]);
       expect(result.success).toBe(true);

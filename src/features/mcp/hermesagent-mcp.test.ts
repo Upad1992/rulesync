@@ -1,8 +1,9 @@
 import { join } from "node:path";
 
 import { load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
 import { isRecord } from "../../utils/type-guards.js";
@@ -503,6 +504,252 @@ describe("HermesagentMcp", () => {
       expect(servers.events?.elicitation).toEqual({ enabled: false, timeout: 120 });
       // Streamable HTTP is the default, so it stays implicit.
       expect(servers.streamable?.transport).toBeUndefined();
+    });
+
+    it("writes and imports the v0.22.3 tool_costs/spend_limit/cost_unit keys (issue #2414)", async () => {
+      const rulesyncMcp = new RulesyncMcp({
+        relativeDirPath: ".rulesync",
+        relativeFilePath: ".mcp.json",
+        fileContent: JSON.stringify({
+          mcpServers: {
+            render: {
+              command: "render-mcp",
+              tool_costs: {
+                generate_image: 2,
+                generate_video: [5, 20],
+                animate: { credits: 3, note: "per animation" },
+              },
+              spend_limit: 50,
+              cost_unit: "tokens",
+            },
+          },
+        }),
+      });
+
+      const mcp = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp,
+        global: true,
+      });
+      const servers = getMcpServers(mcp.getFileContent());
+
+      expect(servers.render?.tool_costs).toEqual({
+        generate_image: 2,
+        generate_video: [5, 20],
+        animate: { credits: 3, note: "per animation" },
+      });
+      expect(servers.render?.spend_limit).toBe(50);
+      expect(servers.render?.cost_unit).toBe("tokens");
+
+      const imported = JSON.parse(
+        new HermesagentMcp({
+          outputRoot: testDir,
+          relativeDirPath: HERMES_DIR,
+          relativeFilePath: HERMES_FILE,
+          validate: false,
+          fileContent: mcp.getFileContent(),
+          global: true,
+        })
+          .toRulesyncMcp()
+          .getFileContent(),
+      );
+      // Hermes-only keys ride the tool-scoped override block.
+      expect(imported.hermesagent.mcpServers.render.spend_limit).toBe(50);
+      expect(imported.hermesagent.mcpServers.render.cost_unit).toBe("tokens");
+      expect(imported.hermesagent.mcpServers.render.tool_costs).toEqual({
+        generate_image: 2,
+        generate_video: [5, 20],
+        animate: { credits: 3, note: "per animation" },
+      });
+    });
+
+    it("drops cost keys Hermes would reject on generate, with a warning (issue #2414)", async () => {
+      const logger = createMockLogger();
+      const mcp = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        global: true,
+        logger,
+        rulesyncMcp: new RulesyncMcp({
+          relativeDirPath: ".rulesync",
+          relativeFilePath: ".mcp.json",
+          fileContent: JSON.stringify({
+            mcpServers: {
+              stringLimit: { command: "a", spend_limit: "5", cost_unit: 3, tool_costs: [1, 2] },
+              negativeLimit: { command: "b", spend_limit: -1, cost_unit: "  ", tool_costs: "x" },
+              longUnit: { command: "c", cost_unit: "u".repeat(33) },
+            },
+          }),
+        }),
+      });
+      const servers = getMcpServers(mcp.getFileContent());
+
+      for (const name of ["stringLimit", "negativeLimit", "longUnit"]) {
+        expect(servers[name]).not.toHaveProperty("spend_limit");
+        expect(servers[name]).not.toHaveProperty("cost_unit");
+        expect(servers[name]).not.toHaveProperty("tool_costs");
+      }
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('spend_limit "5"'));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("spend_limit -1"));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("cost_unit 3"));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('cost_unit "  "'));
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`cost_unit "${"u".repeat(33)}"`),
+      );
+      expect(
+        logger.warn.mock.calls.filter(([message]) => String(message).includes("tool_costs")),
+      ).toHaveLength(2);
+    });
+
+    it("writes and imports the v0.22.5 events key (issue #2414)", async () => {
+      const mcp = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        global: true,
+        rulesyncMcp: new RulesyncMcp({
+          relativeDirPath: ".rulesync",
+          relativeFilePath: ".mcp.json",
+          fileContent: JSON.stringify({
+            mcpServers: {
+              watcher: { url: "https://mcp.example.com/mcp", events: true, lazy: true },
+              quiet: { command: "quiet-mcp", events: false },
+            },
+          }),
+        }),
+      });
+      const servers = getMcpServers(mcp.getFileContent());
+
+      expect(servers.watcher?.events).toBe(true);
+      expect(servers.watcher?.lazy).toBe(true);
+      expect(servers.quiet?.events).toBe(false);
+
+      const imported = JSON.parse(
+        new HermesagentMcp({
+          outputRoot: testDir,
+          relativeDirPath: HERMES_DIR,
+          relativeFilePath: HERMES_FILE,
+          validate: false,
+          fileContent: mcp.getFileContent(),
+          global: true,
+        })
+          .toRulesyncMcp()
+          .getFileContent(),
+      );
+      // Hermes-only keys ride the tool-scoped override block.
+      expect(imported.hermesagent.mcpServers.watcher.events).toBe(true);
+      expect(imported.hermesagent.mcpServers.quiet.events).toBe(false);
+      expect(imported.mcpServers.watcher).not.toHaveProperty("events");
+    });
+
+    it("normalizes boolean-like events/lazy values the way Hermes reads them (issue #2414)", async () => {
+      const dir = join(testDir, HERMES_DIR);
+      await ensureDir(dir);
+      await writeFileContent(
+        join(dir, HERMES_FILE),
+        [
+          "mcp_servers:",
+          "  watcher:",
+          "    command: watcher-mcp",
+          "    events: yes",
+          "    lazy: 1",
+          "    supports_parallel_tool_calls: ' On '",
+          "  quiet:",
+          "    command: quiet-mcp",
+          "    events: off",
+          "    lazy: 0",
+          "",
+        ].join("\n"),
+      );
+
+      const canonical = (
+        await HermesagentMcp.fromFile({ outputRoot: testDir, global: true })
+      ).toRulesyncMcp();
+      const overrides = JSON.parse(canonical.getFileContent()).hermesagent.mcpServers;
+
+      expect(overrides.watcher).toMatchObject({
+        events: true,
+        lazy: true,
+        supports_parallel_tool_calls: true,
+      });
+      expect(overrides.quiet).toMatchObject({ events: false, lazy: false });
+
+      const regenerated = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp: new RulesyncMcp({
+          relativeDirPath: ".rulesync",
+          relativeFilePath: ".mcp.json",
+          fileContent: canonical.getFileContent(),
+        }).forTarget({ toolTarget: "hermesagent" }),
+        global: true,
+      });
+      const servers = getMcpServers(regenerated.getFileContent());
+
+      expect(servers.watcher?.events).toBe(true);
+      expect(servers.watcher?.lazy).toBe(true);
+      expect(servers.quiet?.events).toBe(false);
+    });
+
+    it("drops an events value Hermes cannot read as on/off, with a warning (issue #2414)", async () => {
+      const logger = createMockLogger();
+      const mcp = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        global: true,
+        logger,
+        rulesyncMcp: new RulesyncMcp({
+          relativeDirPath: ".rulesync",
+          relativeFilePath: ".mcp.json",
+          fileContent: JSON.stringify({
+            mcpServers: { watcher: { command: "watcher-mcp", events: "maybe", lazy: { on: 1 } } },
+          }),
+        }),
+      });
+      const server = getMcpServers(mcp.getFileContent()).watcher;
+
+      expect(server).not.toHaveProperty("events");
+      expect(server).not.toHaveProperty("lazy");
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('events "maybe"'));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("dropping lazy"));
+    });
+
+    it("strips nested prototype-pollution keys from tool_costs (issue #2414)", async () => {
+      const mcp = await HermesagentMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        global: true,
+        rulesyncMcp: new RulesyncMcp({
+          relativeDirPath: ".rulesync",
+          relativeFilePath: ".mcp.json",
+          fileContent:
+            '{"mcpServers":{"render":{"command":"render-mcp","tool_costs":{"__proto__":{"polluted":true},"animate":{"credits":3,"__proto__":{"polluted":true}}}}}}',
+        }),
+      });
+
+      const toolCosts = getMcpServers(mcp.getFileContent()).render?.tool_costs;
+      expect(toolCosts).toEqual({ animate: { credits: 3 } });
+      expect(mcp.getFileContent()).not.toContain("polluted");
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    });
+
+    it("drops a NaN spend_limit on import, with a warning (issue #2414)", () => {
+      const logger = createMockLogger();
+      const mcp = new HermesagentMcp({
+        outputRoot: testDir,
+        relativeDirPath: HERMES_DIR,
+        relativeFilePath: HERMES_FILE,
+        validate: false,
+        logger,
+        fileContent: [
+          "mcp_servers:",
+          "  render:",
+          "    command: render-mcp",
+          "    spend_limit: .nan",
+          "    cost_unit: tokens",
+          "",
+        ].join("\n"),
+        global: true,
+      });
+
+      const imported = JSON.parse(mcp.toRulesyncMcp().getFileContent());
+      expect(imported.hermesagent.mcpServers.render).not.toHaveProperty("spend_limit");
+      expect(imported.hermesagent.mcpServers.render.cost_unit).toBe("tokens");
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("spend_limit NaN"));
     });
 
     it("writes transport: sse for an sse server spelled with the httpUrl alias", async () => {

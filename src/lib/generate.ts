@@ -22,6 +22,7 @@ import {
   activateHermesProjectPlugins,
   type HermesProjectPluginName,
 } from "../features/shared/hermes-project-plugin-activation.js";
+import { withRulesyncSkillCache } from "../features/skills/rulesync-skill-cache.js";
 import { RulesyncSkill } from "../features/skills/rulesync-skill.js";
 import { SkillsProcessor } from "../features/skills/skills-processor.js";
 import { RulesyncSubagent } from "../features/subagents/rulesync-subagent.js";
@@ -54,6 +55,7 @@ import {
 import type { FeatureGenerateResult } from "../utils/result.js";
 import { resolveToolOutputRoot } from "../utils/tool-output-root.js";
 import { resetRunWarningState } from "../utils/warned-once.js";
+import { withWriteLandingCache } from "../utils/write-landing-cache.js";
 import { createFoldRootOverwriteWatch } from "./fold-root-overwrite-watch.js";
 import {
   createOrphanSweepPlan,
@@ -586,7 +588,7 @@ export async function inspectInputRoots(inputRoots: readonly string[]): Promise<
   };
 }
 
-export type GenerationStepId =
+type GenerationStepId =
   | "ignore"
   | "mcp"
   | "commands"
@@ -895,6 +897,18 @@ async function collectHermesProjectPluginNames({
  * @throws Error if generation fails
  */
 export async function generate(params: {
+  config: Config;
+  logger: Logger;
+}): Promise<GenerateResult> {
+  // Every write is checked against links on its way, and those checks look up
+  // the same ancestor directories over and over; one run shares what it found.
+  // Every target loads the same source skills too, so the run loads each once.
+  return await withWriteLandingCache(() =>
+    withRulesyncSkillCache(() => generateInWriteLandingScope(params)),
+  );
+}
+
+async function generateInWriteLandingScope(params: {
   config: Config;
   logger: Logger;
 }): Promise<GenerateResult> {
@@ -1508,191 +1522,159 @@ async function generateIgnoreCore(params: {
   return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
 }
 
-async function generateMcpCore(params: {
+type FileFeatureProcessorOptions = {
+  outputRoot: string;
+  inputRoots: ReturnType<Config["getInputRoots"]>;
+  toolTarget: ToolTarget;
+  global: boolean;
+  dryRun: boolean;
+  logger: Logger;
+};
+
+/**
+ * The generation loop of a single-file feature that has no step of its own:
+ * warn about the targets it cannot serve, then for every supported target that
+ * enables it, and every output root of that target, load the rulesync source,
+ * convert, write and queue the `--delete` sweep. The features differ only in
+ * which processor they build and the options it takes beyond the shared ones.
+ */
+async function generateFileFeatureCore(params: {
   config: Config;
   logger: Logger;
   sweepPlan: OrphanSweepPlan;
+  featureName: Feature;
+  supportedTargets: ToolTarget[];
+  simulatedTargets?: ToolTarget[];
+  createProcessor: (options: FileFeatureProcessorOptions) => FeatureProcessor;
 }): Promise<FeatureGenerateResult> {
-  const { config, logger, sweepPlan } = params;
+  const {
+    config,
+    logger,
+    sweepPlan,
+    featureName,
+    supportedTargets,
+    simulatedTargets,
+    createProcessor,
+  } = params;
 
   let totalCount = 0;
   const allPaths: string[] = [];
   let hasDiff = false;
   let sourceLoadFailed = false;
 
-  const supportedMcpTargets = McpProcessor.getToolTargets({ global: config.getGlobal() });
-  const toolTargets = intersection(config.getTargets(), supportedMcpTargets);
-  warnUnsupportedTargets({
-    config,
-    supportedTargets: supportedMcpTargets,
+  const toolTargets = intersection(config.getTargets(), supportedTargets);
+  warnUnsupportedTargets({ config, supportedTargets, simulatedTargets, featureName, logger });
+
+  for (const toolTarget of toolTargets) {
+    for (const outputRoot of config.getOutputRoots(toolTarget)) {
+      // Check if the feature is enabled for this specific target
+      if (!config.getFeatures(toolTarget).includes(featureName)) {
+        continue;
+      }
+
+      const processor = createProcessor({
+        outputRoot: resolveToolOutputRoot({
+          outputRoot,
+          toolTarget,
+          global: config.getGlobal(),
+        }),
+        inputRoots: config.getInputRoots(),
+        toolTarget,
+        global: config.getGlobal(),
+        dryRun: config.isPreviewMode(),
+        logger,
+      });
+
+      const rulesyncFiles = await processor.loadRulesyncFiles();
+      const result = await processFeatureWithRulesyncFiles({
+        config,
+        processor,
+        rulesyncFiles,
+        sweepPlan,
+      });
+
+      totalCount += result.count;
+      allPaths.push(...result.paths);
+      if (result.hasDiff) hasDiff = true;
+      if (result.sourceLoadFailed) sourceLoadFailed = true;
+    }
+  }
+
+  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
+}
+
+type FeatureCoreParams = {
+  config: Config;
+  logger: Logger;
+  sweepPlan: OrphanSweepPlan;
+};
+
+function generateMcpCore(params: FeatureCoreParams): Promise<FeatureGenerateResult> {
+  const { config } = params;
+  return generateFileFeatureCore({
+    ...params,
     featureName: "mcp",
-    logger,
+    supportedTargets: McpProcessor.getToolTargets({ global: config.getGlobal() }),
+    createProcessor: (options) =>
+      new McpProcessor({
+        ...options,
+        featureOptions: config.getFeatureOptions(options.toolTarget, "mcp"),
+      }),
   });
-
-  for (const toolTarget of toolTargets) {
-    for (const outputRoot of config.getOutputRoots(toolTarget)) {
-      // Check if mcp feature is enabled for this specific target
-      if (!config.getFeatures(toolTarget).includes("mcp")) {
-        continue;
-      }
-
-      const processor = new McpProcessor({
-        outputRoot: resolveToolOutputRoot({
-          outputRoot,
-          toolTarget,
-          global: config.getGlobal(),
-        }),
-        inputRoots: config.getInputRoots(),
-        toolTarget: toolTarget,
-        global: config.getGlobal(),
-        dryRun: config.isPreviewMode(),
-        logger,
-      });
-
-      const rulesyncFiles = await processor.loadRulesyncFiles();
-      const result = await processFeatureWithRulesyncFiles({
-        config,
-        processor,
-        rulesyncFiles,
-        sweepPlan,
-      });
-
-      totalCount += result.count;
-      allPaths.push(...result.paths);
-      if (result.hasDiff) hasDiff = true;
-      if (result.sourceLoadFailed) sourceLoadFailed = true;
-    }
-  }
-
-  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
 }
 
-async function generateCommandsCore(params: {
-  config: Config;
-  logger: Logger;
-  sweepPlan: OrphanSweepPlan;
-}): Promise<FeatureGenerateResult> {
-  const { config, logger, sweepPlan } = params;
-
-  let totalCount = 0;
-  const allPaths: string[] = [];
-  let hasDiff = false;
-  let sourceLoadFailed = false;
-
-  const supportedCommandsTargets = CommandsProcessor.getToolTargets({
-    global: config.getGlobal(),
-    includeSimulated: config.getSimulateCommands(),
-  });
-  const toolTargets = intersection(config.getTargets(), supportedCommandsTargets);
-  warnUnsupportedTargets({
-    config,
-    supportedTargets: supportedCommandsTargets,
-    simulatedTargets: CommandsProcessor.getToolTargetsSimulated(),
+function generateCommandsCore(params: FeatureCoreParams): Promise<FeatureGenerateResult> {
+  const { config } = params;
+  return generateFileFeatureCore({
+    ...params,
     featureName: "commands",
-    logger,
-  });
-
-  for (const toolTarget of toolTargets) {
-    for (const outputRoot of config.getOutputRoots(toolTarget)) {
-      // Check if commands feature is enabled for this specific target
-      if (!config.getFeatures(toolTarget).includes("commands")) {
-        continue;
-      }
-
-      const processor = new CommandsProcessor({
-        outputRoot: resolveToolOutputRoot({
-          outputRoot,
-          toolTarget,
-          global: config.getGlobal(),
-        }),
-        inputRoots: config.getInputRoots(),
-        toolTarget: toolTarget,
-        global: config.getGlobal(),
-        dryRun: config.isPreviewMode(),
+    supportedTargets: CommandsProcessor.getToolTargets({
+      global: config.getGlobal(),
+      includeSimulated: config.getSimulateCommands(),
+    }),
+    simulatedTargets: CommandsProcessor.getToolTargetsSimulated(),
+    createProcessor: (options) =>
+      new CommandsProcessor({
+        ...options,
         flattenedCommandNaming: config.getFlattenedCommandNaming(),
-        logger,
-      });
-
-      const rulesyncFiles = await processor.loadRulesyncFiles();
-
-      const result = await processFeatureWithRulesyncFiles({
-        config,
-        processor,
-        rulesyncFiles,
-        sweepPlan,
-      });
-
-      totalCount += result.count;
-      allPaths.push(...result.paths);
-      if (result.hasDiff) hasDiff = true;
-      if (result.sourceLoadFailed) sourceLoadFailed = true;
-    }
-  }
-
-  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
+      }),
+  });
 }
 
-async function generateSubagentsCore(params: {
-  config: Config;
-  logger: Logger;
-  sweepPlan: OrphanSweepPlan;
-}): Promise<FeatureGenerateResult> {
-  const { config, logger, sweepPlan } = params;
-
-  let totalCount = 0;
-  const allPaths: string[] = [];
-  let hasDiff = false;
-  let sourceLoadFailed = false;
-
-  const supportedSubagentsTargets = SubagentsProcessor.getToolTargets({
-    global: config.getGlobal(),
-    includeSimulated: config.getSimulateSubagents(),
-  });
-  const toolTargets = intersection(config.getTargets(), supportedSubagentsTargets);
-  warnUnsupportedTargets({
-    config,
-    supportedTargets: supportedSubagentsTargets,
-    simulatedTargets: SubagentsProcessor.getToolTargetsSimulated(),
+function generateSubagentsCore(params: FeatureCoreParams): Promise<FeatureGenerateResult> {
+  const { config } = params;
+  return generateFileFeatureCore({
+    ...params,
     featureName: "subagents",
-    logger,
+    supportedTargets: SubagentsProcessor.getToolTargets({
+      global: config.getGlobal(),
+      includeSimulated: config.getSimulateSubagents(),
+    }),
+    simulatedTargets: SubagentsProcessor.getToolTargetsSimulated(),
+    createProcessor: (options) =>
+      new SubagentsProcessor({ ...options, deleteOrphans: config.getDelete() }),
   });
+}
 
-  for (const toolTarget of toolTargets) {
-    for (const outputRoot of config.getOutputRoots(toolTarget)) {
-      // Check if subagents feature is enabled for this specific target
-      if (!config.getFeatures(toolTarget).includes("subagents")) {
-        continue;
-      }
+function generateHooksCore(params: FeatureCoreParams): Promise<FeatureGenerateResult> {
+  const { config } = params;
+  return generateFileFeatureCore({
+    ...params,
+    featureName: "hooks",
+    supportedTargets: HooksProcessor.getToolTargets({ global: config.getGlobal() }),
+    createProcessor: (options) =>
+      new HooksProcessor({ ...options, preserveUnownedHooks: config.getPreserveUnownedHooks() }),
+  });
+}
 
-      const processor = new SubagentsProcessor({
-        outputRoot: resolveToolOutputRoot({
-          outputRoot,
-          toolTarget,
-          global: config.getGlobal(),
-        }),
-        inputRoots: config.getInputRoots(),
-        toolTarget: toolTarget,
-        global: config.getGlobal(),
-        dryRun: config.isPreviewMode(),
-        logger,
-      });
-
-      const rulesyncFiles = await processor.loadRulesyncFiles();
-      const result = await processFeatureWithRulesyncFiles({
-        config,
-        processor,
-        rulesyncFiles,
-        sweepPlan,
-      });
-
-      totalCount += result.count;
-      allPaths.push(...result.paths);
-      if (result.hasDiff) hasDiff = true;
-      if (result.sourceLoadFailed) sourceLoadFailed = true;
-    }
-  }
-
-  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
+function generateChecksCore(params: FeatureCoreParams): Promise<FeatureGenerateResult> {
+  const { config } = params;
+  return generateFileFeatureCore({
+    ...params,
+    featureName: "checks",
+    supportedTargets: ChecksProcessor.getToolTargets({ global: config.getGlobal() }),
+    createProcessor: (options) => new ChecksProcessor(options),
+  });
 }
 
 async function generateSkillsCore(params: {
@@ -1768,66 +1750,6 @@ async function generateSkillsCore(params: {
   return { count: totalCount, paths: allPaths, skills: allSkills, hasDiff, sourceLoadFailed };
 }
 
-async function generateHooksCore(params: {
-  config: Config;
-  logger: Logger;
-  sweepPlan: OrphanSweepPlan;
-}): Promise<FeatureGenerateResult> {
-  const { config, logger, sweepPlan } = params;
-
-  let totalCount = 0;
-  const allPaths: string[] = [];
-  let hasDiff = false;
-  let sourceLoadFailed = false;
-
-  const supportedHooksTargets = HooksProcessor.getToolTargets({ global: config.getGlobal() });
-  const toolTargets = intersection(config.getTargets(), supportedHooksTargets);
-  warnUnsupportedTargets({
-    config,
-    supportedTargets: supportedHooksTargets,
-    featureName: "hooks",
-    logger,
-  });
-
-  for (const toolTarget of toolTargets) {
-    for (const outputRoot of config.getOutputRoots(toolTarget)) {
-      // Check if hooks feature is enabled for this specific target
-      if (!config.getFeatures(toolTarget).includes("hooks")) {
-        continue;
-      }
-
-      const processor = new HooksProcessor({
-        outputRoot: resolveToolOutputRoot({
-          outputRoot,
-          toolTarget,
-          global: config.getGlobal(),
-        }),
-        inputRoots: config.getInputRoots(),
-        toolTarget,
-        global: config.getGlobal(),
-        dryRun: config.isPreviewMode(),
-        preserveUnownedHooks: config.getPreserveUnownedHooks(),
-        logger,
-      });
-
-      const rulesyncFiles = await processor.loadRulesyncFiles();
-      const result = await processFeatureWithRulesyncFiles({
-        config,
-        processor,
-        rulesyncFiles,
-        sweepPlan,
-      });
-
-      totalCount += result.count;
-      allPaths.push(...result.paths);
-      if (result.hasDiff) hasDiff = true;
-      if (result.sourceLoadFailed) sourceLoadFailed = true;
-    }
-  }
-
-  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
-}
-
 async function generatePermissionsCore(params: {
   config: Config;
   logger: Logger;
@@ -1892,65 +1814,6 @@ async function generatePermissionsCore(params: {
         );
         throw error;
       }
-    }
-  }
-
-  return { count: totalCount, paths: allPaths, hasDiff, sourceLoadFailed };
-}
-
-async function generateChecksCore(params: {
-  config: Config;
-  logger: Logger;
-  sweepPlan: OrphanSweepPlan;
-}): Promise<FeatureGenerateResult> {
-  const { config, logger, sweepPlan } = params;
-
-  let totalCount = 0;
-  const allPaths: string[] = [];
-  let hasDiff = false;
-  let sourceLoadFailed = false;
-
-  const supportedChecksTargets = ChecksProcessor.getToolTargets({ global: config.getGlobal() });
-  const toolTargets = intersection(config.getTargets(), supportedChecksTargets);
-  warnUnsupportedTargets({
-    config,
-    supportedTargets: supportedChecksTargets,
-    featureName: "checks",
-    logger,
-  });
-
-  for (const toolTarget of toolTargets) {
-    for (const outputRoot of config.getOutputRoots(toolTarget)) {
-      // Check if checks feature is enabled for this specific target
-      if (!config.getFeatures(toolTarget).includes("checks")) {
-        continue;
-      }
-
-      const processor = new ChecksProcessor({
-        outputRoot: resolveToolOutputRoot({
-          outputRoot,
-          toolTarget,
-          global: config.getGlobal(),
-        }),
-        inputRoots: config.getInputRoots(),
-        toolTarget: toolTarget,
-        global: config.getGlobal(),
-        dryRun: config.isPreviewMode(),
-        logger,
-      });
-
-      const rulesyncFiles = await processor.loadRulesyncFiles();
-      const result = await processFeatureWithRulesyncFiles({
-        config,
-        processor,
-        rulesyncFiles,
-        sweepPlan,
-      });
-
-      totalCount += result.count;
-      allPaths.push(...result.paths);
-      if (result.hasDiff) hasDiff = true;
-      if (result.sourceLoadFailed) sourceLoadFailed = true;
     }
   }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { ALL_FEATURES, type Feature } from "../types/features.js";
 import { GENERATION_STEP_GRAPH } from "./generate.js";
@@ -199,6 +199,11 @@ describe("shared-file write derivation", () => {
           "mcp",
           "permissions",
         ],
+        ".firebender/firebender.json": [
+          "ignore",
+          "mcp",
+          "subagents",
+        ],
         ".github/copilot/settings.json": [
           "hooks",
           "mcp",
@@ -313,6 +318,11 @@ describe("shared-file write derivation", () => {
           "hooks",
           "mcp",
           "permissions",
+        ],
+        "firebender.json": [
+          "ignore",
+          "mcp",
+          "subagents",
         ],
         "kilo.json": [
           "mcp",

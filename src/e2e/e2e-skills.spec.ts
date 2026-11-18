@@ -1,7 +1,7 @@
 import { symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   RULESYNC_HOOKS_RELATIVE_FILE_PATH,
@@ -52,12 +52,24 @@ const skillsGenerateTargets = [
     outputPath: join(".codewhale", "skills", "test-skill", "SKILL.md"),
   },
   {
+    target: "firebender",
+    outputPath: join(".firebender", "skills", "test-skill", "SKILL.md"),
+  },
+  {
     target: "commandcode",
     outputPath: join(".commandcode", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "qoder",
     outputPath: join(".qoder", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "xum",
+    outputPath: join(".xum", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "androidstudio",
+    outputPath: join(".android-studio", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "continue",
@@ -212,9 +224,8 @@ const skillsGenerateTargets = [
     outputPath: join(".agents", "skills", "test-skill", "SKILL.md"),
   },
   {
-    // GitLab Duo reads project skills from the repository-root `skills/` directory.
     target: "gitlabduo",
-    outputPath: join("skills", "test-skill", "SKILL.md"),
+    outputPath: join(".agents", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "takt",
@@ -243,6 +254,10 @@ const skillsGenerateTargets = [
   { target: "omp", outputPath: join(".omp", "skills", "test-skill", "SKILL.md") },
   {
     target: "opencode",
+    outputPath: join(".opencode", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "opencodev1",
     outputPath: join(".opencode", "skills", "test-skill", "SKILL.md"),
   },
   {
@@ -411,10 +426,19 @@ This is the test skill body content.
     { target: "cortexcode", orphanPath: join(".cortex", "skills", "orphan-skill", "SKILL.md") },
     { target: "codewhale", orphanPath: join(".codewhale", "skills", "orphan-skill", "SKILL.md") },
     {
+      target: "firebender",
+      orphanPath: join(".firebender", "skills", "orphan-skill", "SKILL.md"),
+    },
+    {
       target: "commandcode",
       orphanPath: join(".commandcode", "skills", "orphan-skill", "SKILL.md"),
     },
     { target: "qoder", orphanPath: join(".qoder", "skills", "orphan-skill", "SKILL.md") },
+    { target: "xum", orphanPath: join(".xum", "skills", "orphan-skill", "SKILL.md") },
+    {
+      target: "androidstudio",
+      orphanPath: join(".android-studio", "skills", "orphan-skill", "SKILL.md"),
+    },
     { target: "continue", orphanPath: join(".continue", "skills", "orphan-skill", "SKILL.md") },
     { target: "cursor", orphanPath: join(".cursor", "skills", "orphan-skill", "SKILL.md") },
     { target: "trae", orphanPath: join(".trae", "skills", "orphan-skill", "SKILL.md") },
@@ -477,7 +501,7 @@ This is the test skill body content.
     },
   );
 
-  it("should never sweep hand-authored gitlabduo skills from the committed root skills directory", async () => {
+  it("should never sweep hand-authored gitlabduo skills from the import-only root skills directory", async () => {
     const testDir = getTestDir();
 
     await writeFileContent(
@@ -495,9 +519,9 @@ This is the test skill body content.
 
     await runGenerate({ target: "gitlabduo", features: "skills", deleteFiles: true });
 
-    expect(await readFileContent(join(testDir, "skills", "test-skill", "SKILL.md"))).toContain(
-      "test skill body content",
-    );
+    expect(
+      await readFileContent(join(testDir, ".agents", "skills", "test-skill", "SKILL.md")),
+    ).toContain("test skill body content");
     expect(await readFileContent(handAuthoredPath)).toBe("# hand-authored\n");
   });
 });
@@ -515,20 +539,32 @@ describe("E2E: skills (import)", () => {
     { target: "cortexcode", sourcePath: join(".cortex", "skills", "test-skill", "SKILL.md") },
     { target: "codewhale", sourcePath: join(".codewhale", "skills", "test-skill", "SKILL.md") },
     {
+      target: "firebender",
+      sourcePath: join(".firebender", "skills", "test-skill", "SKILL.md"),
+    },
+    {
       target: "commandcode",
       sourcePath: join(".commandcode", "skills", "test-skill", "SKILL.md"),
     },
     { target: "qoder", sourcePath: join(".qoder", "skills", "test-skill", "SKILL.md") },
+    { target: "xum", sourcePath: join(".xum", "skills", "test-skill", "SKILL.md") },
+    {
+      target: "androidstudio",
+      sourcePath: join(".android-studio", "skills", "test-skill", "SKILL.md"),
+    },
     { target: "continue", sourcePath: join(".continue", "skills", "test-skill", "SKILL.md") },
     { target: "cursor", sourcePath: join(".cursor", "skills", "test-skill", "SKILL.md") },
     { target: "trae", sourcePath: join(".trae", "skills", "test-skill", "SKILL.md") },
     { target: "codexcli", sourcePath: join(".agents", "skills", "test-skill", "SKILL.md") },
     { target: "lettacode", sourcePath: join(".agents", "skills", "test-skill", "SKILL.md") },
+    { target: "gitlabduo", sourcePath: join(".agents", "skills", "test-skill", "SKILL.md") },
+    // GitLab Duo also reads the project-root `skills/`, imported but never written.
     { target: "gitlabduo", sourcePath: join("skills", "test-skill", "SKILL.md") },
     { target: "copilot", sourcePath: join(".github", "skills", "test-skill", "SKILL.md") },
     { target: "mimocode", sourcePath: join(".mimocode", "skill", "test-skill", "SKILL.md") },
     { target: "omp", sourcePath: join(".omp", "skills", "test-skill", "SKILL.md") },
     { target: "opencode", sourcePath: join(".opencode", "skill", "test-skill", "SKILL.md") },
+    { target: "opencodev1", sourcePath: join(".opencode", "skill", "test-skill", "SKILL.md") },
     { target: "deepagents", sourcePath: join(".deepagents", "skills", "test-skill", "SKILL.md") },
     { target: "cline", sourcePath: join(".cline", "skills", "test-skill", "SKILL.md") },
     { target: "codebuddy", sourcePath: join(".codebuddy", "skills", "test-skill", "SKILL.md") },
@@ -1143,12 +1179,24 @@ const skillsGlobalTargets = [
     outputPath: join(".codewhale", "skills", "test-skill", "SKILL.md"),
   },
   {
+    target: "firebender",
+    outputPath: join(".firebender", "skills", "test-skill", "SKILL.md"),
+  },
+  {
     target: "commandcode",
     outputPath: join(".commandcode", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "qoder",
     outputPath: join(".qoder", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "xum",
+    outputPath: join(".xum", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "androidstudio",
+    outputPath: join(".android-studio", "skills", "test-skill", "SKILL.md"),
   },
   {
     target: "continue",
@@ -1173,6 +1221,10 @@ const skillsGlobalTargets = [
   { target: "omp", outputPath: join(".omp", "agent", "skills", "test-skill", "SKILL.md") },
   {
     target: "opencode",
+    outputPath: join(".config", "opencode", "skills", "test-skill", "SKILL.md"),
+  },
+  {
+    target: "opencodev1",
     outputPath: join(".config", "opencode", "skills", "test-skill", "SKILL.md"),
   },
   {

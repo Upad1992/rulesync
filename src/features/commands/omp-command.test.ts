@@ -1,11 +1,10 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { OmpCommand } from "./omp-command.js";
 import { RulesyncCommand } from "./rulesync-command.js";
 
@@ -36,7 +35,6 @@ describe("OmpCommand", () => {
       relativeFilePath: "review.md",
       frontmatter: frontmatter as never,
       body: "Review $1",
-      fileContent: stringifyFrontmatter("Review $1", frontmatter),
     });
   };
 

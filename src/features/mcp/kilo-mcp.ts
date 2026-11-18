@@ -19,9 +19,12 @@ import type { Logger } from "../../utils/logger.js";
 import { isRecord } from "../../utils/type-guards.js";
 import {
   findKiloMcpToolKeyOwner,
-  kiloMcpToolPermissionKey,
   kiloPermissionToToolFilter,
 } from "../shared/kilo-mcp-tool-keys.js";
+import {
+  isBareOpencodeMcpServerPrefix,
+  opencodeMcpToolPermissionKey,
+} from "../shared/opencode-family-mcp-tool-keys.js";
 import {
   applySharedConfigPatch,
   sharedConfigFileKey,
@@ -41,6 +44,7 @@ import {
   resolveLocalMcpCommand,
   resolveRemoteMcpUrl,
   splitMcpServersByTransport,
+  skipServersWithEmptyEnabledTools,
   warnAndSkipMcpServer,
 } from "./mcp-transport.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
@@ -311,7 +315,20 @@ function convertFromKiloFormat(
     // Only the legacy map: it holds nothing but tool toggles, whereas a
     // `permission` key naming no listed server (`external_directory`, ...) is
     // far more likely a built-in permission than a filter for an unlisted server.
-    ...orphanMcpToolFiltersToRulesync(kiloMcp, tools),
+    // Keys a listed server owns under its sanitized name (a_b_read for server
+    // a.b) were split off above, and a bare sanitized prefix (a_b_) names no
+    // tool; left in, either would be split again at the first `_` into a
+    // phantom server a. A bare key is not managed, so generate keeps it.
+    ...orphanMcpToolFiltersToRulesync(
+      kiloMcp,
+      Object.fromEntries(
+        Object.entries(tools ?? {}).filter(
+          ([key]) =>
+            !findKiloMcpToolKeyOwner(key, serverNames) &&
+            !isBareOpencodeMcpServerPrefix({ key, serverNames }),
+        ),
+      ),
+    ),
   };
 }
 
@@ -335,7 +352,7 @@ function collectKiloServerToolPermissions(
   serverConfig: McpServerConfig,
 ): void {
   for (const tool of serverConfig.enabledTools ?? []) {
-    const key = kiloMcpToolPermissionKey(serverName, tool);
+    const key = opencodeMcpToolPermissionKey(serverName, tool);
     // Two servers can sanitize to the same key (`a.b` and `a_b`); a deny
     // another server already wrote must not be lifted by this allow.
     if (permission[key] !== "deny") {
@@ -343,7 +360,7 @@ function collectKiloServerToolPermissions(
     }
   }
   for (const tool of serverConfig.disabledTools ?? []) {
-    permission[kiloMcpToolPermissionKey(serverName, tool)] = "deny";
+    permission[opencodeMcpToolPermissionKey(serverName, tool)] = "deny";
   }
 }
 
@@ -605,7 +622,7 @@ function buildKiloMcpPermissionPatch({
         return (
           enabled === false &&
           owner !== undefined &&
-          toolPermissions[kiloMcpToolPermissionKey(owner.serverName, owner.toolName)] !== "deny"
+          toolPermissions[opencodeMcpToolPermissionKey(owner.serverName, owner.toolName)] !== "deny"
         );
       })
       .map(([key]) => key),
@@ -871,7 +888,11 @@ export class KiloMcp extends ToolMcp {
     const parsedExisting: unknown = parseJsonc(fileContent || "{}");
     const existingDocument = isRecord(parsedExisting) ? parsedExisting : {};
 
-    const mcpServers = rulesyncMcp.getMcpServers();
+    const mcpServers = skipServersWithEmptyEnabledTools({
+      mcpServers: rulesyncMcp.getMcpServers(),
+      toolName: "Kilo",
+      logger,
+    });
     const { mcp: convertedMcp, toolPermissions } = convertToKiloFormat(
       resolveKiloEnvVarRefs({ mcpServers, global, logger }),
       existingMcp,

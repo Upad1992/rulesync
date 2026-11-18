@@ -5,7 +5,7 @@ import {
   TAKT_DIR,
   TAKT_RUNTIME_CONFIG_FILE_NAME,
 } from "../../constants/takt-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { getHomeDirectory, readFileContentOrNull } from "../../utils/file.js";
@@ -18,9 +18,9 @@ import {
   TAKT_CONFIG_SHARED_FILE_KEY,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { CATCH_ALL_PATTERN } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -68,7 +68,8 @@ const TAKT_DEFAULT_COMPANION_ENABLED = false;
 
 // Takt's default-deny "workflow security policies": each admits one class of
 // user-supplied code (an Arpeggio module, a runtime-prepare script, a
-// workflow-declared command gate, a sync-conflict tool) or re-enables git hooks
+// workflow-declared command gate, a `system_inputs` `type: command` input, a
+// sync-conflict tool) or re-enables git hooks
 // and filters during Takt-managed commits. All are top-level keys of
 // `config.yaml` in both scopes, and all are routed through the `takt` override
 // because none maps onto a canonical permission category.
@@ -83,6 +84,9 @@ const TAKT_SECURITY_POLICIES: Record<string, readonly string[] | null> = {
   workflow_arpeggio: ["custom_data_source_modules", "custom_merge_inline_js", "custom_merge_files"],
   workflow_runtime_prepare: ["custom_scripts"],
   workflow_command_gates: ["custom_scripts"],
+  // Takt 0.74.0: admits `system_inputs` entries of `type: command`. Independent
+  // of `workflow_command_gates.custom_scripts`.
+  workflow_system_commands: ["custom_scripts"],
   sync_conflict_resolver: ["auto_approve_tools"],
   allow_git_hooks: null,
   allow_git_filters: null,
@@ -103,10 +107,6 @@ const TAKT_DEFAULT_PROVIDER = "claude-sdk";
 // with no `provider:` is what an earlier generate left behind, not a provider
 // choice, so it is not promoted to the active provider.
 const TAKT_LEGACY_DEFAULT_PROVIDER = "claude";
-
-// rulesync canonical catch-all pattern (Takt's mode is coarse, so only a
-// catch-all maps cleanly back on import).
-const CATCH_ALL_PATTERN = "*";
 
 /**
  * Permissions adapter for Takt (`.takt/config.yaml`).
@@ -176,12 +176,6 @@ export class TaktPermissions extends ToolPermissions {
       fileContent: params.fileContent ?? "",
     });
     this.runtimeFileContent = runtimeFileContent ?? "";
-  }
-
-  override isDeletable(): boolean {
-    // config.yaml holds other Takt settings, so it must never be removed
-    // wholesale; permission changes happen via an in-place merge instead.
-    return false;
   }
 
   static getSettablePaths(_options?: { global?: boolean }): ToolPermissionsSettablePaths {
@@ -283,7 +277,12 @@ export class TaktPermissions extends ToolPermissions {
     }
     const overrideProviderOptions = runtimeModeRefusesProviderOptions
       ? undefined
-      : authoredProviderOptions;
+      : dropUntrustedProviderOptions({
+          providerOptions: authoredProviderOptions,
+          global,
+          filePath,
+          logger,
+        });
 
     const authoredPolicies = pickSecurityPolicies(override, {
       filePath,
@@ -424,26 +423,6 @@ export class TaktPermissions extends ToolPermissions {
 
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify(result, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): TaktPermissions {
-    return new TaktPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global,
     });
   }
 }
@@ -1034,8 +1013,13 @@ async function readTaktRuntimeConfig({
 /**
  * Collapse a rulesync permissions config into Takt's single coarse mode.
  *
- * Precedence: any `deny` ⇒ `readonly`; else an `edit`/`write` `allow` ⇒ `edit`;
- * else a `bash` `allow` ⇒ `full`; else the safe default `readonly`.
+ * Precedence: any `deny` or `ask` ⇒ `readonly`; else an `edit`/`write` `allow`
+ * ⇒ `edit`; else a `bash` `allow` ⇒ `full`; else the safe default `readonly`.
+ *
+ * An `ask` restricts like a `deny` here: Takt's coarse modes have no prompting
+ * tier, so a mode derived from the allows beside it (`full` for `{"git *":
+ * "allow", "git push *": "ask"}`) would auto-approve what the ask should prompt
+ * for — the canonical order is `deny > ask > allow`.
  */
 function deriveTaktPermissionMode(config: PermissionsConfig): TaktPermissionMode {
   let hasEditAllow = false;
@@ -1043,7 +1027,7 @@ function deriveTaktPermissionMode(config: PermissionsConfig): TaktPermissionMode
 
   for (const [category, rules] of Object.entries(config.permission)) {
     for (const action of Object.values(rules)) {
-      if (action === "deny") {
+      if (action === "deny" || action === "ask") {
         return "readonly";
       }
       if (action === "allow") {
@@ -1080,6 +1064,127 @@ function taktModeToRulesyncConfig(mode: unknown): PermissionsConfig {
       // `readonly` and any unset/unknown mode.
       return { permission: { bash: { [CATCH_ALL_PATTERN]: "deny" } } };
   }
+}
+
+// Providers whose `provider_options.<provider>.base_url` Takt restricts to
+// loopback hosts when it comes from a project `.takt/config.yaml`.
+// https://github.com/nrslib/takt/blob/main/src/infra/config/providerOptions.ts
+const TAKT_BASE_URL_PROVIDERS = ["codex", "claude", "deepseek_harness"] as const;
+const TAKT_DEEPSEEK_HARNESS_KEY = "deepseek_harness";
+
+/** Mirrors Takt's `isLoopbackBaseUrl`: localhost, *.localhost, ::1 or 127.x.x.x. */
+function isLoopbackBaseUrl(value: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(value).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  ) {
+    return true;
+  }
+  const octets = hostname.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d+$/.test(octet) && Number(octet) <= 255)
+  );
+}
+
+/** The keys of one `provider_options.<provider>` entry Takt rejects in config.yaml. */
+function untrustedProviderOptionKeys({
+  provider,
+  options,
+  global,
+}: {
+  provider: string;
+  options: Record<string, unknown>;
+  global: boolean;
+}): string[] {
+  const keys: string[] = [];
+  if (provider === TAKT_DEEPSEEK_HARNESS_KEY) {
+    if (options.reasoning_effort !== undefined) {
+      keys.push("reasoning_effort");
+    }
+    // A non-array value is not a valid plugin list either way, so it is dropped
+    // rather than passed through to fail Takt's schema at startup.
+    const { plugins } = options;
+    if (!global && plugins !== undefined && (!Array.isArray(plugins) || plugins.length > 0)) {
+      keys.push("plugins");
+    }
+  }
+  const baseUrl = options.base_url;
+  if (
+    !global &&
+    (TAKT_BASE_URL_PROVIDERS as readonly string[]).includes(provider) &&
+    baseUrl !== undefined &&
+    (typeof baseUrl !== "string" || !isLoopbackBaseUrl(baseUrl))
+  ) {
+    keys.push("base_url");
+  }
+  return keys;
+}
+
+/**
+ * Drop the `provider_options` entries Takt refuses to load from `config.yaml`
+ * (it fails at startup with a `Configuration error`), warning for each:
+ *   - `deepseek_harness.reasoning_effort` in either scope — Takt accepts it only
+ *     in runtime profile options or `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_REASONING_EFFORT`.
+ *   - at project scope, a non-empty `deepseek_harness.plugins` (Takt 0.71.0+,
+ *     global config only) and a non-loopback `{codex,claude,deepseek_harness}.base_url`.
+ * https://github.com/nrslib/takt/blob/main/src/infra/config/providerOptions.ts
+ * https://github.com/nrslib/takt/blob/main/docs/configuration.md
+ */
+function dropUntrustedProviderOptions({
+  providerOptions,
+  global,
+  filePath,
+  logger,
+}: {
+  providerOptions: Record<string, unknown> | undefined;
+  global: boolean;
+  filePath: string;
+  logger?: Logger;
+}): Record<string, unknown> | undefined {
+  if (providerOptions === undefined) {
+    return undefined;
+  }
+  const dropped: string[] = [];
+  const result: Record<string, unknown> = {};
+  for (const [provider, options] of Object.entries(providerOptions)) {
+    if (!isPlainObject(options)) {
+      result[provider] = options;
+      continue;
+    }
+    const untrusted = untrustedProviderOptionKeys({ provider, options, global });
+    const kept = Object.fromEntries(
+      Object.entries(options).filter(([key]) => !untrusted.includes(key)),
+    );
+    dropped.push(...untrusted.map((key) => `${TAKT_PROVIDER_OPTIONS_KEY}.${provider}.${key}`));
+    // A provider left empty only because of the drops above is omitted.
+    if (Object.keys(kept).length > 0 || Object.keys(options).length === 0) {
+      result[provider] = kept;
+    }
+  }
+  if (dropped.length === 0) {
+    return providerOptions;
+  }
+  logger?.warn(
+    `Takt permissions: not writing ${dropped.map((key) => `"${key}"`).join(", ")} to ${filePath} ` +
+      `because Takt refuses to load ${dropped.length === 1 ? "it" : "them"} from ` +
+      `${global ? "config.yaml" : "a project config.yaml"} and fails at startup with a ` +
+      `"Configuration error". Set non-loopback base URLs and DeepSeek Harness plugins in the ` +
+      `global ~/.takt/config.yaml (or the TAKT_PROVIDER_OPTIONS_* environment variables), and ` +
+      `DeepSeek Harness reasoning_effort in a runtime.yaml profile's options or ` +
+      `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_REASONING_EFFORT, then remove them from the ` +
+      `\`takt\` block of the rulesync source.`,
+  );
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /**

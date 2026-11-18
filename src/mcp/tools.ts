@@ -21,15 +21,23 @@ import {
   RulesyncSubagentFrontmatterSchema,
 } from "../features/subagents/rulesync-subagent.js";
 import { withWarnOnceScope } from "../utils/warned-once.js";
+import { addOptionsSchema, addTools } from "./add.js";
 import { checkTools } from "./checks.js";
 import { commandTools } from "./commands.js";
 import { convertOptionsSchema, convertTools } from "./convert.js";
+import { docsOptionsSchema, docsTools } from "./docs.js";
+import { doctorOptionsSchema, doctorTools } from "./doctor.js";
+import { fetchOptionsSchema, fetchTools } from "./fetch.js";
 import { generateOptionsSchema, generateTools } from "./generate.js";
+import { gitignoreOptionsSchema, gitignoreTools } from "./gitignore.js";
 import { hooksTools } from "./hooks.js";
 import { ignoreTools } from "./ignore.js";
 import { importOptionsSchema, importTools } from "./import.js";
+import { initTools } from "./init.js";
+import { installOptionsSchema, installTools } from "./install.js";
 import { mcpTools } from "./mcp.js";
 import { permissionsTools } from "./permissions.js";
+import { releaseNotesOptionsSchema, releaseNotesTools } from "./release-notes.js";
 import { ruleTools } from "./rules.js";
 import { skillTools } from "./skills.js";
 import { subagentTools } from "./subagents.js";
@@ -47,6 +55,14 @@ const rulesyncFeatureSchema = z.enum([
   "generate",
   "import",
   "convert",
+  "init",
+  "gitignore",
+  "add",
+  "fetch",
+  "install",
+  "doctor",
+  "docs",
+  "releaseNotes",
 ]);
 
 const rulesyncOperationSchema = z.enum(["list", "get", "put", "delete", "run"]);
@@ -68,14 +84,21 @@ const rulesyncToolSchema = z.object({
   generateOptions: z.optional(generateOptionsSchema),
   importOptions: z.optional(importOptionsSchema),
   convertOptions: z.optional(convertOptionsSchema),
+  gitignoreOptions: z.optional(gitignoreOptionsSchema),
+  addOptions: z.optional(addOptionsSchema),
+  fetchOptions: z.optional(fetchOptionsSchema),
+  installOptions: z.optional(installOptionsSchema),
+  doctorOptions: z.optional(doctorOptionsSchema),
+  docsOptions: z.optional(docsOptionsSchema),
+  releaseNotesOptions: z.optional(releaseNotesOptionsSchema),
 });
 
 type RulesyncFeature = z.infer<typeof rulesyncFeatureSchema>;
 type RulesyncOperation = z.infer<typeof rulesyncOperationSchema>;
 type RulesyncToolArgs = z.infer<typeof rulesyncToolSchema>;
-type RulesyncFrontmatterFeature = Exclude<
+type RulesyncFrontmatterFeature = Extract<
   RulesyncFeature,
-  "ignore" | "mcp" | "permissions" | "hooks" | "generate" | "import" | "convert"
+  "rule" | "command" | "subagent" | "skill" | "check"
 >;
 type RulesyncFrontmatterByFeature = {
   rule: RulesyncRuleFrontmatter;
@@ -85,7 +108,7 @@ type RulesyncFrontmatterByFeature = {
   check: RulesyncCheckFrontmatter;
 };
 
-const supportedOperationsByFeature: Record<RulesyncFeature, RulesyncOperation[]> = {
+export const supportedOperationsByFeature: Record<RulesyncFeature, RulesyncOperation[]> = {
   rule: ["list", "get", "put", "delete"],
   command: ["list", "get", "put", "delete"],
   subagent: ["list", "get", "put", "delete"],
@@ -98,6 +121,14 @@ const supportedOperationsByFeature: Record<RulesyncFeature, RulesyncOperation[]>
   generate: ["run"],
   import: ["run"],
   convert: ["run"],
+  init: ["run"],
+  gitignore: ["run"],
+  add: ["run"],
+  fetch: ["run"],
+  install: ["run"],
+  doctor: ["run"],
+  docs: ["run"],
+  releaseNotes: ["run"],
 };
 
 function assertSupported({
@@ -126,72 +157,26 @@ function requireTargetPath({ targetPathFromCwd, feature, operation }: RulesyncTo
   return targetPathFromCwd;
 }
 
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: "rule";
-  frontmatter: unknown;
-}): RulesyncRuleFrontmatter;
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: "command";
-  frontmatter: unknown;
-}): RulesyncCommandFrontmatter;
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: "subagent";
-  frontmatter: unknown;
-}): RulesyncSubagentFrontmatter;
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: "skill";
-  frontmatter: unknown;
-}): RulesyncSkillFrontmatter;
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: "check";
-  frontmatter: unknown;
-}): RulesyncCheckFrontmatter;
+const frontmatterParserByFeature: {
+  [Feature in RulesyncFrontmatterFeature]: (
+    frontmatter: unknown,
+  ) => RulesyncFrontmatterByFeature[Feature];
+} = {
+  rule: (frontmatter) => RulesyncRuleFrontmatterSchema.parse(frontmatter),
+  command: (frontmatter) => RulesyncCommandFrontmatterSchema.parse(frontmatter),
+  subagent: (frontmatter) => RulesyncSubagentFrontmatterSchema.parse(frontmatter),
+  skill: (frontmatter) => RulesyncSkillFrontmatterSchema.parse(frontmatter),
+  check: (frontmatter) => RulesyncCheckFrontmatterSchema.parse(frontmatter),
+};
+
 function parseFrontmatter<Feature extends RulesyncFrontmatterFeature>({
   feature,
   frontmatter,
 }: {
   feature: Feature;
   frontmatter: unknown;
-}): RulesyncFrontmatterByFeature[Feature];
-function parseFrontmatter({
-  feature,
-  frontmatter,
-}: {
-  feature: RulesyncFrontmatterFeature;
-  frontmatter: unknown;
-}): RulesyncFrontmatterByFeature[RulesyncFrontmatterFeature] {
-  switch (feature) {
-    case "rule": {
-      return RulesyncRuleFrontmatterSchema.parse(frontmatter);
-    }
-    case "command": {
-      return RulesyncCommandFrontmatterSchema.parse(frontmatter);
-    }
-    case "subagent": {
-      return RulesyncSubagentFrontmatterSchema.parse(frontmatter);
-    }
-    case "skill": {
-      return RulesyncSkillFrontmatterSchema.parse(frontmatter);
-    }
-    case "check": {
-      return RulesyncCheckFrontmatterSchema.parse(frontmatter);
-    }
-  }
+}): RulesyncFrontmatterByFeature[Feature] {
+  return frontmatterParserByFeature[feature](frontmatter);
 }
 
 function ensureBody({ body, feature, operation }: RulesyncToolArgs): string {
@@ -216,82 +201,104 @@ function requireContent({
   return content;
 }
 
-function executeRule(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "list") {
-    return ruleTools.listRules.execute();
-  }
+/**
+ * Builds the list/get/put/delete dispatcher for a feature stored as Markdown
+ * files with frontmatter (rules, commands, subagents and checks).
+ */
+function createFrontmatterFileExecutor<
+  Feature extends Exclude<RulesyncFrontmatterFeature, "skill">,
+>({
+  feature,
+  list,
+  get,
+  put,
+  remove,
+}: {
+  feature: Feature;
+  list: () => Promise<string>;
+  get: (args: { relativePathFromCwd: string }) => Promise<string>;
+  put: (args: {
+    relativePathFromCwd: string;
+    frontmatter: RulesyncFrontmatterByFeature[Feature];
+    body: string;
+  }) => Promise<string>;
+  remove: (args: { relativePathFromCwd: string }) => Promise<string>;
+}): (parsed: RulesyncToolArgs) => Promise<string> {
+  return (parsed) => {
+    if (parsed.operation === "list") {
+      return list();
+    }
 
-  if (parsed.operation === "get") {
-    return ruleTools.getRule.execute({ relativePathFromCwd: requireTargetPath(parsed) });
-  }
+    if (parsed.operation === "get") {
+      return get({ relativePathFromCwd: requireTargetPath(parsed) });
+    }
 
-  if (parsed.operation === "put") {
-    return ruleTools.putRule.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-      frontmatter: parseFrontmatter({
-        feature: "rule",
-        frontmatter: parsed.frontmatter ?? {},
-      }),
-      body: ensureBody(parsed),
-    });
-  }
+    if (parsed.operation === "put") {
+      return put({
+        relativePathFromCwd: requireTargetPath(parsed),
+        frontmatter: parseFrontmatter({
+          feature,
+          frontmatter: parsed.frontmatter ?? {},
+        }),
+        body: ensureBody(parsed),
+      });
+    }
 
-  return ruleTools.deleteRule.execute({ relativePathFromCwd: requireTargetPath(parsed) });
+    return remove({ relativePathFromCwd: requireTargetPath(parsed) });
+  };
 }
 
-function executeCommand(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "list") {
-    return commandTools.listCommands.execute();
-  }
+/**
+ * Builds the get/put/delete dispatcher for a feature stored as a single file
+ * whose whole content is passed through (ignore, MCP, permissions and hooks).
+ */
+function createContentFileExecutor({
+  feature,
+  get,
+  put,
+  remove,
+}: {
+  feature: RulesyncFeature;
+  get: () => Promise<string>;
+  put: (args: { content: string }) => Promise<string>;
+  remove: () => Promise<string>;
+}): (parsed: RulesyncToolArgs) => Promise<string> {
+  return (parsed) => {
+    if (parsed.operation === "get") {
+      return get();
+    }
 
-  if (parsed.operation === "get") {
-    return commandTools.getCommand.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-    });
-  }
+    if (parsed.operation === "put") {
+      return put({ content: requireContent({ content: parsed.content, feature }) });
+    }
 
-  if (parsed.operation === "put") {
-    return commandTools.putCommand.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-      frontmatter: parseFrontmatter({
-        feature: "command",
-        frontmatter: parsed.frontmatter ?? {},
-      }),
-      body: ensureBody(parsed),
-    });
-  }
-
-  return commandTools.deleteCommand.execute({
-    relativePathFromCwd: requireTargetPath(parsed),
-  });
+    return remove();
+  };
 }
 
-function executeSubagent(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "list") {
-    return subagentTools.listSubagents.execute();
-  }
+const executeRule = createFrontmatterFileExecutor({
+  feature: "rule",
+  list: ruleTools.listRules.execute,
+  get: ruleTools.getRule.execute,
+  put: ruleTools.putRule.execute,
+  remove: ruleTools.deleteRule.execute,
+});
 
-  if (parsed.operation === "get") {
-    return subagentTools.getSubagent.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-    });
-  }
+const executeCommand = createFrontmatterFileExecutor({
+  feature: "command",
+  list: commandTools.listCommands.execute,
+  get: commandTools.getCommand.execute,
+  put: commandTools.putCommand.execute,
+  remove: commandTools.deleteCommand.execute,
+});
 
-  if (parsed.operation === "put") {
-    return subagentTools.putSubagent.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-      frontmatter: parseFrontmatter({
-        feature: "subagent",
-        frontmatter: parsed.frontmatter ?? {},
-      }),
-      body: ensureBody(parsed),
-    });
-  }
-
-  return subagentTools.deleteSubagent.execute({
-    relativePathFromCwd: requireTargetPath(parsed),
-  });
-}
+const executeSubagent = createFrontmatterFileExecutor({
+  feature: "subagent",
+  list: subagentTools.listSubagents.execute,
+  get: subagentTools.getSubagent.execute,
+  put: subagentTools.putSubagent.execute,
+  remove: subagentTools.deleteSubagent.execute,
+});
 
 function executeSkill(parsed: RulesyncToolArgs) {
   if (parsed.operation === "list") {
@@ -319,88 +326,41 @@ function executeSkill(parsed: RulesyncToolArgs) {
   });
 }
 
-function executeCheck(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "list") {
-    return checkTools.listChecks.execute();
-  }
+const executeCheck = createFrontmatterFileExecutor({
+  feature: "check",
+  list: checkTools.listChecks.execute,
+  get: checkTools.getCheck.execute,
+  put: checkTools.putCheck.execute,
+  remove: checkTools.deleteCheck.execute,
+});
 
-  if (parsed.operation === "get") {
-    return checkTools.getCheck.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-    });
-  }
+const executeIgnore = createContentFileExecutor({
+  feature: "ignore",
+  get: ignoreTools.getIgnoreFile.execute,
+  put: ignoreTools.putIgnoreFile.execute,
+  remove: ignoreTools.deleteIgnoreFile.execute,
+});
 
-  if (parsed.operation === "put") {
-    return checkTools.putCheck.execute({
-      relativePathFromCwd: requireTargetPath(parsed),
-      frontmatter: parseFrontmatter({
-        feature: "check",
-        frontmatter: parsed.frontmatter ?? {},
-      }),
-      body: ensureBody(parsed),
-    });
-  }
+const executeMcp = createContentFileExecutor({
+  feature: "mcp",
+  get: mcpTools.getFile.execute,
+  put: mcpTools.putFile.execute,
+  remove: mcpTools.deleteFile.execute,
+});
 
-  return checkTools.deleteCheck.execute({
-    relativePathFromCwd: requireTargetPath(parsed),
-  });
-}
+const executePermissions = createContentFileExecutor({
+  feature: "permissions",
+  get: permissionsTools.getFile.execute,
+  put: permissionsTools.putFile.execute,
+  remove: permissionsTools.deleteFile.execute,
+});
 
-function executeIgnore(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "get") {
-    return ignoreTools.getIgnoreFile.execute();
-  }
-
-  if (parsed.operation === "put") {
-    return ignoreTools.putIgnoreFile.execute({
-      content: requireContent({ content: parsed.content, feature: "ignore" }),
-    });
-  }
-
-  return ignoreTools.deleteIgnoreFile.execute();
-}
-
-function executeMcp(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "get") {
-    return mcpTools.getMcpFile.execute();
-  }
-
-  if (parsed.operation === "put") {
-    return mcpTools.putMcpFile.execute({
-      content: requireContent({ content: parsed.content, feature: "mcp" }),
-    });
-  }
-
-  return mcpTools.deleteMcpFile.execute();
-}
-
-function executePermissions(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "get") {
-    return permissionsTools.getPermissionsFile.execute();
-  }
-
-  if (parsed.operation === "put") {
-    return permissionsTools.putPermissionsFile.execute({
-      content: requireContent({ content: parsed.content, feature: "permissions" }),
-    });
-  }
-
-  return permissionsTools.deletePermissionsFile.execute();
-}
-
-function executeHooks(parsed: RulesyncToolArgs) {
-  if (parsed.operation === "get") {
-    return hooksTools.getHooksFile.execute();
-  }
-
-  if (parsed.operation === "put") {
-    return hooksTools.putHooksFile.execute({
-      content: requireContent({ content: parsed.content, feature: "hooks" }),
-    });
-  }
-
-  return hooksTools.deleteHooksFile.execute();
-}
+const executeHooks = createContentFileExecutor({
+  feature: "hooks",
+  get: hooksTools.getFile.execute,
+  put: hooksTools.putFile.execute,
+  remove: hooksTools.deleteFile.execute,
+});
 
 function executeGenerate(parsed: RulesyncToolArgs) {
   // Only "run" operation is supported for generate feature
@@ -423,6 +383,13 @@ function executeConvert(parsed: RulesyncToolArgs) {
   return convertTools.executeConvert.execute(parsed.convertOptions);
 }
 
+function requireOptions<T>({ options, name }: { options: T | undefined; name: string }): T {
+  if (!options) {
+    throw new Error(`${name} is required for this feature`);
+  }
+  return options;
+}
+
 const featureExecutors: Record<RulesyncFeature, (parsed: RulesyncToolArgs) => Promise<string>> = {
   rule: executeRule,
   command: executeCommand,
@@ -436,12 +403,28 @@ const featureExecutors: Record<RulesyncFeature, (parsed: RulesyncToolArgs) => Pr
   generate: executeGenerate,
   import: executeImport,
   convert: executeConvert,
+  // The features below support only the "run" operation.
+  init: () => initTools.executeInit.execute(),
+  gitignore: (parsed) => gitignoreTools.executeGitignore.execute(parsed.gitignoreOptions ?? {}),
+  add: (parsed) =>
+    addTools.executeAdd.execute(requireOptions({ options: parsed.addOptions, name: "addOptions" })),
+  fetch: (parsed) =>
+    fetchTools.executeFetch.execute(
+      requireOptions({ options: parsed.fetchOptions, name: "fetchOptions" }),
+    ),
+  install: (parsed) => installTools.executeInstall.execute(parsed.installOptions ?? {}),
+  doctor: (parsed) => doctorTools.executeDoctor.execute(parsed.doctorOptions ?? {}),
+  docs: (parsed) => docsTools.executeDocs.execute(parsed.docsOptions ?? {}),
+  releaseNotes: (parsed) =>
+    releaseNotesTools.executeReleaseNotes.execute(
+      requireOptions({ options: parsed.releaseNotesOptions, name: "releaseNotesOptions" }),
+    ),
 };
 
 export const rulesyncTool = {
   name: "rulesyncTool",
   description:
-    'Manage Rulesync files through a single MCP tool. Features: rule/command/subagent/skill/check support list/get/put/delete; ignore/mcp/permissions/hooks support get/put/delete only; generate supports run only; import supports run only; convert supports run only. Parameters: list requires no targetPathFromCwd (lists all items); get/delete require targetPathFromCwd; put requires targetPathFromCwd, frontmatter, and body (or content for ignore/mcp/permissions/hooks); generate/run uses generateOptions to configure generation; import/run uses importOptions to configure import; convert/run uses convertOptions to configure conversion. skill otherFiles entries accept an optional encoding ("utf-8" by default, "base64" for binary files) and are returned with the encoding they require.',
+    'Manage Rulesync files and run rulesync commands through a single MCP tool. Features: rule/command/subagent/skill/check support list/get/put/delete; ignore/mcp/permissions/hooks support get/put/delete only; generate/import/convert/init/gitignore/add/fetch/install/doctor/docs/releaseNotes support run only. Parameters: list requires no targetPathFromCwd (lists all items); get/delete require targetPathFromCwd; put requires targetPathFromCwd, frontmatter, and body (or content for ignore/mcp/permissions/hooks); generate/run uses generateOptions to configure generation; import/run uses importOptions to configure import; convert/run uses convertOptions to configure conversion; init/run takes no options; gitignore/run uses optional gitignoreOptions; add/run requires addOptions (source); fetch/run requires fetchOptions (source); install/run uses optional installOptions (outdated: true only reports lockfile status); doctor/run uses optional doctorOptions and returns diagnostics with severities; docs/run uses optional docsOptions (document, search, or neither to list documents); releaseNotes/run requires releaseNotesOptions (source as owner/repo). Path options (configPath, output) must stay inside the project; GitHub tokens are read from GITHUB_TOKEN/GH_TOKEN. skill otherFiles entries accept an optional encoding ("utf-8" by default, "base64" for binary files) and are returned with the encoding they require.',
   parameters: rulesyncToolSchema,
   // Each call gets its own once-per-run bookkeeping. The server is long-lived
   // and does not serialize requests, so without a scope the process-wide record
@@ -454,11 +437,6 @@ export const rulesyncTool = {
 
       assertSupported({ feature: parsed.feature, operation: parsed.operation });
 
-      const executor = featureExecutors[parsed.feature];
-      if (!executor) {
-        throw new Error(`Unknown feature: ${parsed.feature}`);
-      }
-
-      return await executor(parsed);
+      return await featureExecutors[parsed.feature](parsed);
     }),
 } as const;

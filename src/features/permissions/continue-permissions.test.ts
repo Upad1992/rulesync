@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { dump, load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -485,14 +485,20 @@ describe("ContinuePermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("is not deletable", () => {
-      const perms = ContinuePermissions.forDeletion({
-        outputRoot: testDir,
+  describe("names that match Object.prototype members on import", () => {
+    it("imports a tool and a pattern named like a prototype member into their own buckets", () => {
+      const perms = new ContinuePermissions({
         relativeDirPath: ".continue",
         relativeFilePath: "permissions.yaml",
+        fileContent: dump({ allow: ["toString", "Bash(toString)"] }),
       });
-      expect(perms.isDeletable()).toBe(false);
+
+      expect(perms.toRulesyncPermissions().getJson().permission).toEqual({
+        toString: { "*": "allow" },
+        bash: { toString: "allow" },
+      });
+      expect(Object.hasOwn(Object.prototype.toString, "*")).toBe(false);
+      expect(Object.hasOwn(Object.prototype.toString, "toString")).toBe(false);
     });
   });
 });

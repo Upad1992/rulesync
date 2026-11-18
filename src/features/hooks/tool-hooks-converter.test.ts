@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import type { HooksConfig } from "../../types/hooks.js";
@@ -217,6 +217,91 @@ describe("toolHooksToCanonical", () => {
 });
 
 describe("canonicalToToolHooks", () => {
+  describe("string passthrough length warnings", () => {
+    const converterConfig: ToolHooksConverterConfig = {
+      ...BASE_CONFIG,
+      supportedHookTypes: new Set(["command", "prompt"]),
+      stringPassthroughFields: [
+        { canonical: "rewakeSummary", tool: "summary", commandOnly: true, maxLength: 3 },
+      ],
+    };
+
+    it("warns about raw length by default without truncating the emitted value", () => {
+      const { hook, logger } = emitHook({
+        definition: { command: "run.sh", rewakeSummary: "  x  " },
+        converterConfig,
+      });
+
+      expect(hook?.summary).toBe("  x  ");
+      expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('is 5 characters long; this tool caps "summary" at 3 characters'),
+      );
+    });
+
+    it.each([
+      { value: "  x  ", warns: false },
+      { value: " x   y ", warns: false },
+      { value: " xx   y ", warns: true },
+    ])("can measure collapsed whitespace without changing output: %j", ({ value, warns }) => {
+      const { hook, logger } = emitHook({
+        definition: { command: "run.sh", rewakeSummary: value },
+        converterConfig: {
+          ...converterConfig,
+          stringPassthroughFields: [
+            {
+              canonical: "rewakeSummary",
+              tool: "summary",
+              maxLength: 3,
+              collapseWhitespaceForLength: true,
+            },
+          ],
+        },
+      });
+
+      expect(hook?.summary).toBe(value);
+      if (warns) {
+        expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining("is 4 characters long after collapsing whitespace;"),
+        );
+      } else {
+        expect(logger.warn).not.toHaveBeenCalled();
+      }
+    });
+
+    it("collapses Unicode whitespace too, as JavaScript's \\s does", () => {
+      const { logger } = emitHook({
+        definition: { command: "run.sh", rewakeSummary: "x\u00a0\u3000\u00a0y" },
+        converterConfig: {
+          ...converterConfig,
+          stringPassthroughFields: [
+            {
+              canonical: "rewakeSummary",
+              tool: "summary",
+              maxLength: 3,
+              collapseWhitespaceForLength: true,
+            },
+          ],
+        },
+      });
+
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { type: "prompt", prompt: "Review this", rewakeSummary: "long summary" },
+      { command: "run.sh", rewakeSummary: 12345 },
+    ])("does not report length for a dropped or invalid field: %j", (definition) => {
+      const { hook, logger } = emitHook({
+        definition: definition as HooksConfig["hooks"][string][number],
+        converterConfig,
+      });
+
+      expect(hook).not.toHaveProperty("summary");
+      expect(logger.warn).toHaveBeenCalledOnce();
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("will shorten it"));
+    });
+  });
+
   describe.each(COMMAND_ONLY_KINDS)(
     "$kind passthrough fields registered as commandOnly",
     ({ converterConfig, tool, canonical, value }) => {
@@ -690,6 +775,31 @@ describe("toolHooksToCanonical with an event named after an Object.prototype mem
   });
 });
 
+describe("toolHooksToCanonical with two native names for one canonical event", () => {
+  it("appends the second key's hooks instead of overwriting the first", () => {
+    const converterConfig: ToolHooksConverterConfig = {
+      ...BASE_CONFIG,
+      toolToCanonicalEventNames: {
+        ...BASE_CONFIG.toolToCanonicalEventNames,
+        LegacyStop: "stop",
+        Stop: "stop",
+      },
+    };
+    const canonical = toolHooksToCanonical({
+      hooks: {
+        LegacyStop: [{ hooks: [{ type: "command", command: "./legacy.sh" }] }],
+        Stop: [{ hooks: [{ type: "command", command: "./new.sh" }] }],
+      },
+      converterConfig,
+    });
+
+    expect(canonical.stop).toEqual([
+      { type: "command", command: "./legacy.sh" },
+      { type: "command", command: "./new.sh" },
+    ]);
+  });
+});
+
 describe("timeoutUnit (tool timeouts in milliseconds)", () => {
   const MS_CONFIG: ToolHooksConverterConfig = { ...BASE_CONFIG, timeoutUnit: "milliseconds" };
 
@@ -751,49 +861,90 @@ describe("timeoutUnit (tool timeouts in milliseconds)", () => {
   });
 });
 
-describe("hookTypeNames (a tool spelling of a canonical hook type, #3074)", () => {
-  const RENAMING_CONFIG: ToolHooksConverterConfig = {
+describe("importedHookTypeAliases (import-only tool spellings, #3074)", () => {
+  const ALIAS_CONFIG: ToolHooksConverterConfig = {
     ...BASE_CONFIG,
     supportedHookTypes: new Set(["command", "http"]),
-    hookTypeNames: { http: "https" },
+    importedHookTypeAliases: { https: "http" },
   };
 
-  it("emits the canonical http type under the tool spelling", () => {
-    const { hook } = emitHook({
-      definition: { type: "http", url: "https://example.com/hook", timeout: 3 },
-      converterConfig: RENAMING_CONFIG,
-    });
-
-    expect(hook).toEqual({ type: "https", url: "https://example.com/hook", timeout: 3 });
-  });
-
-  it("leaves a type without a tool spelling under its canonical name", () => {
-    const { hook } = emitHook({
-      definition: { type: "command", command: "./run.sh" },
-      converterConfig: RENAMING_CONFIG,
-    });
-
-    expect(hook).toEqual({ type: "command", command: "./run.sh" });
-  });
-
-  it("imports the tool spelling back as the canonical type with its payload", () => {
+  it("imports an aliased spelling as the canonical type with its payload", () => {
     const { definition } = importHook({
       hook: { type: "https", url: "https://example.com/hook", timeout: 3 },
-      converterConfig: RENAMING_CONFIG,
+      converterConfig: ALIAS_CONFIG,
     });
 
     expect(definition).toEqual({ type: "http", url: "https://example.com/hook", timeout: 3 });
   });
 
-  it("does not read the shadowed canonical spelling as that type on import", () => {
-    // The tool calls its webhook handler `https`, so a bare `http` in its
-    // file is not a handler it has: it gets the unknown-type treatment
-    // (coerced to `command`) instead of being read as a webhook.
+  it("still imports the canonical spelling", () => {
     const { definition } = importHook({
-      hook: { type: "http", url: "https://example.com/hook", command: "./run.sh" },
-      converterConfig: RENAMING_CONFIG,
+      hook: { type: "http", url: "https://example.com/hook" },
+      converterConfig: ALIAS_CONFIG,
     });
 
-    expect(definition).toEqual({ type: "command", command: "./run.sh" });
+    expect(definition).toEqual({ type: "http", url: "https://example.com/hook" });
+  });
+
+  it("never emits the alias", () => {
+    const { hook } = emitHook({
+      definition: { type: "http", url: "https://example.com/hook" },
+      converterConfig: ALIAS_CONFIG,
+    });
+
+    expect(hook).toEqual({ type: "http", url: "https://example.com/hook" });
+  });
+});
+
+describe("booleanPassthroughFields events restriction", () => {
+  const configWithEvents = (events: ReadonlySet<string>): ToolHooksConverterConfig => ({
+    ...BASE_CONFIG,
+    booleanPassthroughFields: [{ canonical: "failClosed", tool: "failClosed", events }],
+  });
+
+  it("emits and imports the field on a listed event", () => {
+    const config = configWithEvents(new Set(["preToolUse"]));
+    const emitted = emitHook({
+      definition: { type: "command", command: "./guard.sh", failClosed: true },
+      converterConfig: config,
+    });
+    expect(emitted.hook).toMatchObject({ failClosed: true });
+    expect(emitted.logger.warn).not.toHaveBeenCalled();
+
+    const imported = importHook({
+      hook: { type: "command", command: "./guard.sh", failClosed: true },
+      converterConfig: config,
+    });
+    expect(imported.definition).toMatchObject({ failClosed: true });
+    expect(imported.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("drops the field on an unlisted event, warning only for a non-default value", () => {
+    const config = configWithEvents(new Set(["stop"]));
+    for (const value of [true, false]) {
+      const emitted = emitHook({
+        definition: { type: "command", command: "./guard.sh", failClosed: value },
+        converterConfig: config,
+      });
+      expect(emitted.hook).not.toHaveProperty("failClosed");
+
+      const imported = importHook({
+        hook: { type: "command", command: "./guard.sh", failClosed: value },
+        converterConfig: config,
+      });
+      expect(imported.definition).not.toHaveProperty("failClosed");
+
+      if (value) {
+        expect(emitted.logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('this tool honours "failClosed" on "stop" only'),
+        );
+        expect(imported.logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('this tool honours it on "stop" only'),
+        );
+      } else {
+        expect(emitted.logger.warn).not.toHaveBeenCalled();
+        expect(imported.logger.warn).not.toHaveBeenCalled();
+      }
+    }
   });
 });

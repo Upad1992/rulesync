@@ -1,10 +1,9 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { MimocodeCommand } from "./mimocode-command.js";
 import { RulesyncCommand } from "./rulesync-command.js";
 
@@ -42,7 +41,6 @@ describe("MimocodeCommand", () => {
       relativeFilePath: "custom.md",
       frontmatter,
       body: "Analyze coverage details",
-      fileContent: stringifyFrontmatter("Analyze coverage details", frontmatter),
     });
 
     const command = MimocodeCommand.fromRulesyncCommand({ outputRoot: testDir, rulesyncCommand });

@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import { DEEPAGENTS_DIR, DEEPAGENTS_HOOKS_FILE_NAME } from "../../constants/deepagents-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import type { HookDefinition, HooksConfig } from "../../types/hooks.js";
 import {
   CANONICAL_TO_DEEPAGENTS_EVENT_NAMES,
@@ -13,14 +12,13 @@ import {
   getDeepagentsRelativeDirPath,
   getDeepagentsRulesyncOutputRoot,
 } from "../../utils/deepagents.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { lookupOwn } from "../../utils/own-lookup.js";
+import { isRecord } from "../../utils/type-guards.js";
 import type { RulesyncHooks } from "./rulesync-hooks.js";
 import { buildImportedHooksConfig } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
   type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
@@ -44,10 +42,6 @@ type DeepagentsMatcherGroup = {
 type DeepagentsHooksFile = {
   hooks: Record<string, DeepagentsMatcherGroup[]>;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Convert the canonical hooks config to the deepagents Hooks v2 document.
@@ -185,13 +179,6 @@ function deepagentsLegacyToCanonicalHooks(entries: unknown[]): HooksConfig["hook
 }
 
 export class DeepagentsHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? JSON.stringify({ hooks: {} }, null, 2),
-    });
-  }
-
   override isDeletable(): boolean {
     return true;
   }
@@ -245,15 +232,10 @@ export class DeepagentsHooks extends ToolHooks {
   }
 
   toRulesyncHooks(): RulesyncHooks {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(this.getFileContent());
-    } catch (error) {
-      throw new Error(
-        `Failed to parse deepagents hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        { cause: error },
-      );
-    }
+    const parsed: unknown = this.parseFileContentOrThrow({
+      displayName: "deepagents",
+      parse: (fileContent) => JSON.parse(fileContent),
+    });
 
     const rawHooks = isRecord(parsed) ? parsed.hooks : undefined;
     // The v2 document keys hooks by event name; the pre-v2 one held a flat
@@ -274,24 +256,6 @@ export class DeepagentsHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): DeepagentsHooks {
-    return new DeepagentsHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

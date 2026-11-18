@@ -10,9 +10,14 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -36,6 +41,16 @@ import {
  *    (`preferred` lets a `subagents` settings override or the `/subagents`
  *    picker replace the model; `required` locks dispatch to the authored
  *    list). CLI v1.0.81+; the shared reference page still lists `model` only.
+ *  - `model` may also be a list of models in preference order. The Copilot
+ *    CLI changelog for v1.0.83 (2026-09-04) says "Custom agents can list
+ *    several models in `model`, tried in order until one is available to
+ *    you"; the CLI command reference and the shared configuration reference
+ *    still document `model` as a string, so older CLI versions may not read
+ *    the list form (a string is the safe form there). The VS Code Copilot
+ *    harness documents the same array spelling. Preserve a list as authored
+ *    instead of rewriting it to the separate `models` field.
+ *    https://github.com/github/copilot-cli/blob/main/changelog.md#1083---2026-09-04
+ *    https://github.com/microsoft/vscode-docs/blob/main/docs/agents/reference/custom-agent-file-reference.md
  *
  * `looseObject` is used so that future additional fields are passed through
  * unchanged (consistent with the rest of rulesync's frontmatter schemas).
@@ -45,7 +60,7 @@ const CopilotCliSubagentFrontmatterSchema = z.looseObject({
   name: z.optional(z.string()),
   target: z.optional(z.string()),
   tools: z.optional(z.union([z.string(), z.array(z.string())])),
-  model: z.optional(z.string()),
+  model: z.optional(z.union([z.string(), z.array(z.string())])),
   models: z.optional(z.array(z.string())),
   modelPolicy: z.optional(z.enum(["preferred", "required"])),
   "disable-model-invocation": z.optional(z.boolean()),
@@ -185,14 +200,12 @@ export class CopilotcliSubagent extends ToolSubagent {
       ...copilotCliSection,
     };
 
-    const result = CopilotCliSubagentFrontmatterSchema.safeParse(rawFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid copilotcli subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
-
-    const copilotCliFrontmatter = result.data;
+    const copilotCliFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: CopilotCliSubagentFrontmatterSchema,
+      frontmatter: rawFrontmatter,
+      toolTarget: "copilotcli",
+      rulesyncSubagent,
+    });
 
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, copilotCliFrontmatter);
@@ -215,16 +228,12 @@ export class CopilotcliSubagent extends ToolSubagent {
       return { success: true, error: null };
     }
 
-    const result = CopilotCliSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: CopilotCliSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

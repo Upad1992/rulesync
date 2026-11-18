@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { parse as parseJsonc } from "jsonc-parser";
 import { parse as parseToml } from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { Config } from "../config/config.js";
 import {
@@ -45,8 +45,19 @@ const collectKeyPaths = (value: unknown, prefix = ""): string[] => {
   return paths;
 };
 
+/**
+ * Targets that cannot be combined with another writer of the same files
+ * (`Config` rejects the pair), so the contract runs without them. `opencodev1`
+ * writes `opencode.json` in the OpenCode 1.x shapes `opencode` replaces.
+ */
+const EXCLUSIVE_TARGETS: ReadonlySet<ToolTarget> = new Set(["opencodev1"]);
+
 const sharedWriteTargets = (writers: SharedFileWriter[]): ToolTarget[] => [
-  ...new Set(writers.flatMap((writer) => [...writer.toolsByFeature.values()].flat())),
+  ...new Set(
+    writers
+      .flatMap((writer) => [...writer.toolsByFeature.values()].flat())
+      .filter((target) => !EXCLUSIVE_TARGETS.has(target)),
+  ),
 ];
 
 const USER_SENTINEL_KEY = "rulesyncContractSentinel";

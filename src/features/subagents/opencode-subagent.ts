@@ -7,12 +7,19 @@ import { ValidationResult } from "../../types/ai-file.js";
 import { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
+import type { Logger } from "../../utils/logger.js";
+import { quoteValueForWarning } from "../../utils/quote-value.js";
 import {
   asOpencodeEntries,
   getOpencodeAgentEntries,
-  getOpencodeConfigDir,
-  readOpencodeConfig,
+  mergeOpencodeEntryLayers,
+  raiseOpencodeAgentToV2,
+  readOpencodeConfigLayers,
   resolveOpencodeFileTemplate,
 } from "../opencode-config.js";
 import { OpenCodeStyleSubagent, OpenCodeStyleSubagentParams } from "./opencode-style-subagent.js";
@@ -78,16 +85,74 @@ export type OpenCodeSubagentParams = Omit<OpenCodeStyleSubagentParams, "frontmat
  * @see https://opencode.ai/docs/agents/
  */
 async function resolveOpenCodeAgentPrompt({
+  name,
   prompt,
   configDir,
+  containmentRoot,
+  logger,
 }: {
+  name: string;
   prompt: unknown;
   configDir: string;
+  containmentRoot: string | undefined;
+  logger: Logger | undefined;
 }): Promise<string> {
   if (typeof prompt !== "string") {
     return "";
   }
-  return resolveOpencodeFileTemplate({ value: prompt, configDir });
+  return resolveOpencodeFileTemplate({
+    value: prompt,
+    configDir,
+    containmentRoot,
+    logger,
+    referrer: `OpenCode agent ${quoteValueForWarning(name)}`,
+  });
+}
+
+/**
+ * Resolves the `prompt` of each inline agent entry of one config file against
+ * that file's directory, so entries from several files can be merged without
+ * losing where a `"{file:./path}"` reference points. `containmentRoot`, set at
+ * project scope, keeps a reference from reading a file outside the project.
+ */
+async function resolveOpenCodeAgentPrompts({
+  entries,
+  configDir,
+  containmentRoot,
+  logger,
+}: {
+  entries: Record<string, unknown> | null;
+  configDir: string;
+  containmentRoot: string | undefined;
+  logger: Logger | undefined;
+}): Promise<Record<string, unknown> | null> {
+  if (entries === null) {
+    return null;
+  }
+  const resolved: Record<string, unknown> = {};
+  for (const [name, rawEntry] of Object.entries(entries)) {
+    const entry = asOpencodeEntries(rawEntry);
+    const value =
+      entry === null || !Object.hasOwn(entry, "prompt")
+        ? rawEntry
+        : {
+            ...entry,
+            prompt: await resolveOpenCodeAgentPrompt({
+              name,
+              prompt: entry.prompt,
+              configDir,
+              containmentRoot,
+              logger,
+            }),
+          };
+    Object.defineProperty(resolved, name, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return resolved;
 }
 
 export class OpenCodeSubagent extends OpenCodeStyleSubagent {
@@ -115,7 +180,7 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
     super({ ...params, frontmatter, validate: false });
   }
 
-  protected getToolTarget(): Extract<ToolTarget, "opencode" | "kilo" | "mimocode"> {
+  protected getToolTarget(): Extract<ToolTarget, "opencode" | "opencodev1" | "kilo" | "mimocode"> {
     return (this.constructor as typeof OpenCodeSubagent).layout.toolTarget;
   }
 
@@ -124,21 +189,34 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
   }
 
   /**
+   * For OpenCode V2, imports V1 agent fields in their V2 spelling so the
+   * rulesync tool section holds what the V2 target writes back. `name` is
+   * kept: the base class reads the rulesync name from it.
+   */
+  protected override getImportFrontmatter(): OpenCodeSubagentFrontmatter {
+    if ((this.constructor as typeof OpenCodeSubagent).layout.configVersion !== "v2") {
+      return this.frontmatter;
+    }
+    const { name, mode, description } = this.frontmatter;
+    return {
+      ...raiseOpencodeAgentToV2(this.frontmatter),
+      mode,
+      ...(description !== undefined && { description }),
+      ...(name !== undefined && { name }),
+    };
+  }
+
+  /**
    * Pure validation against the OpenCode schema (default application happens in
    * the constructor, not here), matching every sibling subagent.
    */
   validate(): ValidationResult {
-    const result = OpenCodeSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: OpenCodeSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static getSettablePaths({
@@ -159,15 +237,27 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
     rulesyncSubagent,
     validate = true,
     global = false,
+    logger,
   }: ToolSubagentFromRulesyncSubagentParams): ToolSubagent {
     const rulesyncFrontmatter = rulesyncSubagent.getFrontmatter();
     const opencodeSection = rulesyncFrontmatter[this.layout.toolTarget] ?? {};
 
-    const parseResult = OpenCodeSubagentFrontmatterSchema.safeParse({
-      ...opencodeSection,
-      description: rulesyncFrontmatter.description,
-      ...(rulesyncFrontmatter.name && { name: rulesyncFrontmatter.name }),
-    });
+    // OpenCode V2 reads frontmatter mixing V1-only fields (`name` included)
+    // and V2 fields as V2 and ignores the V1 fields (before v2.1.4 it read it
+    // as V1 and ignored the V2 fields), so a V2 agent is written in the V2
+    // spelling alone, its ID coming from the file name.
+    const parseResult = OpenCodeSubagentFrontmatterSchema.safeParse(
+      this.layout.configVersion === "v2"
+        ? raiseOpencodeAgentToV2({
+            ...opencodeSection,
+            description: rulesyncFrontmatter.description,
+          })
+        : {
+            ...opencodeSection,
+            description: rulesyncFrontmatter.description,
+            ...(rulesyncFrontmatter.name && { name: rulesyncFrontmatter.name }),
+          },
+    );
 
     if (!parseResult.success) {
       throw new Error(
@@ -175,6 +265,13 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
       );
     }
     const opencodeFrontmatter: OpenCodeSubagentFrontmatter = parseResult.data;
+    if (this.layout.configVersion === "v2" && opencodeFrontmatter.request !== undefined) {
+      // https://opencode.ai/v2/docs/agents/: "The V2 session runner preserves
+      // these values but does not yet send them with model requests."
+      logger?.warn(
+        `OpenCode subagent "${rulesyncSubagent.getRelativeFilePath()}": OpenCode 2.x keeps "request" (where "temperature", "top_p" and "options" are written) but does not yet send it with model requests, so these settings have no effect. Set them on the provider, model or model variant instead.`,
+      );
+    }
 
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, opencodeFrontmatter);
@@ -200,12 +297,14 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
   }
 
   /**
-   * Imports agents defined inline in `opencode.json` / `opencode.jsonc` under
-   * the top-level `agent` key — or its V2 spelling `agents`, see
+   * Imports agents defined inline in `opencode.json` / `opencode.jsonc` (and,
+   * at project scope, `.opencode/opencode.json(c)`, which OpenCode merges over
+   * them) under the top-level `agent` key — or its V2 spelling `agents`, see
    * `getOpencodeAgentEntries` — (in addition to the Markdown files under
    * `.opencode/agents/`). Each entry's `prompt` becomes the subagent body
    * (a `"{file:./path}"` reference is resolved relative to the config file's
-   * location); the remaining fields (`description` / `mode` / `model` /
+   * location and, at project scope, only read when it resolves inside the
+   * project); the remaining fields (`description` / `mode` / `model` /
    * `tools` / `permission` / ...) map to the frontmatter.
    *
    * Import-only: invoked by the subagents processor when loading tool files for
@@ -216,18 +315,32 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
   static async loadAdditionalImportFiles({
     outputRoot = process.cwd(),
     global = false,
+    logger,
   }: {
     outputRoot?: string;
     global?: boolean;
+    logger?: Logger;
   } = {}): Promise<OpenCodeSubagent[]> {
-    const config = await readOpencodeConfig({ outputRoot, global, layout: this.layout });
-    const agentEntries = getOpencodeAgentEntries({ config, layout: this.layout });
+    // Each file is lowered on its own and its `prompt` resolved against its
+    // own directory before the files are merged, later files winning, as
+    // OpenCode merges `.opencode/opencode.json(c)` over the root config.
+    const layers = await readOpencodeConfigLayers({ outputRoot, global, layout: this.layout });
+    const layerEntries = await Promise.all(
+      layers.map(({ config, configDir }) =>
+        resolveOpenCodeAgentPrompts({
+          entries: getOpencodeAgentEntries({ config, layout: this.layout }),
+          configDir,
+          containmentRoot: global ? undefined : outputRoot,
+          logger,
+        }),
+      ),
+    );
+    const agentEntries = mergeOpencodeEntryLayers(layerEntries);
     if (!agentEntries) {
       return [];
     }
 
     const paths = this.getSettablePaths({ global });
-    const configDir = getOpencodeConfigDir({ outputRoot, global, layout: this.layout });
     const subagents: OpenCodeSubagent[] = [];
 
     for (const [name, rawEntry] of Object.entries(agentEntries)) {
@@ -237,7 +350,7 @@ export class OpenCodeSubagent extends OpenCodeStyleSubagent {
       }
 
       const { prompt, ...frontmatterFields } = entry;
-      const body = await resolveOpenCodeAgentPrompt({ prompt, configDir });
+      const body = typeof prompt === "string" ? prompt : "";
 
       const parseResult = OpenCodeSubagentFrontmatterSchema.safeParse(frontmatterFields);
       if (!parseResult.success) {

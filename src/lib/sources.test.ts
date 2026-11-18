@@ -1,7 +1,7 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   FETCH_CONCURRENCY_LIMIT,
@@ -647,6 +647,441 @@ describe("resolveAndFetchSources", () => {
     expect(mockClientInstance.listDirectory).not.toHaveBeenCalled();
     expect(mockClientInstance.getFileContent).not.toHaveBeenCalled();
     expect(writeFileContent).not.toHaveBeenCalled();
+  });
+
+  describe("several entries of the same repository", () => {
+    const marketplace = "https://github.com/org/plugin-marketplace.git";
+
+    /** Serve skills under each `<path>/<name>/SKILL.md` of the repository. */
+    function mockMarketplace(skillsByPath: Record<string, string[]>) {
+      mockClientInstance.listDirectory.mockImplementation(
+        async (_owner: string, _repo: string, path: string) => {
+          const names = skillsByPath[path];
+          if (names) {
+            return names.map((name) => ({ name, path: `${path}/${name}`, type: "dir" }));
+          }
+          for (const [basePath, skillNames] of Object.entries(skillsByPath)) {
+            for (const name of skillNames) {
+              if (path === `${basePath}/${name}`) {
+                return [{ name: "SKILL.md", path: `${path}/SKILL.md`, type: "file", size: 10 }];
+              }
+            }
+          }
+          return [];
+        },
+      );
+      mockClientInstance.getFileContent.mockImplementation(
+        async (_owner: string, _repo: string, path: string) => `# ${path}\n`,
+      );
+    }
+
+    const teamA = { source: marketplace, ref: "main", path: "plugins/team-a/skills" };
+    const teamB = { source: marketplace, ref: "main", path: "plugins/team-b/skills" };
+    const keyA = "org/plugin-marketplace#path=plugins/team-a/skills&ref=main";
+    const keyB = "org/plugin-marketplace#path=plugins/team-b/skills&ref=main";
+
+    /** A lock entry for one team's skills, as an earlier install recorded it. */
+    function lockedTeamEntry(params: { curatedDir: string; team: string; resolvedRef: string }) {
+      const { curatedDir, team, resolvedRef } = params;
+      const name = `skill-${team.at(-1)}1`;
+      return {
+        requestedRef: "main",
+        resolvedRef,
+        skills: { [name]: { integrity: seedCuratedSkill({ curatedDir, name }) } },
+        skillSelection: [name],
+        skillsPath: `plugins/${team}/skills`,
+      };
+    }
+
+    it("should carry a bare-key entry over when a second entry for its repository is added", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      const lockedSha = "a".repeat(40);
+      existsInMemory();
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          "org/plugin-marketplace": lockedTeamEntry({
+            curatedDir,
+            team: "team-a",
+            resolvedRef: lockedSha,
+          }),
+        },
+      });
+      mockMarketplace({
+        "plugins/team-a/skills": ["skill-a1"],
+        "plugins/team-b/skills": ["skill-b1"],
+      });
+      mockClientInstance.resolveRefToSha.mockResolvedValue("b".repeat(40));
+      const sources = [
+        { ...teamA, skills: ["skill-a1"] },
+        { ...teamB, skills: ["skill-b1"] },
+      ];
+
+      // The new entry is not locked yet, so a frozen install still fails...
+      await expect(
+        resolveAndFetchSources({
+          logger,
+          sources,
+          projectRoot: testDir,
+          options: { frozen: true },
+        }),
+      ).rejects.toThrow(`Frozen install failed`);
+
+      // ...and a plain install keeps the existing entry at its locked commit.
+      const result = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(result.failedSourceCount).toBe(0);
+      expect(result.fetchedSkillCount).toBe(1);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalledWith(
+        "org",
+        "plugin-marketplace",
+        "plugins/team-a/skills",
+        expect.anything(),
+      );
+      expect(removeDirectory).not.toHaveBeenCalledWith(join(curatedDir, "skill-a1"));
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(Object.keys(writtenLock.sources).toSorted()).toEqual([keyA, keyB]);
+      expect(writtenLock.sources[keyA]!.resolvedRef).toBe(lockedSha);
+      expect(Object.keys(writtenLock.sources[keyA]!.skills)).toEqual(["skill-a1"]);
+    });
+
+    it("should carry the remaining entry over to the bare key when the other is removed", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      const lockedSha = "a".repeat(40);
+      existsInMemory();
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          [keyB]: lockedTeamEntry({ curatedDir, team: "team-b", resolvedRef: "c".repeat(40) }),
+          [keyA]: lockedTeamEntry({ curatedDir, team: "team-a", resolvedRef: lockedSha }),
+        },
+      });
+      mockClientInstance.resolveRefToSha.mockResolvedValue("b".repeat(40));
+      const sources = [{ ...teamA, skills: ["skill-a1"] }];
+
+      const frozen = await resolveAndFetchSources({
+        logger,
+        sources,
+        projectRoot: testDir,
+        options: { frozen: true },
+      });
+      expect(frozen.failedSourceCount).toBe(0);
+      expect(frozen.fetchedSkillCount).toBe(0);
+      expect(writeLockFile).not.toHaveBeenCalled();
+
+      const plain = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(plain.failedSourceCount).toBe(0);
+      expect(plain.fetchedSkillCount).toBe(0);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalled();
+      expect(mockClientInstance.resolveRefToSha).not.toHaveBeenCalled();
+      expect(removeDirectory).toHaveBeenCalledWith(join(curatedDir, "skill-b1"));
+      expect(removeDirectory).not.toHaveBeenCalledWith(join(curatedDir, "skill-a1"));
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(Object.keys(writtenLock.sources)).toEqual(["org/plugin-marketplace"]);
+      expect(writtenLock.sources["org/plugin-marketplace"]!.resolvedRef).toBe(lockedSha);
+      expect(Object.keys(writtenLock.sources["org/plugin-marketplace"]!.skills)).toEqual([
+        "skill-a1",
+      ]);
+    });
+
+    it("should not let an earlier rules-only entry take over an entry that also locked skills", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      const lockedSha = "a".repeat(40);
+      existsInMemory();
+      // Team A was declared alone, taking skills and rules.
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          "org/plugin-marketplace": {
+            ...lockedTeamEntry({ curatedDir, team: "team-a", resolvedRef: lockedSha }),
+            rules: { "shared-rule": { integrity: "sha256-x" } },
+            ruleSelection: ["shared-rule"],
+            rulesPath: "rules",
+            resolvedRuleNames: ["shared-rule"],
+          },
+        },
+      });
+      mockMarketplace({ "plugins/team-a/skills": ["skill-a1"] });
+      const listSkills = mockClientInstance.listDirectory.getMockImplementation();
+      mockClientInstance.listDirectory.mockImplementation(
+        async (owner: string, repo: string, path: string) =>
+          path === "rules"
+            ? ["shared-rule", "other-rule"].map((name) => ({
+                name: `${name}.md`,
+                path: `rules/${name}.md`,
+                type: "file",
+                size: 10,
+              }))
+            : listSkills(owner, repo, path),
+      );
+      mockClientInstance.resolveRefToSha.mockResolvedValue("b".repeat(40));
+
+      // A rules-only entry of the same repository is declared before it.
+      const result = await resolveAndFetchSources({
+        logger,
+        sources: [
+          { source: marketplace, ref: "main", rules: ["other-rule"] },
+          { ...teamA, skills: ["skill-a1"], rules: ["shared-rule"] },
+        ],
+        projectRoot: testDir,
+      });
+
+      expect(result.failedSourceCount).toBe(0);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalledWith(
+        "org",
+        "plugin-marketplace",
+        "plugins/team-a/skills",
+        expect.anything(),
+      );
+      expect(removeDirectory).not.toHaveBeenCalledWith(join(curatedDir, "skill-a1"));
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(writtenLock.sources[keyA]).toMatchObject({
+        resolvedRef: lockedSha,
+        skills: { "skill-a1": expect.anything() },
+      });
+      expect(writtenLock.sources["org/plugin-marketplace#ref=main"]).toMatchObject({
+        resolvedRef: "b".repeat(40),
+        skills: {},
+        rules: { "other-rule": expect.anything() },
+      });
+    });
+
+    it("should not carry over an entry recorded for another location", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      existsInMemory();
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          [keyB]: lockedTeamEntry({ curatedDir, team: "team-b", resolvedRef: "c".repeat(40) }),
+        },
+      });
+      mockMarketplace({ "plugins/team-a/skills": ["skill-a1"] });
+      const sources = [{ ...teamA, skills: ["skill-a1"] }];
+
+      await expect(
+        resolveAndFetchSources({
+          logger,
+          sources,
+          projectRoot: testDir,
+          options: { frozen: true },
+        }),
+      ).rejects.toThrow("Frozen install failed");
+
+      const result = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(result.fetchedSkillCount).toBe(1);
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(Object.keys(writtenLock.sources)).toEqual(["org/plugin-marketplace"]);
+      expect(writtenLock.sources["org/plugin-marketplace"]!.skillsPath).toBe(
+        "plugins/team-a/skills",
+      );
+    });
+
+    it("should keep every entry's skills across repeated installs without re-fetching", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      existsInMemory();
+      mockMarketplace({
+        "plugins/team-a/skills": ["skill-a1", "skill-a2"],
+        "plugins/team-b/skills": ["skill-b1"],
+      });
+      const sources = [
+        { ...teamA, skills: ["skill-a1", "skill-a2"] },
+        { ...teamB, skills: ["skill-b1"] },
+      ];
+
+      const first = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(first.failedSourceCount).toBe(0);
+      expect(first.fetchedSkillCount).toBe(3);
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)?.[0].lock;
+      expect(Object.keys(writtenLock!.sources).toSorted()).toEqual([keyA, keyB]);
+      expect(Object.keys(writtenLock!.sources[keyA]!.skills)).toEqual(["skill-a1", "skill-a2"]);
+      expect(writtenLock!.sources[keyA]!.skillsPath).toBe("plugins/team-a/skills");
+      expect(Object.keys(writtenLock!.sources[keyB]!.skills)).toEqual(["skill-b1"]);
+      expect(writtenLock!.sources[keyB]!.skillsPath).toBe("plugins/team-b/skills");
+
+      // A plain install reuses both entries: nothing is fetched, removed or rewritten.
+      vi.mocked(readLockFile).mockResolvedValue(writtenLock!);
+      vi.mocked(writeLockFile).mockClear();
+      mockClientInstance.listDirectory.mockClear();
+      vi.mocked(removeDirectory).mockClear();
+      const second = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(second.failedSourceCount).toBe(0);
+      expect(second.fetchedSkillCount).toBe(0);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalled();
+      expect(removeDirectory).not.toHaveBeenCalled();
+      expect(writeLockFile).not.toHaveBeenCalled();
+
+      // A frozen install passes against the same lockfile.
+      const third = await resolveAndFetchSources({
+        logger,
+        sources,
+        projectRoot: testDir,
+        options: { frozen: true },
+      });
+      expect(third.failedSourceCount).toBe(0);
+      expect(third.fetchedSkillCount).toBe(0);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalled();
+      for (const name of ["skill-a1", "skill-a2", "skill-b1"]) {
+        expect(writtenFiles.has(join(curatedDir, name, "SKILL.md"))).toBe(true);
+      }
+    });
+
+    it("should only clean up the skills an entry itself installed", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      existsInMemory();
+      mockMarketplace({
+        "plugins/team-a/skills": ["skill-a1"],
+        "plugins/team-b/skills": ["skill-b1", "skill-b2"],
+      });
+      const first = await resolveAndFetchSources({
+        logger,
+        sources: [
+          { ...teamA, skills: ["skill-a1"] },
+          { ...teamB, skills: ["skill-b1"] },
+        ],
+        projectRoot: testDir,
+      });
+      expect(first.fetchedSkillCount).toBe(2);
+      vi.mocked(readLockFile).mockResolvedValue(
+        vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock,
+      );
+      vi.mocked(removeDirectory).mockClear();
+
+      // Team B switches its selection: only its own previous skill is removed.
+      const second = await resolveAndFetchSources({
+        logger,
+        sources: [
+          { ...teamA, skills: ["skill-a1"] },
+          { ...teamB, skills: ["skill-b2"] },
+        ],
+        projectRoot: testDir,
+      });
+      expect(second.failedSourceCount).toBe(0);
+      expect(removeDirectory).toHaveBeenCalledWith(join(curatedDir, "skill-b1"));
+      expect(removeDirectory).not.toHaveBeenCalledWith(join(curatedDir, "skill-a1"));
+      expect(writtenFiles.has(join(curatedDir, "skill-a1", "SKILL.md"))).toBe(true);
+      expect(writtenFiles.has(join(curatedDir, "skill-b1", "SKILL.md"))).toBe(false);
+      expect(writtenFiles.has(join(curatedDir, "skill-b2", "SKILL.md"))).toBe(true);
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(Object.keys(writtenLock.sources[keyA]!.skills)).toEqual(["skill-a1"]);
+      expect(Object.keys(writtenLock.sources[keyB]!.skills)).toEqual(["skill-b2"]);
+    });
+
+    it("should still skip a skill name an earlier entry of the same repository took", async () => {
+      const { writeLockFile } = await import("./sources-lock.js");
+      existsInMemory();
+      mockMarketplace({
+        "plugins/team-a/skills": ["shared"],
+        "plugins/team-b/skills": ["shared", "skill-b1"],
+      });
+
+      const result = await resolveAndFetchSources({
+        logger,
+        sources: [teamA, teamB],
+        projectRoot: testDir,
+      });
+
+      expect(result.failedSourceCount).toBe(0);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`Skipping duplicate skill "shared" from ${marketplace}`),
+      );
+      const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock;
+      expect(Object.keys(writtenLock.sources[keyA]!.skills)).toEqual(["shared"]);
+      expect(Object.keys(writtenLock.sources[keyB]!.skills)).toEqual(["skill-b1"]);
+    });
+
+    it("should keep using a bare-key lockfile entry for a repository declared once", async () => {
+      const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      existsInMemory();
+      // A lockfile written before entries were qualified by their path.
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          "org/plugin-marketplace": {
+            requestedRef: "main",
+            resolvedRef: "abc123def456",
+            skills: {
+              "skill-a1": { integrity: seedCuratedSkill({ curatedDir, name: "skill-a1" }) },
+            },
+            skillSelection: ["skill-a1"],
+            skillsPath: "plugins/team-a/skills",
+          },
+        },
+      });
+      const sources = [{ ...teamA, skills: ["skill-a1"] }];
+
+      const frozen = await resolveAndFetchSources({
+        logger,
+        sources,
+        projectRoot: testDir,
+        options: { frozen: true },
+      });
+      expect(frozen.failedSourceCount).toBe(0);
+      expect(frozen.fetchedSkillCount).toBe(0);
+
+      const plain = await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      expect(plain.failedSourceCount).toBe(0);
+      expect(plain.fetchedSkillCount).toBe(0);
+      expect(mockClientInstance.listDirectory).not.toHaveBeenCalled();
+      expect(writeLockFile).not.toHaveBeenCalled();
+    });
+
+    it("should fail a frozen install when only one entry of the repository is locked", async () => {
+      const { readLockFile } = await import("./sources-lock.js");
+      const curatedDir = join(testDir, RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH);
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          [keyA]: {
+            requestedRef: "main",
+            resolvedRef: "abc123def456",
+            skills: {
+              "skill-a1": { integrity: seedCuratedSkill({ curatedDir, name: "skill-a1" }) },
+            },
+            skillSelection: ["skill-a1"],
+            skillsPath: "plugins/team-a/skills",
+          },
+        },
+      });
+
+      await expect(
+        resolveAndFetchSources({
+          logger,
+          sources: [
+            { ...teamA, skills: ["skill-a1"] },
+            { ...teamB, skills: ["skill-b1"] },
+          ],
+          projectRoot: testDir,
+          options: { frozen: true },
+        }),
+      ).rejects.toThrow("Frozen install failed");
+    });
+
+    it("should report each entry as installed through its own lock entry", async () => {
+      const { writeLockFile, readLockFile } = await import("./sources-lock.js");
+      existsInMemory();
+      mockMarketplace({
+        "plugins/team-a/skills": ["skill-a1"],
+        "plugins/team-b/skills": ["skill-b1"],
+      });
+      const sources = [
+        { ...teamA, skills: ["skill-a1"] },
+        { ...teamB, skills: ["skill-b1"] },
+      ];
+      await resolveAndFetchSources({ logger, sources, projectRoot: testDir });
+      vi.mocked(readLockFile).mockResolvedValue(
+        vi.mocked(writeLockFile).mock.calls.at(-1)![0].lock,
+      );
+
+      await expect(
+        getInstalledSourceSkillNames({ sources, projectRoot: testDir, logger }),
+      ).resolves.toEqual(["skill-a1", "skill-b1"]);
+    });
   });
 
   it("should keep an earlier source's copy of a skill a later locked source also provides", async () => {
@@ -1296,6 +1731,62 @@ describe("resolveAndFetchSources", () => {
         ?.integrity,
     ).toBe(computeRuleIntegrity(newRuleContent));
   });
+
+  it.each([
+    { frozen: true, expectedFailures: 1 },
+    { frozen: false, expectedFailures: 0 },
+  ])(
+    "should handle a rule integrity mismatch at the locked ref (frozen: $frozen)",
+    async ({ frozen, expectedFailures }) => {
+      const { readLockFile } = await import("./sources-lock.js");
+      const lockedSha = "c".repeat(40);
+      vi.mocked(readLockFile).mockResolvedValue({
+        lockfileVersion: 1,
+        sources: {
+          "org/repo": {
+            requestedRef: "main",
+            resolvedRef: lockedSha,
+            skills: {},
+            rules: { shared: { integrity: computeRuleIntegrity("locked rule") } },
+            ruleSelection: ["shared"],
+            rulesPath: "rules",
+            resolvedRuleNames: ["shared"],
+          },
+        },
+      });
+      vi.mocked(fileExists).mockResolvedValue(false);
+      mockClientInstance.resolveRefToSha.mockResolvedValue(lockedSha);
+      mockClientInstance.listDirectory.mockImplementation(
+        async (_owner: string, _repo: string, path: string) =>
+          path === "rules"
+            ? [{ name: "shared.md", path: "rules/shared.md", type: "file", size: 50 }]
+            : [],
+      );
+      mockClientInstance.getFileContent.mockResolvedValue("tampered rule");
+
+      const result = await resolveAndFetchSources({
+        logger,
+        sources: [{ source: "org/repo", rules: ["shared"] }],
+        projectRoot: testDir,
+        options: { frozen },
+      });
+
+      expect(result.failedSourceCount).toBe(expectedFailures);
+      const wroteTampered = vi
+        .mocked(writeFileContent)
+        .mock.calls.some(
+          ([path, content]) => path.endsWith("shared.md") && content === "tampered rule",
+        );
+      expect(wroteTampered).toBe(!frozen);
+      if (frozen) {
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining("Refusing to install it under --frozen"),
+        );
+      } else {
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Integrity mismatch"));
+      }
+    },
+  );
 
   it("should preserve existing rules when a GitHub download fails", async () => {
     const { readLockFile } = await import("./sources-lock.js");
@@ -3226,7 +3717,13 @@ describe("resolveAndFetchSources", () => {
       sources: {
         "org/repo": {
           resolvedRef: "sha-123",
-          skills: { "missing-skill": { integrity: "sha256-xxx" } },
+          skills: {
+            "missing-skill": {
+              integrity: computeSkillIntegrity([
+                { path: "SKILL.md", content: "locked skill content" },
+              ]),
+            },
+          },
         },
       },
     });
@@ -3307,6 +3804,267 @@ describe("resolveAndFetchSources", () => {
 
     // Should have warned about integrity mismatch
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Integrity mismatch"));
+  });
+
+  it("should re-resolve a GitHub source whose declared ref differs from the locked requestedRef", async () => {
+    const { readLockFile } = await import("./sources-lock.js");
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "org/repo": {
+          resolvedRef: "locked-sha-123",
+          requestedRef: "main",
+          skills: { "my-skill": { integrity: "sha256-old-hash" } },
+        },
+      },
+    });
+    mockClientInstance.resolveRefToSha.mockResolvedValue("new-sha-456");
+    mockClientInstance.listDirectory.mockResolvedValue([]);
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [{ source: "org/repo", ref: "v2" }],
+      projectRoot: testDir,
+    });
+
+    expect(mockClientInstance.resolveRefToSha).toHaveBeenCalledWith("org", "repo", "v2");
+    expect(mockClientInstance.listDirectory).not.toHaveBeenCalledWith(
+      "org",
+      "repo",
+      expect.anything(),
+      "locked-sha-123",
+    );
+  });
+
+  it("should refuse under --frozen when the declared ref differs from the locked requestedRef", async () => {
+    const { readLockFile } = await import("./sources-lock.js");
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "org/repo": {
+          resolvedRef: "locked-sha-123",
+          requestedRef: "main",
+          skills: { "my-skill": { integrity: "sha256-old-hash" } },
+        },
+      },
+    });
+
+    await expect(
+      resolveAndFetchSources({
+        logger,
+        sources: [{ source: "org/repo", ref: "v2" }],
+        projectRoot: testDir,
+        options: { frozen: true },
+      }),
+    ).rejects.toThrow(
+      /declared ref does not match the lockfile for: org\/repo \(declared=v2, lock=main\)/,
+    );
+    expect(mockClientInstance.resolveRefToSha).not.toHaveBeenCalled();
+  });
+
+  it("should re-resolve a git source whose declared ref differs from the locked requestedRef", async () => {
+    const { fetchSkillFiles, resolveRefToSha } = await import("./git-client.js");
+    const { readLockFile } = await import("./sources-lock.js");
+    const source = "https://example.com/team/assets.git";
+    const newSha = "a".repeat(40);
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        [source]: {
+          requestedRef: "main",
+          resolvedRef: "b".repeat(40),
+          skills: { shared: { integrity: "sha256-old-skill" } },
+        },
+      },
+    });
+    vi.mocked(resolveRefToSha).mockResolvedValue(newSha);
+    vi.mocked(fetchSkillFiles).mockResolvedValue([]);
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [{ source, transport: "git", ref: "release" }],
+      projectRoot: testDir,
+    });
+
+    expect(resolveRefToSha).toHaveBeenCalledWith(source, "release");
+    expect(fetchSkillFiles).toHaveBeenCalledWith(
+      expect.objectContaining({ url: source, ref: "release", resolvedRef: newSha }),
+    );
+  });
+
+  it("should keep the locked commit of an entry that records no requestedRef", async () => {
+    const { readLockFile, writeLockFile } = await import("./sources-lock.js");
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "org/repo": {
+          resolvedRef: "locked-sha-123",
+          skills: { "my-skill": { integrity: "sha256-old-hash" } },
+        },
+      },
+    });
+    // The curated skill is missing on disk, so it is fetched again at the
+    // locked commit and the entry is written back.
+    vi.mocked(directoryExists).mockResolvedValue(false);
+    mockClientInstance.listDirectory.mockImplementation(
+      async (_owner: string, _repo: string, path: string) => {
+        if (path === "skills") {
+          return [{ name: "my-skill", path: "skills/my-skill", type: "dir" }];
+        }
+        if (path === "skills/my-skill") {
+          return [{ name: "SKILL.md", path: "skills/my-skill/SKILL.md", type: "file", size: 100 }];
+        }
+        return [];
+      },
+    );
+    mockClientInstance.getFileContent.mockResolvedValue("skill content");
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [{ source: "org/repo", ref: "v2" }],
+      projectRoot: testDir,
+    });
+    expect(mockClientInstance.listDirectory).toHaveBeenCalledWith(
+      "org",
+      "repo",
+      "skills",
+      "locked-sha-123",
+    );
+    const writtenLock = vi.mocked(writeLockFile).mock.calls.at(-1)?.[0].lock;
+    expect(writtenLock?.sources["org/repo"]).toMatchObject({
+      resolvedRef: "locked-sha-123",
+      requestedRef: "v2",
+    });
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [{ source: "org/repo", ref: "v2" }],
+      projectRoot: testDir,
+      options: { frozen: true },
+    });
+
+    expect(mockClientInstance.resolveRefToSha).not.toHaveBeenCalled();
+  });
+
+  it("should keep the locked commit when the declared ref is dropped", async () => {
+    // Without a declared ref the locked requestedRef is the default branch it
+    // resolved to, which cannot be told from a dropped ref offline.
+    const { readLockFile } = await import("./sources-lock.js");
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "org/repo": {
+          resolvedRef: "locked-sha-123",
+          requestedRef: "v1",
+          skills: { "my-skill": { integrity: "sha256-old-hash" } },
+        },
+      },
+    });
+    mockClientInstance.listDirectory.mockResolvedValue([]);
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [{ source: "org/repo" }],
+      projectRoot: testDir,
+      options: { frozen: true },
+    });
+
+    expect(mockClientInstance.resolveRefToSha).not.toHaveBeenCalled();
+  });
+
+  it("should re-resolve git-transport rules whose declared ref differs from the locked requestedRef", async () => {
+    const { fetchSkillFiles, resolveRefToSha } = await import("./git-client.js");
+    const { readLockFile } = await import("./sources-lock.js");
+    const source = "https://example.com/team/rules.git";
+    const newSha = "a".repeat(40);
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        [source]: {
+          requestedRef: "main",
+          resolvedRef: "b".repeat(40),
+          skills: {},
+          rules: { "testing-guidelines": { integrity: computeRuleIntegrity("old rule") } },
+          ruleSelection: ["testing-guidelines"],
+          rulesPath: "exports/rules",
+          resolvedRuleNames: ["testing-guidelines"],
+        },
+      },
+    });
+    vi.mocked(resolveRefToSha).mockResolvedValue(newSha);
+    vi.mocked(fetchSkillFiles).mockResolvedValue([
+      {
+        relativePath: "testing-guidelines.md",
+        content: "---\ntargets: ['*']\n---\nUse Vitest.",
+        size: 50,
+      },
+    ]);
+
+    await resolveAndFetchSources({
+      logger,
+      sources: [
+        {
+          source,
+          transport: "git",
+          ref: "release",
+          rules: ["testing-guidelines"],
+          rulesPath: "exports/rules",
+        },
+      ],
+      projectRoot: testDir,
+    });
+
+    expect(resolveRefToSha).toHaveBeenCalledWith(source, "release");
+    expect(fetchSkillFiles).toHaveBeenCalledWith(
+      expect.objectContaining({ url: source, ref: "release", resolvedRef: newSha }),
+    );
+  });
+
+  it("should refuse an integrity mismatch under --frozen without writing the skill", async () => {
+    const { readLockFile } = await import("./sources-lock.js");
+
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "org/repo": {
+          resolvedRef: "locked-sha-123",
+          requestedRef: "main",
+          skills: { "my-skill": { integrity: "sha256-old-hash" } },
+        },
+      },
+    });
+    vi.mocked(directoryExists).mockResolvedValue(false);
+    mockClientInstance.resolveRefToSha.mockResolvedValue("locked-sha-123");
+    mockClientInstance.listDirectory.mockImplementation(
+      async (_owner: string, _repo: string, path: string) => {
+        if (path === "skills") {
+          return [{ name: "my-skill", path: "skills/my-skill", type: "dir" }];
+        }
+        if (path === "skills/my-skill") {
+          return [{ name: "SKILL.md", path: "skills/my-skill/SKILL.md", type: "file", size: 100 }];
+        }
+        return [];
+      },
+    );
+    mockClientInstance.getFileContent.mockResolvedValue("tampered content");
+
+    const result = await resolveAndFetchSources({
+      logger,
+      sources: [{ source: "https://github.com/org/repo" }],
+      projectRoot: testDir,
+      options: { frozen: true },
+    });
+
+    expect(result.failedSourceCount).toBe(1);
+    expect(result.fetchedSkillCount).toBe(0);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("Refusing to install it under --frozen"),
+    );
+    expect(writeFileContent).not.toHaveBeenCalledWith(
+      expect.stringContaining("my-skill"),
+      "tampered content",
+    );
   });
 
   it("should preserve lock entries for skipped skills", async () => {

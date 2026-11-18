@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -42,16 +42,6 @@ describe("PiPermissions", () => {
       relativeDirPath: join(".pi", "agent"),
       relativeFilePath: "settings.json",
     });
-  });
-
-  it("should not be deletable because settings.json holds unrelated user settings", () => {
-    const permissions = PiPermissions.forDeletion({
-      outputRoot: testDir,
-      relativeDirPath: ".pi",
-      relativeFilePath: "settings.json",
-    });
-
-    expect(permissions.isDeletable()).toBe(false);
   });
 
   it("should author defaultTools from the pi override", async () => {

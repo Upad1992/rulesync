@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -55,17 +55,18 @@ describe("ZoocodePermissions", () => {
     });
   });
 
-  describe("isDeletable", () => {
-    it("is not deletable (shared workspace settings file)", () => {
-      const permissions = ZoocodePermissions.forDeletion({
-        relativeDirPath: ".vscode",
-        relativeFilePath: "settings.json",
-      });
-      expect(permissions.isDeletable()).toBe(false);
-    });
-  });
-
   describe("fromRulesyncPermissions", () => {
+    it("withholds the allows that cover a bash ask under its own keys", async () => {
+      const permissions = await ZoocodePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { "*": "allow", git: "allow", "git push": "ask" },
+        }),
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({ [ALLOWED_KEY]: [] });
+    });
+
     it("writes the zoo-code keys, not the archived lineage's roo-cline pair", async () => {
       const permissions = await ZoocodePermissions.fromRulesyncPermissions({
         outputRoot: testDir,
@@ -134,7 +135,12 @@ describe("ZoocodePermissions", () => {
 
       expect(JSON.parse(permissions.toRulesyncPermissions().getFileContent())).toEqual({
         permission: {
-          bash: { "git ": "allow", "npm run ": "allow", "rm -rf": "deny" },
+          bash: {
+            "git ": "allow",
+            "npm run ": "allow",
+            "rm -rf": "deny",
+            "rm -rf *": "deny",
+          },
         },
       });
     });
@@ -164,7 +170,7 @@ describe("ZoocodePermissions", () => {
       const reimported = await ZoocodePermissions.fromFile({ outputRoot: testDir });
 
       expect(JSON.parse(reimported.toRulesyncPermissions().getFileContent())).toEqual({
-        permission: { bash: { "git ": "allow", "rm -rf": "deny" } },
+        permission: { bash: { "git ": "allow", "rm -rf": "deny", "rm -rf *": "deny" } },
       });
     });
   });

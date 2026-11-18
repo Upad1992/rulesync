@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { ConfigResolver } from "../../config/config-resolver.js";
 import { RulesProcessor } from "../../features/rules/rules-processor.js";
@@ -86,9 +86,8 @@ describe("convertCommand", () => {
       { from: "cursor", to: ["antigravity-plugin"] },
     ])("should reject plugin packaging targets", async (options) => {
       await expect(convertCommand(mockLogger, options)).rejects.toThrow(
-        /Plugin packaging target .* is not supported by convert/,
+        /Plugin packaging target .* is not supported by convert\. .*--output-root.*--output-roots/,
       );
-      expect(ConfigResolver.resolve).not.toHaveBeenCalled();
     });
 
     it("should deduplicate duplicated destination tools", async () => {

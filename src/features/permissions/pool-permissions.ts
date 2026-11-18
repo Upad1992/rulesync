@@ -9,28 +9,29 @@ import {
   POOL_SETTINGS_FILE_NAME,
   POOL_TOOLS_KEY,
 } from "../../constants/pool-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
-import { lookupOwn } from "../../utils/own-lookup.js";
+import { invertRecord, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
-import { isRecord, isStringArray } from "../../utils/type-guards.js";
+import { isRecord, isStringArray, toRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
 import {
   ALL_TOOLS_PERMISSION_CATEGORY,
+  CATCH_ALL_PATTERN,
   createShadowingRestrictionsTest,
-  honorAllToolsOnBash,
+  MCP_CATEGORY_PREFIX,
 } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -42,9 +43,6 @@ const POOL_DENY_KEY = "deny";
 const POOL_DISABLED_KEY = "disabled";
 const POOL_PATH_KEY = "path";
 const POOL_WRITE_KEY = "write";
-
-// The catch-all rulesync pattern; a rule about the whole tool.
-const CATCH_ALL_PATTERN = "*";
 
 // The catch-all `paths` glob. A bare `*` names every file canonically, but a
 // `*` in Pool's path globs is one path segment, so the catch-all is spelled
@@ -61,8 +59,8 @@ const CANONICAL_TO_POOL_TOOL_NAMES: Record<string, string> = {
   websearch: "web_search",
 };
 
-const POOL_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries(
-  Object.entries(CANONICAL_TO_POOL_TOOL_NAMES).map(([k, v]) => [v, k]),
+const POOL_TO_CANONICAL_TOOL_NAMES: Record<string, string> = invertRecord(
+  CANONICAL_TO_POOL_TOOL_NAMES,
 );
 
 // The canonical categories that govern file access. Pool models file access
@@ -72,10 +70,6 @@ const POOL_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries(
 const READ_CATEGORY = "read";
 const WRITE_CATEGORIES = ["edit", "write"] as const;
 const FILE_CATEGORIES: readonly string[] = [READ_CATEGORY, ...WRITE_CATEGORIES];
-
-// The canonical per-tool MCP category; Pool approves MCP tools per server
-// under `mcp_servers.<server>.allow`/`deny`, which the mcp feature writes.
-const MCP_CANONICAL_PREFIX = "mcp__";
 
 /**
  * Single spelling of the settings.yaml codec/policy, matching the
@@ -102,8 +96,10 @@ function toCanonicalToolName(poolName: string): string {
   return lookupOwn({ record: POOL_TO_CANONICAL_TOOL_NAMES, key: poolName }) ?? poolName;
 }
 
+// Pool approves MCP tools per server under `mcp_servers.<server>.allow`/`deny`,
+// which the mcp feature writes.
 function isMcpCategory(category: string): boolean {
-  return category.startsWith(MCP_CANONICAL_PREFIX) && category.length > MCP_CANONICAL_PREFIX.length;
+  return category.startsWith(MCP_CATEGORY_PREFIX) && category.length > MCP_CATEGORY_PREFIX.length;
 }
 
 function isFileCategory(category: string): boolean {
@@ -200,7 +196,7 @@ function listPatterns(patterns: readonly string[]): string {
  *   - `mcp__<server>__<tool>` is skipped: Pool approves MCP tools per server
  *     under `mcp_servers.<server>.allow`, authored as `poolAllow` in
  *     `.rulesync/mcp.json`. The all-tools `*` category is mirrored onto
- *     `bash` by `honorAllToolsOnBash` and otherwise skipped.
+ *     `bash` by `honorAllToolsRestrictions` and otherwise skipped.
  *
  * Project settings take project-relative paths and the user settings absolute
  * or `~` paths, so a path of the other kind is skipped with a warning at each
@@ -227,12 +223,6 @@ export class PoolPermissions extends ToolPermissions {
 
   getSettings(): Record<string, unknown> {
     return this.settings;
-  }
-
-  override isDeletable(): boolean {
-    // settings.yaml is Pool's primary settings file, so it must never be
-    // removed wholesale; retracting rules happens via an in-place merge.
-    return false;
   }
 
   /**
@@ -309,36 +299,14 @@ export class PoolPermissions extends ToolPermissions {
 
   toRulesyncPermissions(): RulesyncPermissions {
     const rulesyncConfig = convertPoolToRulesync({
-      tools: isRecord(this.settings[POOL_TOOLS_KEY]) ? this.settings[POOL_TOOLS_KEY] : {},
-      paths: isRecord(this.settings[POOL_PATHS_KEY]) ? this.settings[POOL_PATHS_KEY] : {},
+      tools: toRecord(this.settings[POOL_TOOLS_KEY]),
+      paths: toRecord(this.settings[POOL_PATHS_KEY]),
     });
 
     // Do not spread the full settings document: Pool's own keys
     // (`mcp_servers`, `pool`, `sandbox`, ...) must not leak into rulesync.
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify(rulesyncConfig, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): PoolPermissions {
-    // The shared settings file is never deleted (isDeletable() === false), but
-    // forDeletion must still return a well-formed instance.
-    return new PoolPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global,
     });
   }
 }
@@ -362,7 +330,11 @@ function buildPoolPermissionsPatch({
   global: boolean;
   logger?: Logger;
 }): Record<string, unknown> {
-  const permission = honorAllToolsOnBash(config.permission);
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Pool",
+    logger,
+  });
   const existingTools = isRecord(existing[POOL_TOOLS_KEY]) ? existing[POOL_TOOLS_KEY] : undefined;
   const existingPaths = isRecord(existing[POOL_PATHS_KEY]) ? existing[POOL_PATHS_KEY] : undefined;
   const patch: Record<string, unknown> = {};
@@ -480,7 +452,7 @@ function groupCategoriesByPoolTool({
   for (const [category, rules] of Object.entries(permission)) {
     if (isPrototypePollutionKey(category) || isFileCategory(category)) continue;
     if (category === ALL_TOOLS_PERMISSION_CATEGORY) {
-      // `honorAllToolsOnBash` has already mirrored the restrictions onto bash.
+      // `honorAllToolsRestrictions` has already mirrored the restrictions onto bash.
       for (const [rawPattern, action] of Object.entries(rules)) {
         if (isPrototypePollutionKey(rawPattern)) continue;
         logger?.warn(
@@ -747,7 +719,21 @@ function importPoolTool({
     bucket[pattern] = "deny";
   }
   for (const pattern of allowed.filter(isUsablePattern)) {
-    bucket[pattern] ??= "allow";
+    // An own-property check, so a `toString` pattern is not mistaken for one
+    // already denied.
+    if (!Object.hasOwn(bucket, pattern)) {
+      bucket[pattern] = "allow";
+    }
+  }
+}
+
+/**
+ * Record `allow` for a path no deny has claimed. The check is on own
+ * properties, so a path such as `toString` is not mistaken for a stored rule.
+ */
+function allowUnlessSet(bucket: ActionRules, path: string): void {
+  if (!Object.hasOwn(bucket, path)) {
+    bucket[path] = "allow";
   }
 }
 
@@ -790,10 +776,10 @@ function convertPoolToRulesync({
   for (const entry of allowEntries) {
     const path = pathOfEntry(entry);
     if (path === undefined) continue;
-    bucketFor(READ_CATEGORY)[path] ??= "allow";
+    allowUnlessSet(bucketFor(READ_CATEGORY), path);
     if (isRecord(entry) && entry[POOL_WRITE_KEY] === true) {
       for (const category of WRITE_CATEGORIES) {
-        bucketFor(category)[path] ??= "allow";
+        allowUnlessSet(bucketFor(category), path);
       }
     }
   }

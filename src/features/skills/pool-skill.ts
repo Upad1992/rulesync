@@ -4,10 +4,8 @@ import { z } from "zod/mini";
 
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { POOL_GLOBAL_SKILLS_DIR_PATH, POOL_SKILLS_DIR_PATH } from "../../constants/pool-paths.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
 import { quoteForLog, stripControlCharacters } from "../../utils/control-characters.js";
-import { formatError } from "../../utils/error.js";
 import { toPosixPath } from "../../utils/file.js";
 import { warnWithFallback } from "../../utils/logger.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
@@ -101,29 +99,8 @@ export class PoolSkill extends ToolSkill {
     return PoolSkillFrontmatterSchema.parse(this.requireMainFileFrontmatter());
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (!this.mainFile) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-
-    const result = PoolSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(PoolSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -134,16 +111,7 @@ export class PoolSkill extends ToolSkill {
       targets: ["*"],
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -186,53 +154,15 @@ export class PoolSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("pool");
-  }
+  protected static override readonly toolTarget = "pool";
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<PoolSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: PoolSkill.getSettablePaths,
-    });
-
-    const result = PoolSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new PoolSkill({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new PoolSkill(
+      await this.loadStandardSkillParams({ params, schema: PoolSkillFrontmatterSchema }),
+    );
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): PoolSkill {
-    const settablePaths = PoolSkill.getSettablePaths({ global });
-    return new PoolSkill({
-      outputRoot,
-      relativeDirPath: relativeDirPath ?? settablePaths.relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): PoolSkill {
+    return new PoolSkill(this.forDeletionParams(params));
   }
 }

@@ -8,47 +8,33 @@ import { FeatureProcessor } from "../../types/feature-processor.js";
 import {
   AMP_HOOK_EVENTS,
   AMP_OVERRIDE_ONLY_HOOK_EVENTS,
-  ANTIGRAVITY_HOOK_EVENTS,
-  AUGMENTCODE_HOOK_EVENTS,
-  BOB_HOOK_EVENTS,
-  CLAUDE_HOOK_EVENTS,
-  CODEBUDDY_HOOK_EVENTS,
   CODEBUDDY_MATCHER_HOOK_EVENTS,
-  CODEXCLI_HOOK_EVENTS,
   CODEWHALE_HOOK_EVENTS,
   CODEWHALE_MATCHER_HOOK_EVENTS,
-  COMMANDCODE_HOOK_EVENTS,
   COPILOT_HOOK_EVENTS,
+  COPILOT_MATCHER_HOOK_EVENTS,
   COPILOTCLI_HOOK_EVENTS,
-  CONTINUE_HOOK_EVENTS,
-  CORTEXCODE_HOOK_EVENTS,
   CURSOR_HOOK_EVENTS,
   DEEPAGENTS_HOOK_EVENTS,
-  DEVIN_HOOK_EVENTS,
-  FACTORYDROID_HOOK_EVENTS,
+  FIREBENDER_HOOK_EVENTS,
   CLINE_HOOK_EVENTS,
   CRUSH_HOOK_EVENTS,
-  GOOSE_HOOK_EVENTS,
-  GROKCLI_HOOK_EVENTS,
   HERMESAGENT_HOOK_EVENTS,
-  GITLABDUO_HOOK_EVENTS,
-  JUNIE_HOOK_EVENTS,
   KILO_HOOK_EVENTS,
   KIMI_CODE_HOOK_EVENTS,
   KIRO_HOOK_EVENTS,
   KIRO_IDE_HOOK_EVENTS,
-  LETTACODE_HOOK_EVENTS,
   OPENCODE_HOOK_EVENTS,
   OPENCODE_MATCHER_HOOK_EVENTS,
+  OPENCODE_V2_HOOK_EVENTS,
+  OPENCODE_V2_MATCHER_HOOK_EVENTS,
   OMP_HOOK_EVENTS,
   PI_HOOK_EVENTS,
   POOL_HOOK_EVENTS,
-  QODER_HOOK_EVENTS,
   QWENCODE_HOOK_EVENTS,
   REASONIX_HOOK_EVENTS,
   TABNINE_HOOK_EVENTS,
   VIBE_HOOK_EVENTS,
-  ZCODE_HOOK_EVENTS,
   type HookDefinition,
   type HookEvent,
   type HooksConfig,
@@ -61,20 +47,29 @@ import type { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { isFileNotFoundError } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
+import { quoteValueForWarning } from "../../utils/quote-value.js";
 import { getRulesyncSourceCandidates } from "../../utils/rulesync-source-path.js";
+import { isPlainObject } from "../../utils/type-guards.js";
 import { AmpHooks } from "./amp-hooks.js";
-import { AntigravityCliHooks, AntigravityIdeHooks } from "./antigravity-hooks.js";
+import {
+  ANTIGRAVITY_CONVERTER_CONFIG,
+  AntigravityCliHooks,
+  AntigravityIdeHooks,
+} from "./antigravity-hooks.js";
 import { AntigravityPluginHooks } from "./antigravity-plugin-hooks.js";
-import { AugmentcodeHooks } from "./augmentcode-hooks.js";
-import { AugmentcodePluginHooks } from "./augmentcode-plugin-hooks.js";
+import { AUGMENTCODE_CONVERTER_CONFIG, AugmentcodeHooks } from "./augmentcode-hooks.js";
+import {
+  AUGMENTCODE_PLUGIN_CONVERTER_CONFIG,
+  AugmentcodePluginHooks,
+} from "./augmentcode-plugin-hooks.js";
 import { BobHooks } from "./bob-hooks.js";
 import { ClaudecodeHooks } from "./claudecode-hooks.js";
 import { ClaudecodePluginHooks } from "./claudecode-plugin-hooks.js";
 import { ClineHooks } from "./cline-hooks.js";
 import { CodebuddyHooks } from "./codebuddy-hooks.js";
 import { CodewhaleHooks } from "./codewhale-hooks.js";
-import { CodexcliHooks } from "./codexcli-hooks.js";
-import { CommandcodeHooks } from "./commandcode-hooks.js";
+import { CODEXCLI_CONVERTER_CONFIG, CodexcliHooks } from "./codexcli-hooks.js";
+import { COMMANDCODE_CONVERTER_CONFIG, CommandcodeHooks } from "./commandcode-hooks.js";
 import { ContinueHooks } from "./continue-hooks.js";
 import { CopilotHooks } from "./copilot-hooks.js";
 import { CopilotcliHooks } from "./copilotcli-hooks.js";
@@ -82,23 +77,25 @@ import { CortexcodeHooks } from "./cortexcode-hooks.js";
 import { CrushHooks } from "./crush-hooks.js";
 import { CursorHooks } from "./cursor-hooks.js";
 import { DeepagentsHooks } from "./deepagents-hooks.js";
-import { DevinHooks } from "./devin-hooks.js";
+import { DEVIN_CONVERTER_CONFIG, DevinHooks } from "./devin-hooks.js";
 import { DevinPluginHooks } from "./devin-plugin-hooks.js";
-import { FactorydroidHooks } from "./factorydroid-hooks.js";
-import { GitlabduoHooks } from "./gitlabduo-hooks.js";
-import { GooseHooks } from "./goose-hooks.js";
-import { GrokcliHooks } from "./grokcli-hooks.js";
+import { FACTORYDROID_CONVERTER_CONFIG, FactorydroidHooks } from "./factorydroid-hooks.js";
+import { FirebenderHooks } from "./firebender-hooks.js";
+import { GITLABDUO_CONVERTER_CONFIG, GitlabduoHooks } from "./gitlabduo-hooks.js";
+import { GOOSE_CONVERTER_CONFIG, GooseHooks } from "./goose-hooks.js";
+import { GROKCLI_CONVERTER_CONFIG, GrokcliHooks } from "./grokcli-hooks.js";
 import { HermesagentHooks } from "./hermesagent-hooks.js";
-import { JunieHooks } from "./junie-hooks.js";
+import { JUNIE_CONVERTER_CONFIG, JunieHooks } from "./junie-hooks.js";
 import { KiloHooks } from "./kilo-hooks.js";
 import { KimiCodeHooks } from "./kimi-code-hooks.js";
 import { KiroCliHooks } from "./kiro-cli-hooks.js";
 import { KiroHooks } from "./kiro-hooks.js";
 import { KIRO_HOOKS_OVERRIDE_KEY, KiroIdeHooks } from "./kiro-ide-hooks.js";
-import { LettacodeHooks } from "./lettacode-hooks.js";
+import { LETTACODE_CONVERTER_CONFIG, LettacodeHooks } from "./lettacode-hooks.js";
 import { MimocodeHooks } from "./mimocode-hooks.js";
 import { OmpHooks } from "./omp-hooks.js";
 import { OpencodeHooks } from "./opencode-hooks.js";
+import { Opencodev1Hooks } from "./opencodev1-hooks.js";
 import { PiHooks } from "./pi-hooks.js";
 import { PoolHooks } from "./pool-hooks.js";
 import { QoderHooks } from "./qoder-hooks.js";
@@ -106,16 +103,18 @@ import { QwencodeHooks } from "./qwencode-hooks.js";
 import { ReasonixHooks } from "./reasonix-hooks.js";
 import { RulesyncHooks } from "./rulesync-hooks.js";
 import { TabnineHooks } from "./tabnine-hooks.js";
+import type { ToolHooksConverterConfig } from "./tool-hooks-converter.js";
 import type {
   ToolHooksForDeletionParams,
   ToolHooksFromFileParams,
   ToolHooksFromRulesyncHooksParams,
 } from "./tool-hooks.js";
 import { ToolHooks } from "./tool-hooks.js";
+import { TraeHooks } from "./trae-hooks.js";
 import { VibeHooks } from "./vibe-hooks.js";
 import { VibePluginHooks } from "./vibe-plugin-hooks.js";
-import { ZcodeHooks } from "./zcode-hooks.js";
-import { ZcodePluginHooks } from "./zcode-plugin-hooks.js";
+import { ZCODE_CONVERTER_CONFIG, ZcodeHooks } from "./zcode-hooks.js";
+import { ZCODE_PLUGIN_CONVERTER_CONFIG, ZcodePluginHooks } from "./zcode-plugin-hooks.js";
 
 export type HooksProcessorToolTarget = (typeof hooksProcessorToolTargetTuple)[number];
 
@@ -132,8 +131,7 @@ type ToolHooksFactory = {
       relativeDirPath: string;
       relativeFilePath: string;
     };
-    isDeletable?: (instance: ToolHooks) => boolean;
-    getAuxiliaryFiles?: (params: {
+    getAuxiliaryFiles: (params: {
       outputRoot?: string;
       global?: boolean;
       /** The instance just built, for adapters whose extra files derive from it. */
@@ -146,7 +144,7 @@ type ToolHooksFactory = {
      * config file there (Codex CLI's `config.toml`), which must never become a
      * deletion candidate.
      */
-    getDeletableAuxiliaryFiles?: (params: {
+    getDeletableAuxiliaryFiles: (params: {
       outputRoot?: string;
       global?: boolean;
     }) => ToolFile[] | Promise<ToolFile[]>;
@@ -176,6 +174,20 @@ type ToolHooksFactory = {
    * schema level.
    */
   overrideOnlyEvents?: readonly string[];
+  /**
+   * Whether the target's hooks format carries a per-hook on-disk enable flag,
+   * so `enabled: false` is written rather than dropped with a warning.
+   */
+  supportsPerHookEnabled?: boolean;
+  /** Whether the target's hooks format carries the Kiro `confirm` prompt. */
+  supportsPerHookConfirm?: boolean;
+  /**
+   * Whether the target forwards the per-hook `if` condition. Every other
+   * target skips a definition carrying one (with a warning) instead of
+   * emitting it unconditionally, because without `if` the hook would run on
+   * every call its matcher selects.
+   */
+  supportsPerHookIf?: boolean;
 };
 
 /**
@@ -288,17 +300,6 @@ export const HOOKS_OVERRIDE_KEY_ALIASES: Partial<Record<ToolTarget, string>> = {
   "devin-plugin": "devin",
 };
 
-/** The targets whose hooks format carries a per-hook on-disk enable flag. */
-const PER_HOOK_ENABLED_TARGETS: ReadonlySet<ToolTarget> = new Set([
-  "kiro-cli",
-  "kiro-ide",
-  "zcode",
-  "zcode-plugin",
-]);
-
-/** The targets whose hooks format carries the Kiro `confirm` prompt. */
-const PER_HOOK_CONFIRM_TARGETS: ReadonlySet<ToolTarget> = new Set(["kiro-cli", "kiro-ide"]);
-
 /**
  * Names the shared events that carry a hook whose canonical definition
  * satisfies `predicate`, excluding events the target skips altogether (those
@@ -318,6 +319,36 @@ function emittedEventsWithHook(params: {
   return Object.entries(sharedHooks)
     .filter(([event, defs]) => !skippedEvents.has(event) && defs.some((def) => predicate(def)))
     .map(([event]) => event);
+}
+
+/**
+ * The capabilities an adapter built on the shared hooks converter already
+ * declares in its converter config: the events it emits, the hook types it
+ * keeps, and whether it writes the per-hook `enabled` flag. Reading them from
+ * there keeps the processor's skip and dropped-field warnings in step with
+ * what the converter actually writes.
+ */
+function converterCapabilities(
+  config: ToolHooksConverterConfig,
+): Pick<
+  ToolHooksFactory,
+  "supportedEvents" | "supportedHookTypes" | "supportsPerHookEnabled" | "supportsPerHookIf"
+> {
+  if (!config.supportedHookTypes) {
+    throw new Error("Hooks converter config must declare its supportedHookTypes");
+  }
+  const passesThroughEnabled = (config.booleanPassthroughFields ?? []).some(
+    (field) => field.canonical === "enabled",
+  );
+  const passesThroughIf =
+    (config.stringPassthroughFields ?? []).some((field) => field.canonical === "if") &&
+    !(config.skippedWhenFields ?? []).includes("if");
+  return {
+    supportedEvents: config.supportedEvents,
+    supportedHookTypes: [...config.supportedHookTypes],
+    ...(passesThroughEnabled ? { supportsPerHookEnabled: true } : {}),
+    ...(passesThroughIf ? { supportsPerHookIf: true } : {}),
+  };
 }
 
 export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFactory>([
@@ -349,8 +380,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(ANTIGRAVITY_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -363,8 +393,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(ANTIGRAVITY_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -377,8 +406,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: false,
         supportsImport: true,
       },
-      supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(ANTIGRAVITY_CONVERTER_CONFIG),
       supportsMatcher: true,
       // The adapter only emits its own native events; unknown override-block
       // keys are dropped, so report them.
@@ -400,6 +428,25 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
     },
   ],
   [
+    "firebender",
+    {
+      class: FirebenderHooks,
+      meta: {
+        // `.firebender/hooks.json` (project) and `~/.firebender/hooks.json`
+        // (global), in Cursor's `{ version, hooks }` layout.
+        // https://docs.firebender.com/multi-agent/hooks
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsImport: true,
+      },
+      supportedEvents: FIREBENDER_HOOK_EVENTS,
+      // The config table lists `type: "command" | "prompt"`, but what a prompt
+      // hook does is undocumented, so only command hooks are generated.
+      supportedHookTypes: ["command"],
+      supportsMatcher: true,
+    },
+  ],
+  [
     "claudecode",
     {
       class: ClaudecodeHooks,
@@ -408,10 +455,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: CLAUDE_HOOK_EVENTS,
-      // All five documented handler types are emitted faithfully with their
-      // type-specific payload fields. https://code.claude.com/docs/en/hooks
-      supportedHookTypes: ["command", "prompt", "http", "mcp_tool", "agent"],
+      ...converterCapabilities(ClaudecodeHooks.getConverterConfig()),
       supportsMatcher: true,
     },
   ],
@@ -424,8 +468,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: false,
         supportsImport: true,
       },
-      supportedEvents: CLAUDE_HOOK_EVENTS,
-      supportedHookTypes: ["command", "prompt", "http", "mcp_tool", "agent"],
+      ...converterCapabilities(ClaudecodePluginHooks.getConverterConfig()),
       supportsMatcher: true,
       // The adapter only emits its own native events; unknown override-block
       // keys are dropped, so report them.
@@ -450,8 +493,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: CODEBUDDY_HOOK_EVENTS,
-      supportedHookTypes: ["command", "http", "prompt", "agent"],
+      ...converterCapabilities(CodebuddyHooks.getConverterConfig()),
       supportsMatcher: true,
       matcherEvents: CODEBUDDY_MATCHER_HOOK_EVENTS,
     },
@@ -489,8 +531,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: CODEXCLI_HOOK_EVENTS,
-      supportedHookTypes: ["command", "mcp_tool"],
+      ...converterCapabilities(CODEXCLI_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -509,8 +550,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: COMMANDCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(COMMANDCODE_CONVERTER_CONFIG),
       supportsMatcher: true,
       matcherEvents: ["preToolUse", "postToolUse"],
     },
@@ -529,7 +569,8 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       },
       supportedEvents: COPILOT_HOOK_EVENTS,
       supportedHookTypes: ["command"],
-      supportsMatcher: false,
+      supportsMatcher: true,
+      matcherEvents: COPILOT_MATCHER_HOOK_EVENTS,
     },
   ],
   [
@@ -547,7 +588,13 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       },
       supportedEvents: COPILOTCLI_HOOK_EVENTS,
       supportedHookTypes: ["command", "prompt", "http"],
-      supportsMatcher: false,
+      // `matcher` is honored on the six events the hooks reference documents
+      // (preToolUse, postToolUse, permissionRequest, notification, preCompact,
+      // subagentStart); the adapter emits it there and itself drops it (with a
+      // warning) on the other events, keeping the hook. No `matcherEvents` here,
+      // so the processor does not also report those hooks as skipped.
+      // https://docs.github.com/en/copilot/reference/hooks-reference
+      supportsMatcher: true,
     },
   ],
   [
@@ -590,6 +637,25 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
     "opencode",
     {
       class: OpencodeHooks,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsImport: false,
+      },
+      // OpenCode 2.x: a `{ id, setup }` plugin (opencodev1 keeps the V1 lists).
+      supportedEvents: OPENCODE_V2_HOOK_EVENTS,
+      supportedHookTypes: ["command"],
+      supportsMatcher: true,
+      matcherEvents: OPENCODE_V2_MATCHER_HOOK_EVENTS,
+      // The adapter only emits its own native events; unknown override-block
+      // keys are dropped, so report them.
+      dropsUnknownOverrideEvents: true,
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Hooks,
       meta: {
         supportsProject: true,
         supportsGlobal: true,
@@ -659,10 +725,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: FACTORYDROID_HOOK_EVENTS,
-      // Droid's hooks reference states "Currently only \"command\" is
-      // supported" — a prompt-type entry in hooks.json is inert.
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(FACTORYDROID_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -701,8 +764,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: GOOSE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(GOOSE_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -789,6 +851,8 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       supportedEvents: KIRO_IDE_HOOK_EVENTS,
       supportedHookTypes: ["command", "prompt"],
       supportsMatcher: true,
+      supportsPerHookEnabled: true,
+      supportsPerHookConfirm: true,
       // Triggers with no canonical event (PostFileSave, PreTaskExec, …)
       // supplied via the shared `kiro` override block are emitted verbatim.
     },
@@ -811,6 +875,8 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       supportedEvents: KIRO_IDE_HOOK_EVENTS,
       supportedHookTypes: ["command", "prompt"],
       supportsMatcher: true,
+      supportsPerHookEnabled: true,
+      supportsPerHookConfirm: true,
       // IDE-only triggers (PostFileSave, PreTaskExec, …) supplied via the
       // shared `kiro` override block are emitted verbatim.
     },
@@ -829,8 +895,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: LETTACODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(LETTACODE_CONVERTER_CONFIG),
       supportsMatcher: true,
       matcherEvents: ["preToolUse", "postToolUse", "postToolUseFailure", "permissionRequest"],
     },
@@ -848,8 +913,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: DEVIN_HOOK_EVENTS,
-      supportedHookTypes: ["command", "prompt"],
+      ...converterCapabilities(DEVIN_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -860,8 +924,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       // https://docs.devin.ai/cli/extensibility/plugins/overview
       class: DevinPluginHooks,
       meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
-      supportedEvents: DEVIN_HOOK_EVENTS,
-      supportedHookTypes: ["command", "prompt"],
+      ...converterCapabilities(DEVIN_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -877,8 +940,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: AUGMENTCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(AUGMENTCODE_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -893,8 +955,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: false,
         supportsImport: true,
       },
-      supportedEvents: AUGMENTCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(AUGMENTCODE_PLUGIN_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -913,8 +974,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: BOB_HOOK_EVENTS,
-      supportedHookTypes: ["command", "http"],
+      ...converterCapabilities(BobHooks.getConverterConfig()),
       supportsMatcher: true,
       matcherEvents: ["preToolUse", "postToolUse"],
     },
@@ -935,8 +995,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: CONTINUE_HOOK_EVENTS,
-      supportedHookTypes: ["command", "http", "prompt", "agent"],
+      ...converterCapabilities(ContinueHooks.getConverterConfig()),
       supportsMatcher: true,
       matcherEvents: [
         "preToolUse",
@@ -968,8 +1027,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: CORTEXCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command", "prompt"],
+      ...converterCapabilities(CortexcodeHooks.getConverterConfig()),
       supportsMatcher: true,
       matcherEvents: [
         "preToolUse",
@@ -996,8 +1054,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: JUNIE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(JUNIE_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -1014,8 +1071,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: GITLABDUO_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(GITLABDUO_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -1040,6 +1096,25 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
     },
   ],
   [
+    "trae",
+    {
+      class: TraeHooks,
+      meta: {
+        // TRAE hooks live in the dedicated `.trae/hooks.json` (project) and
+        // `~/.trae/hooks.json` (global), with command hooks only. `matcher` is
+        // a regex over the tool name (PreToolUse/PostToolUse) or the
+        // notification type (Notification); other events take none.
+        // https://docs.trae.ai/ide/hook-configuration-reference?_lang=en
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsImport: true,
+      },
+      ...converterCapabilities(TraeHooks.getConverterConfig()),
+      supportsMatcher: true,
+      matcherEvents: ["preToolUse", "postToolUse", "notification"],
+    },
+  ],
+  [
     "vibe",
     {
       class: VibeHooks,
@@ -1053,8 +1128,10 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       },
       supportedEvents: VIBE_HOOK_EVENTS,
       supportedHookTypes: ["command"],
-      // All three Vibe events (before_tool/after_tool/post_agent_turn) accept a
-      // `match` tool-name matcher (fnmatch glob or `re:` regex).
+      // Every Vibe event accepts a `match` (fnmatch glob or `re:` regex): a
+      // tool name on pre_tool/post_tool, an agent name on post_agent (v3.0.3+;
+      // the adapter writes `main` for `stop` and the matcher for
+      // `subagentStop`).
       supportsMatcher: true,
       // The adapter only emits its own native events; unknown override-block
       // keys are dropped, so report them.
@@ -1108,8 +1185,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: QODER_HOOK_EVENTS,
-      supportedHookTypes: ["command", "http", "prompt", "agent"],
+      ...converterCapabilities(QoderHooks.getConverterConfig()),
       supportsMatcher: true,
       matcherEvents: [
         "sessionStart",
@@ -1193,10 +1269,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
         supportsGlobal: true,
         supportsImport: true,
       },
-      supportedEvents: GROKCLI_HOOK_EVENTS,
-      // Grok's `HookHandlerType` is `command | http`, and the shared converter
-      // round-trips both, so neither is reported as skipped.
-      supportedHookTypes: ["command", "http"],
+      ...converterCapabilities(GROKCLI_CONVERTER_CONFIG),
       // Tool-name events honor `matcher`; the adapter drops it (with a warning)
       // on the matcher-less lifecycle events.
       supportsMatcher: true,
@@ -1207,9 +1280,9 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
     {
       // Crush hooks live under the `hooks` key of `<project>/crush.json` (or
       // `.crush.json`) and `~/.config/crush/crush.json`, as a flat
-      // `PreToolUse: [{name, matcher, command, timeout}]` list. `matcher` is
-      // a regex on the tool name; only `PreToolUse` fires today.
-      // https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md
+      // `<Event>: [{name, matcher, command, timeout}]` list. `matcher` is a
+      // regex on the tool name, accepted only on tool events.
+      // https://github.com/charmbracelet/crush/blob/v0.99.0/docs/hooks/README.md
       class: CrushHooks,
       meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
       supportedEvents: CRUSH_HOOK_EVENTS,
@@ -1228,8 +1301,7 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       // hooks run once the user trusts them in ZCode.
       class: ZcodeHooks,
       meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
-      supportedEvents: ZCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(ZCODE_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
@@ -1240,12 +1312,22 @@ export const toolHooksFactories = new Map<HooksProcessorToolTarget, ToolHooksFac
       // https://zcode.z.ai/en/docs/plugin
       class: ZcodePluginHooks,
       meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
-      supportedEvents: ZCODE_HOOK_EVENTS,
-      supportedHookTypes: ["command"],
+      ...converterCapabilities(ZCODE_PLUGIN_CONVERTER_CONFIG),
       supportsMatcher: true,
     },
   ],
 ]);
+
+// The targets whose hooks format carries a per-hook field, named in the
+// dropped-field warnings so the list cannot drift from the factories.
+function targetsSupporting(
+  capability: "supportsPerHookEnabled" | "supportsPerHookConfirm" | "supportsPerHookIf",
+): string {
+  return [...toolHooksFactories.entries()]
+    .filter(([, f]) => f[capability])
+    .map(([t]) => t)
+    .join(" / ");
+}
 
 // Project-mode generation/import should only expose tools that actually write
 // hooks into the workspace. This keeps global-only targets out of project
@@ -1266,6 +1348,10 @@ const hooksProcessorToolTargetsGlobalImportable: ToolTarget[] = [...toolHooksFac
 export class HooksProcessor extends FeatureProcessor {
   private readonly toolTarget: HooksProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
   private readonly preserveUnownedHooks: boolean;
 
   constructor({
@@ -1350,13 +1436,12 @@ export class HooksProcessor extends FeatureProcessor {
           relativeFilePath: paths.relativeFilePath,
           global: this.global,
         });
-        const auxiliaryFiles =
-          (await factory.class.getDeletableAuxiliaryFiles?.({
-            outputRoot: this.outputRoot,
-            global: this.global,
-          })) ?? [];
+        const auxiliaryFiles = await factory.class.getDeletableAuxiliaryFiles({
+          outputRoot: this.outputRoot,
+          global: this.global,
+        });
         const list = [
-          ...(toolHooks.isDeletable?.() !== false ? [toolHooks] : []),
+          ...(toolHooks.isDeletable() ? [toolHooks] : []),
           ...auxiliaryFiles.filter((file) => file.isDeletable()),
         ];
         this.logger.debug(
@@ -1447,7 +1532,9 @@ export class HooksProcessor extends FeatureProcessor {
 
     const toolHooks = await factory.class.fromRulesyncHooks({
       outputRoot: this.outputRoot,
-      rulesyncHooks,
+      rulesyncHooks: factory.supportsPerHookIf
+        ? rulesyncHooks
+        : this.withoutConditionalHooks({ rulesyncHooks, overrideKey }),
       validate: true,
       global: this.global,
       preserveUnowned: this.preserveUnownedHooks,
@@ -1458,17 +1545,69 @@ export class HooksProcessor extends FeatureProcessor {
     });
 
     const result: ToolFile[] = [toolHooks];
-    const auxiliaryFiles = await factory.class.getAuxiliaryFiles?.({
+    const auxiliaryFiles = await factory.class.getAuxiliaryFiles({
       outputRoot: this.outputRoot,
       global: this.global,
       toolHooks,
       logger: withToolTargetPrefix({ logger: this.logger, toolTarget: this.toolTarget }),
     });
-    if (auxiliaryFiles && auxiliaryFiles.length > 0) {
-      result.push(...auxiliaryFiles);
-    }
+    result.push(...auxiliaryFiles);
 
     return result;
+  }
+
+  /**
+   * Returns the hooks source without the definitions that carry a per-hook
+   * `if` condition, warning about each one. Used for targets that cannot
+   * express `if`: emitting such a hook without its condition would make it
+   * fire on every call its matcher selects, so a permission-granting hook
+   * scoped by `if` would approve far more than its author meant.
+   */
+  private withoutConditionalHooks(params: {
+    rulesyncHooks: RulesyncHooks;
+    overrideKey: string;
+  }): RulesyncHooks {
+    const { rulesyncHooks, overrideKey } = params;
+    const config = rulesyncHooks.getJson();
+    const skipped: string[] = [];
+    const filterHooks = (hooks: unknown): unknown => {
+      if (!isPlainObject(hooks)) return hooks;
+      const filtered: Record<string, unknown> = {};
+      for (const [event, defs] of Object.entries(hooks)) {
+        if (!Array.isArray(defs)) {
+          filtered[event] = defs;
+          continue;
+        }
+        filtered[event] = defs.filter((def: unknown) => {
+          const condition = isPlainObject(def) ? def.if : undefined;
+          if (typeof condition !== "string" || condition.trim() === "") return true;
+          skipped.push(`${event} (${quoteValueForWarning(condition)})`);
+          return false;
+        });
+      }
+      return filtered;
+    };
+
+    const filteredConfig: Record<string, unknown> = {
+      ...config,
+      hooks: filterHooks(config.hooks),
+    };
+    const override = (config as Record<string, unknown>)[overrideKey];
+    if (Object.hasOwn(config, overrideKey) && isPlainObject(override)) {
+      filteredConfig[overrideKey] = { ...override, hooks: filterHooks(override.hooks) };
+    }
+    if (skipped.length === 0) return rulesyncHooks;
+
+    this.logger.warn(
+      `Skipped hook(s) with an "if" condition for ${this.toolTarget} (only the ${targetsSupporting("supportsPerHookIf")} hooks formats support it, and without it the hook would run on every call its matcher selects): ${skipped.join(", ")}`,
+    );
+    return new RulesyncHooks({
+      outputRoot: rulesyncHooks.getOutputRoot(),
+      relativeDirPath: rulesyncHooks.getRelativeDirPath(),
+      relativeFilePath: rulesyncHooks.getRelativeFilePath(),
+      fileContent: JSON.stringify(filteredConfig),
+      validate: false,
+    });
   }
 
   /**
@@ -1484,11 +1623,11 @@ export class HooksProcessor extends FeatureProcessor {
   }): void {
     const { factory, sharedHooks, effectiveHooks } = params;
     // Warn that `enabled: false` cannot be expressed by targets whose hooks
-    // format carries no per-definition on-disk enable flag (`kiro-ide`,
-    // `kiro-cli` and `zcode` do); everywhere else the hook is emitted as an
+    // format carries no per-definition on-disk enable flag (see
+    // `supportsPerHookEnabled`); everywhere else the hook is emitted as an
     // ordinary, active hook, so a user who paused one hook would otherwise see
     // it keep firing with no explanation.
-    if (!PER_HOOK_ENABLED_TARGETS.has(this.toolTarget)) {
+    if (!factory.supportsPerHookEnabled) {
       const eventsWithDisabledHooks = emittedEventsWithHook({
         factory,
         sharedHooks,
@@ -1497,7 +1636,7 @@ export class HooksProcessor extends FeatureProcessor {
       });
       if (eventsWithDisabledHooks.length > 0) {
         this.logger.warn(
-          `Emitting "enabled: false" hook(s) as active for ${this.toolTarget} (only the kiro-cli / kiro-ide / zcode hooks formats support the flag): ${eventsWithDisabledHooks.join(", ")}`,
+          `Emitting "enabled: false" hook(s) as active for ${this.toolTarget} (only the ${targetsSupporting("supportsPerHookEnabled")} hooks formats support the flag): ${eventsWithDisabledHooks.join(", ")}`,
         );
       }
     }
@@ -1505,7 +1644,7 @@ export class HooksProcessor extends FeatureProcessor {
     // Same idea for the Kiro `confirm` prompt: it asks the user
     // before the command runs, so a target without it would run the hook
     // unconditionally with no explanation.
-    if (!PER_HOOK_CONFIRM_TARGETS.has(this.toolTarget)) {
+    if (!factory.supportsPerHookConfirm) {
       const eventsWithConfirmHooks = emittedEventsWithHook({
         factory,
         sharedHooks,
@@ -1514,7 +1653,7 @@ export class HooksProcessor extends FeatureProcessor {
       });
       if (eventsWithConfirmHooks.length > 0) {
         this.logger.warn(
-          `Emitting hook(s) without their "confirm" prompt for ${this.toolTarget} (only the kiro-cli / kiro-ide hooks formats support it): ${eventsWithConfirmHooks.join(", ")}`,
+          `Emitting hook(s) without their "confirm" prompt for ${this.toolTarget} (only the ${targetsSupporting("supportsPerHookConfirm")} hooks formats support it): ${eventsWithConfirmHooks.join(", ")}`,
         );
       }
     }

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -86,11 +86,6 @@ describe("KiloCommand", () => {
           kilo: { subtask: true },
         },
         body: "Analyze coverage details",
-        fileContent: stringifyFrontmatter("Analyze coverage details", {
-          targets: ["kilo"],
-          description: "Analyze coverage",
-          kilo: { subtask: true },
-        }),
       });
 
       const command = KiloCommand.fromRulesyncCommand({
@@ -200,7 +195,6 @@ describe("KiloCommand", () => {
         relativeFilePath,
         frontmatter: { targets: ["kilo"], description: "A command" },
         body: "Body",
-        fileContent: stringifyFrontmatter("Body", { targets: ["kilo"], description: "A command" }),
       });
 
     it.each([{ global: false }, { global: true }])(

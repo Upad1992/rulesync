@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -1158,35 +1158,6 @@ describe("RulesyncPermissions.mergeImportedJson", () => {
     });
 
     expect(merged).toEqual({ permission: { bash: { "git *": "allow" } } });
-  });
-
-  it("merges another tool's override block field by field and its permission per category", () => {
-    const merged = RulesyncPermissions.mergeImportedJson({
-      existing: {
-        claudecode: {
-          permission: { bash: { "*": "ask" }, edit: { "src/**": "allow" } },
-          permissions: { defaultMode: "default" },
-          sandbox: { enabled: true },
-        },
-      },
-      imported: {
-        permission: { bash: { "git *": "allow" } },
-        claudecode: {
-          permission: { bash: { "git *": "allow" } },
-          permissions: { defaultMode: "plan" },
-        },
-      },
-      toolTarget: "hermesagent",
-    });
-
-    expect(merged).toEqual({
-      permission: { bash: { "git *": "allow" } },
-      claudecode: {
-        permission: { bash: { "git *": "allow" }, edit: { "src/**": "allow" } },
-        permissions: { defaultMode: "plan" },
-        sandbox: { enabled: true },
-      },
-    });
   });
 
   it("is idempotent when the same document is imported twice", () => {

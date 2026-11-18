@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
@@ -115,7 +115,9 @@ describe("VibeSkill", () => {
         expect(logger.warn).toHaveBeenCalledTimes(1);
         expect(logger.warn).toHaveBeenCalledWith(
           expect.stringMatching(
-            new RegExp(`^Vibe skills: the skill name "${name}" is reserved for a Vibe built-in`),
+            new RegExp(
+              `^Vibe skills: the skill name "${name}" matches a Vibe built-in skill\\. Vibe before v3\\.0\\.4 skips`,
+            ),
           ),
         );
       },

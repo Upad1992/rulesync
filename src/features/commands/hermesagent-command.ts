@@ -18,23 +18,28 @@ import {
 } from "../../constants/rulesync-paths.js";
 import type { SharedWritePath } from "../../lib/shared-file-derive.js";
 import { ValidationResult } from "../../types/ai-file.js";
-import { caseFoldIdentity } from "../../types/feature-processor.js";
+import { caseFoldIdentity, refusesWriteOutsideRoot } from "../../types/feature-processor.js";
 import { ToolFile } from "../../types/tool-file.js";
-import { readFileContentOrNull, toPosixPath } from "../../utils/file.js";
+import { readFileContentOrNull, toPosixPath, writeFileContent } from "../../utils/file.js";
 import {
-  getHermesagentConfigSharedFileKey,
   getHermesagentRelativeDirPath,
   getHermesagentRelativeFilePath,
   getHermesagentRulesyncOutputRoot,
   getHermesagentSharedConfigWritePaths,
 } from "../../utils/hermesagent.js";
-import { applySharedConfigPatch, parseSharedConfig } from "../shared/shared-config-gateway.js";
+import {
+  getHermesPluginDisabledConfigContent,
+  getHermesPluginEnabledConfigContent,
+  getHermesQueueUserMessagePython,
+  hermesSlashName,
+} from "../shared/hermes-plugin-commands.js";
 import { HermesagentSkill } from "../skills/hermesagent-skill.js";
 import { RulesyncSkill } from "../skills/rulesync-skill.js";
 import { listSkillDirNames } from "../skills/skills-utils.js";
 import { RulesyncCommand } from "./rulesync-command.js";
 import {
   ToolCommand,
+  type ToolCommandAfterOrphanSweepParams,
   type ToolCommandForDeletionParams,
   type ToolCommandFromFileParams,
   type ToolCommandFromRulesyncCommandParams,
@@ -47,15 +52,6 @@ const HermesCommandSpecSchema = z.object({
 });
 
 type HermesCommandSpec = z.infer<typeof HermesCommandSpecSchema>;
-
-function hermesSlashName(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[ _]/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-|-$/g, "");
-}
 
 function getPluginManifestContent(): string {
   return [
@@ -91,6 +87,8 @@ def _load_commands():
     return commands
 
 
+${getHermesQueueUserMessagePython({ pluginName: "rulesync-commands" })}
+
 def _register_command(ctx, command):
     slug = command.get("slug")
     if not slug:
@@ -100,31 +98,22 @@ def _register_command(ctx, command):
     prompt = command.get("prompt") or ""
 
     def handler(args=None, **kwargs):
-        del kwargs
         raw_args = ""
         if isinstance(args, dict):
             raw_args = args.get("args") or args.get("context") or args.get("prompt") or ""
         elif args is not None:
             raw_args = str(args)
 
-        context_parts = [prompt] if prompt else []
+        parts = [prompt] if prompt else []
         if raw_args:
-            context_parts.append(f"User arguments:\\n{raw_args}")
+            parts.append(f"User arguments:\\n{raw_args}")
 
-        # delegate_task takes no model-facing "toolsets" argument: the child
-        # inherits the parent's enabled toolsets. "tasks" is the only shape its
-        # schema advertises; a top-level "goal" is an unadvertised legacy path.
-        return ctx.dispatch_tool(
-            "delegate_task",
-            {
-                "tasks": [
-                    {
-                        "goal": description,
-                        "context": "\\n\\n".join(context_parts),
-                    },
-                ],
-            },
-        )
+        # A slash command runs outside any agent turn, so calling delegate_task
+        # here fails with "delegate_task requires a parent agent context".
+        # Queue the command prompt as the session's next user message instead.
+        label = f"the /{slug} command"
+        error = _queue_user_message(ctx, "\\n\\n".join(parts) or description, kwargs, label)
+        return error or f"Queued {label}."
 
     ctx.register_command(slug, handler, description)
 
@@ -142,50 +131,26 @@ function getEnabledPluginConfigContent({
   currentContent: string;
   global: boolean;
 }): string {
-  const config = parseSharedConfig({ format: "yaml", fileContent: currentContent });
-  const plugins =
-    config.plugins && typeof config.plugins === "object"
-      ? (config.plugins as Record<string, unknown>)
-      : {};
-  const enabled = Array.isArray(plugins.enabled) ? plugins.enabled : [];
-
-  return applySharedConfigPatch({
-    fileKey: getHermesagentConfigSharedFileKey({ global }),
+  return getHermesPluginEnabledConfigContent({
+    currentContent,
+    global,
     feature: "commands",
-    existingContent: currentContent,
-    patch: {
-      plugins: {
-        ...plugins,
-        enabled: Array.from(new Set([...enabled, "rulesync-commands"])),
-      },
-    },
+    pluginName: "rulesync-commands",
   });
 }
 
-export function getDisabledHermesCommandsPluginConfigContent({
+function getDisabledHermesCommandsPluginConfigContent({
   currentContent,
   global,
 }: {
   currentContent: string;
   global: boolean;
 }): string {
-  const config = parseSharedConfig({ format: "yaml", fileContent: currentContent });
-  const plugins =
-    config.plugins && typeof config.plugins === "object"
-      ? (config.plugins as Record<string, unknown>)
-      : {};
-  const enabled = Array.isArray(plugins.enabled) ? plugins.enabled : [];
-
-  return applySharedConfigPatch({
-    fileKey: getHermesagentConfigSharedFileKey({ global }),
+  return getHermesPluginDisabledConfigContent({
+    currentContent,
+    global,
     feature: "commands",
-    existingContent: currentContent,
-    patch: {
-      plugins: {
-        ...plugins,
-        enabled: enabled.filter((plugin) => plugin !== "rulesync-commands"),
-      },
-    },
+    pluginName: "rulesync-commands",
   });
 }
 
@@ -405,6 +370,71 @@ export class HermesagentCommand extends ToolCommand {
     return marker === "Generated and owned by RuleSync.\n";
   }
 
+  /**
+   * Disable the commands plugin in the Hermes config once the sweep removed
+   * its ownership marker, so the plugin is not left enabled without the files
+   * rulesync generated for it.
+   */
+  static override async afterOrphanSweep({
+    outputRoot,
+    global,
+    dryRun,
+    logger,
+    existingFiles,
+    removedPaths,
+  }: ToolCommandAfterOrphanSweepParams): Promise<number> {
+    const ownershipPath = join(
+      outputRoot,
+      getHermesagentRelativeFilePath({
+        global,
+        relativeFilePath: HERMESAGENT_RULESYNC_COMMANDS_PLUGIN_OWNERSHIP_PATH,
+      }),
+    );
+    const ownershipMarker = existingFiles.find((file) => file.getFilePath() === ownershipPath);
+    // Decided after the base sweep, from what it actually removed (or would
+    // remove under `--check`): a marker it refused to delete — one reached
+    // through a link out of the root — stays in place, and disabling the
+    // plugin while its marker survives would leave the two out of step.
+    const shouldDisableHermesCommandsPlugin =
+      ownershipMarker !== undefined &&
+      removedPaths.some(
+        (removed) =>
+          removed.kind === "file" && removed.path === ownershipMarker.getRelativePathFromCwd(),
+      );
+
+    if (!shouldDisableHermesCommandsPlugin) return 0;
+    const configPath = join(
+      outputRoot,
+      getHermesagentRelativeFilePath({
+        global,
+        relativeFilePath: HERMESAGENT_CONFIG_FILE_PATH,
+      }),
+    );
+    if (
+      await refusesWriteOutsideRoot({
+        logger,
+        rootPath: outputRoot,
+        targetPath: configPath,
+      })
+    ) {
+      return 0;
+    }
+    const currentContent = await readFileContentOrNull(configPath);
+    if (currentContent === null) return 0;
+    const nextContent = getDisabledHermesCommandsPluginConfigContent({
+      currentContent,
+      global,
+    });
+    if (nextContent === currentContent) return 0;
+
+    if (dryRun) {
+      logger.info(`[DRY RUN] Would write: ${configPath}`);
+    } else {
+      await writeFileContent(configPath, nextContent);
+    }
+    return 1;
+  }
+
   static override async fromFile({
     global = false,
     outputRoot = process.cwd(),
@@ -475,7 +505,6 @@ export class HermesagentCommand extends ToolCommand {
       relativeFilePath: `${spec.slug}.md`,
       frontmatter: { description: spec.description },
       body: spec.prompt,
-      fileContent: "",
       outputRoot: getHermesagentRulesyncOutputRoot({
         nativeOutputRoot: this.outputRoot,
         global: this.global,

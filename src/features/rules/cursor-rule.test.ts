@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -567,6 +567,19 @@ This is the rule content
 
       expect(rule.getFrontmatter().globs).toBeUndefined();
       expect(rule.getBody()).toBe("Example:\n\nglobs: *.ts");
+    });
+
+    it("should quote unquoted globs under an explicit yaml fence", async () => {
+      const filePath = join(testDir, ".cursor/rules", "yaml-fence.mdc");
+      await writeFileContent(filePath, "---yaml\nalwaysApply: false\nglobs: *.ts\n---\nBody\n");
+
+      const rule = await CursorRule.fromFile({
+        outputRoot: testDir,
+        relativeFilePath: "yaml-fence.mdc",
+      });
+
+      expect(rule.getFrontmatter().globs).toBe("*.ts");
+      expect(rule.getBody()).toBe("Body");
     });
 
     it("should trim trailing blanks from an unquoted globs value", async () => {

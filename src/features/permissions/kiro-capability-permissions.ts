@@ -4,25 +4,26 @@ import { isDeepStrictEqual } from "node:util";
 import { dump } from "js-yaml";
 
 import { KIRO_PERMISSIONS_FILE_NAME, KIRO_SETTINGS_DIR_PATH } from "../../constants/kiro-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
+import { isPermissionAction } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
+import { getOrCreateOwn, lookupOwn } from "../../utils/own-lookup.js";
 import { isRecord, isStringArray } from "../../utils/type-guards.js";
 import { loadYaml } from "../../utils/yaml.js";
 import { KiroPermissions } from "./kiro-permissions.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { honorAllToolsOnBash } from "./shell-command-categories.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
+import { CATCH_ALL_PATTERN } from "./shell-command-categories.js";
+import { isStricterAction } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
 } from "./tool-permissions.js";
-
-const CATCH_ALL_PATTERN = "*";
 
 // Canonical category -> Kiro capability. `grep`/`glob` are left out on purpose:
 // Kiro has no search-only capability, and folding them into `fs_read` would turn
@@ -50,17 +51,11 @@ type KiroCapability = "shell" | "fs_read" | "fs_write" | "web_fetch" | "web_sear
 
 const MANAGED_CAPABILITIES = new Set<string>(Object.keys(KIRO_CAPABILITY_TO_CANONICAL));
 
-const ACTION_RANK: Record<PermissionAction, number> = { allow: 0, ask: 1, deny: 2 };
-
 type KiroCapabilityRule = {
   capability: KiroCapability;
   match?: string[];
   effect: PermissionAction;
 };
-
-function isPermissionAction(value: unknown): value is PermissionAction {
-  return value === "allow" || value === "ask" || value === "deny";
-}
 
 /**
  * Whether an existing `permissions.yaml` rule can be read back into the
@@ -242,10 +237,6 @@ export class KiroCapabilityPermissions extends ToolPermissions {
     super({ ...params, fileContent: params.fileContent ?? "" });
   }
 
-  override isDeletable(): boolean {
-    return false;
-  }
-
   override shouldSkipCreationWhenPayloadEmpty(): boolean {
     return true;
   }
@@ -352,11 +343,15 @@ export class KiroCapabilityPermissions extends ToolPermissions {
           : isStringArray(rule.match)
             ? rule.match
             : [];
-      const categoryRules = (permission[category] ??= {});
+      const categoryRules = getOrCreateOwn({
+        record: permission,
+        key: category,
+        create: () => ({}),
+      });
       for (const pattern of patterns) {
-        const previous = categoryRules[pattern];
+        const previous = lookupOwn({ record: categoryRules, key: pattern });
         // Kiro resolves overlapping rules deny > ask > allow; keep the stricter.
-        if (previous === undefined || ACTION_RANK[rule.effect] > ACTION_RANK[previous]) {
+        if (isStricterAction({ action: rule.effect, existing: previous })) {
           categoryRules[pattern] = rule.effect;
         }
       }
@@ -364,25 +359,6 @@ export class KiroCapabilityPermissions extends ToolPermissions {
 
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify({ permission }, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): KiroCapabilityPermissions {
-    return new KiroCapabilityPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global: true,
     });
   }
 }
@@ -403,8 +379,10 @@ function buildKiroCapabilityRules({
     string,
     { capability: KiroCapability; effect: PermissionAction; patterns: Set<string> }
   >();
-  for (const [category, rules] of Object.entries(honorAllToolsOnBash(config.permission))) {
-    const capability = CANONICAL_TO_KIRO_CAPABILITY[category];
+  for (const [category, rules] of Object.entries(
+    honorAllToolsRestrictions({ permission: config.permission, toolLabel: "Kiro", logger }),
+  )) {
+    const capability = lookupOwn({ record: CANONICAL_TO_KIRO_CAPABILITY, key: category });
     if (capability === undefined) {
       logger?.warn(`Kiro permissions.yaml has no capability for category: ${category}. Skipping.`);
       continue;
@@ -496,10 +474,5 @@ export const KiroScopedPermissions = {
     return params.global
       ? KiroCapabilityPermissions.fromRulesyncPermissions(params)
       : KiroPermissions.fromRulesyncPermissions(params);
-  },
-  forDeletion(params: ToolPermissionsForDeletionParams): ToolPermissions {
-    return params.global
-      ? KiroCapabilityPermissions.forDeletion(params)
-      : KiroPermissions.forDeletion(params);
   },
 };

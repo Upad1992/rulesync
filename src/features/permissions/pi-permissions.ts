@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { PI_AGENT_DIR_PATH, PI_DIR, PI_SETTINGS_FILE_NAME } from "../../constants/pi-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import {
@@ -12,7 +12,6 @@ import {
 import { RulesyncPermissions } from "./rulesync-permissions.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -50,11 +49,6 @@ export class PiPermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "{}",
     });
-  }
-
-  /** `settings.json` holds unrelated user settings, so it must not be deleted. */
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths({
@@ -144,25 +138,5 @@ export class PiPermissions extends ToolPermissions {
         { cause: error },
       );
     }
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): PiPermissions {
-    return new PiPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
-      global,
-    });
   }
 }

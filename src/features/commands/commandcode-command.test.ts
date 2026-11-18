@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -72,7 +72,6 @@ Step 1`;
         relativeFilePath: "prompt.md",
         frontmatter: { targets: ["commandcode"], description: "" },
         body: validContent,
-        fileContent: validContent,
         validate: true,
       });
 
@@ -154,7 +153,6 @@ Step 1`;
         relativeFilePath: "prompt.md",
         frontmatter: { targets: ["commandcode"], description: "" },
         body: validContent,
-        fileContent: validContent,
         validate: true,
       });
 
@@ -168,7 +166,6 @@ Step 1`;
         relativeFilePath: "prompt.md",
         frontmatter: { targets: ["cursor"], description: "" },
         body: validContent,
-        fileContent: validContent,
         validate: true,
       });
 

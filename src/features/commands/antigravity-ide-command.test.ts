@@ -1,11 +1,10 @@
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { AntigravityCommandFrontmatter } from "./antigravity-command.js";
 import { AntigravityIdeCommand } from "./antigravity-ide-command.js";
 import { RulesyncCommand } from "./rulesync-command.js";
@@ -16,7 +15,6 @@ const buildNamed = (relativeFilePath: string) =>
     relativeFilePath,
     frontmatter: { targets: ["*"], description: "Test" },
     body: "Body",
-    fileContent: "",
   });
 
 const buildCommand = (targets: string[]) =>
@@ -28,7 +26,6 @@ const buildCommand = (targets: string[]) =>
       description: "Test",
     },
     body: "Body",
-    fileContent: "",
   });
 
 describe("AntigravityIdeCommand", () => {
@@ -123,7 +120,6 @@ describe("AntigravityIdeCommand", () => {
         relativeFilePath: "test.md",
         frontmatter,
         body: "test body",
-        fileContent: stringifyFrontmatter("test body", frontmatter),
       });
 
       const result = command.validate();
@@ -147,7 +143,6 @@ describe("AntigravityIdeCommand", () => {
         relativeFilePath: "my-workflow.md",
         frontmatter,
         body,
-        fileContent: stringifyFrontmatter(body, frontmatter),
       });
 
       const rulesyncCommand = antigravityCommand.toRulesyncCommand();
@@ -178,7 +173,6 @@ describe("AntigravityIdeCommand", () => {
         relativeFilePath: "simple.md",
         frontmatter,
         body,
-        fileContent: stringifyFrontmatter(body, frontmatter),
       });
 
       const rulesyncCommand = antigravityCommand.toRulesyncCommand();
@@ -207,7 +201,6 @@ describe("AntigravityIdeCommand", () => {
         relativeFilePath,
         frontmatter: { targets: ["antigravity-ide"], ...frontmatter } as never,
         body,
-        fileContent: stringifyFrontmatter(body, frontmatter),
       });
 
     it("should emit the command as a skill named after the antigravity section trigger", () => {

@@ -1,7 +1,7 @@
 import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../constants/rulesync-paths.js";
 import { CommandsProcessor } from "../features/commands/commands-processor.js";
@@ -34,6 +34,7 @@ const commandsGenerateTargets = [
   { target: "mimocode", outputPath: join(".mimocode", "commands", "review-pr.md") },
   { target: "omp", outputPath: join(".omp", "commands", "review-pr.md") },
   { target: "opencode", outputPath: join(".opencode", "commands", "review-pr.md") },
+  { target: "opencodev1", outputPath: join(".opencode", "commands", "review-pr.md") },
   { target: "cline", outputPath: join(".clinerules", "workflows", "review-pr.md") },
   {
     target: "codearts-cli",
@@ -70,10 +71,12 @@ const commandsGenerateTargets = [
   // Kimi Code registers every Skill as a slash command, too.
   { target: "kimi-code", outputPath: join(".kimi-code", "skills", "review-pr", "SKILL.md") },
   { target: "factorydroid", outputPath: join(".factory", "commands", "review-pr.md") },
+  { target: "firebender", outputPath: join(".firebender", "commands", "review-pr.mdc") },
   { target: "goose", outputPath: join(".goose", "recipes", "review-pr.yaml") },
   { target: "gitlabduo", outputPath: join(".agents", "commands", "review-pr.md") },
   { target: "grokcli", outputPath: join(".grok", "commands", "review-pr.md") },
   { target: "qwencode", outputPath: join(".qwen", "commands", "review-pr.md") },
+  { target: "lettacode", outputPath: join(".commands", "review-pr.md") },
   { target: "reasonix", outputPath: join(".reasonix", "commands", "review-pr.md") },
   { target: "rovodev", outputPath: join(".rovodev", "prompts", "review-pr.md") },
   { target: "zcode", outputPath: join(".zcode", "commands", "review-pr.md") },
@@ -92,6 +95,7 @@ const commandsGlobalTargets = [
   { target: "mimocode", outputPath: join(".config", "mimocode", "commands", "review-pr.md") },
   { target: "omp", outputPath: join(".omp", "agent", "commands", "review-pr.md") },
   { target: "opencode", outputPath: join(".config", "opencode", "commands", "review-pr.md") },
+  { target: "opencodev1", outputPath: join(".config", "opencode", "commands", "review-pr.md") },
   { target: "codexcli", outputPath: join(".codex", "prompts", "review-pr.md") },
   { target: "cline", outputPath: join("Documents", "Cline", "Workflows", "review-pr.md") },
   {
@@ -123,6 +127,7 @@ const commandsGlobalTargets = [
   { target: "warp", outputPath: join(".warp", "skills", "review-pr", "SKILL.md") },
   { target: "kimi-code", outputPath: join(".kimi-code", "skills", "review-pr", "SKILL.md") },
   { target: "factorydroid", outputPath: join(".factory", "commands", "review-pr.md") },
+  { target: "firebender", outputPath: join(".firebender", "commands", "review-pr.mdc") },
   { target: "goose", outputPath: join(".config", "goose", "recipes", "review-pr.yaml") },
   { target: "gitlabduo", outputPath: join(".gitlab", "duo", "commands", "review-pr.md") },
   { target: "grokcli", outputPath: join(".grok", "commands", "review-pr.md") },
@@ -134,6 +139,7 @@ const commandsGlobalTargets = [
     target: "hermesagent",
     outputPath: join(getHermesagentGlobalDir(), "rulesync", "commands", "review-pr.json"),
   },
+  { target: "lettacode", outputPath: join(".letta", "commands", "review-pr.md") },
   { target: "reasonix", outputPath: join(".reasonix", "commands", "review-pr.md") },
   { target: "rovodev", outputPath: join(".rovodev", "prompts", "review-pr.md") },
   { target: "zcode", outputPath: join(".zcode", "commands", "review-pr.md") },
@@ -236,6 +242,7 @@ Check the PR diff and provide feedback.
     { target: "mimocode", orphanPath: join(".mimocode", "commands", "orphan.md") },
     { target: "omp", orphanPath: join(".omp", "commands", "orphan.md") },
     { target: "opencode", orphanPath: join(".opencode", "commands", "orphan.md") },
+    { target: "opencodev1", orphanPath: join(".opencode", "commands", "orphan.md") },
     { target: "cline", orphanPath: join(".clinerules", "workflows", "orphan.md") },
     { target: "codebuddy", orphanPath: join(".codebuddy", "commands", "orphan.md") },
     { target: "codewhale", orphanPath: join(".codewhale", "commands", "orphan.md") },
@@ -247,6 +254,7 @@ Check the PR diff and provide feedback.
     { target: "junie", orphanPath: join(".junie", "commands", "orphan.md") },
     { target: "pi", orphanPath: join(".pi", "prompts", "orphan.md") },
     { target: "factorydroid", orphanPath: join(".factory", "commands", "orphan.md") },
+    { target: "firebender", orphanPath: join(".firebender", "commands", "orphan.mdc") },
     { target: "goose", orphanPath: join(".goose", "recipes", "orphan.yaml") },
     { target: "gitlabduo", orphanPath: join(".agents", "commands", "orphan.md") },
     { target: "grokcli", orphanPath: join(".grok", "commands", "orphan.md") },
@@ -509,6 +517,7 @@ describe("E2E: commands (import)", () => {
     { target: "mimocode", sourcePath: join(".mimocode", "commands", "review-pr.md") },
     { target: "omp", sourcePath: join(".omp", "commands", "review-pr.md") },
     { target: "opencode", sourcePath: join(".opencode", "commands", "review-pr.md") },
+    { target: "opencodev1", sourcePath: join(".opencode", "commands", "review-pr.md") },
     { target: "cline", sourcePath: join(".clinerules", "workflows", "review-pr.md") },
     { target: "codebuddy", sourcePath: join(".codebuddy", "commands", "review-pr.md") },
     { target: "codewhale", sourcePath: join(".codewhale", "commands", "review-pr.md") },
@@ -520,8 +529,10 @@ describe("E2E: commands (import)", () => {
     { target: "junie", sourcePath: join(".junie", "commands", "review-pr.md") },
     { target: "pi", sourcePath: join(".pi", "prompts", "review-pr.md") },
     { target: "factorydroid", sourcePath: join(".factory", "commands", "review-pr.md") },
+    { target: "firebender", sourcePath: join(".firebender", "commands", "review-pr.mdc") },
     { target: "gitlabduo", sourcePath: join(".agents", "commands", "review-pr.md") },
     { target: "grokcli", sourcePath: join(".grok", "commands", "review-pr.md") },
+    { target: "lettacode", sourcePath: join(".commands", "review-pr.md") },
     { target: "reasonix", sourcePath: join(".reasonix", "commands", "review-pr.md") },
     { target: "rovodev", sourcePath: join(".rovodev", "prompts", "review-pr.md") },
   ])("should import $target commands", async ({ target, sourcePath }) => {
@@ -611,7 +622,7 @@ describe("E2E: commands (global mode)", () => {
     );
     const config = await readFileContent(join(homeDir, getHermesagentGlobalDir(), "config.yaml"));
     expect(plugin).toContain("ctx.register_command(slug, handler, description)");
-    expect(plugin).toContain('"delegate_task"');
+    expect(plugin).toContain('ctx.inject_message(message, role="user", session_key=session_key)');
     expect(plugin).toContain('Path(__file__).resolve().parents[2] / "rulesync" / "commands"');
     expect(plugin).not.toContain('Path.home() / ".hermes"');
     expect(config).toContain("- rulesync-commands");

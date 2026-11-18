@@ -13,12 +13,24 @@ import { shortenToWidth } from "../../utils/display-width.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { fallbackLogger, type Logger } from "../../utils/logger.js";
+import { lookupOwn } from "../../utils/own-lookup.js";
+import { toStringArray } from "../../utils/type-guards.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { honorAllToolsOnBash } from "./shell-command-categories.js";
+import {
+  honorAllToolsRestrictions,
+  restatesAsCategoryRule,
+  urlPatternsOverlap,
+  withholdAllowsShadowedByAsks,
+} from "./shadowed-allows.js";
+import {
+  ALL_TOOLS_PERMISSION_CATEGORY,
+  CATCH_ALL_PATTERN,
+  createShadowingRestrictionsTest,
+  MCP_CATEGORY_PREFIX,
+} from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -36,6 +48,8 @@ type VibeToolConfig = Record<string, unknown> & {
 type VibeConfig = Record<string, unknown> & {
   enabled_tools?: string[];
   disabled_tools?: string[];
+  enable_subagents?: unknown;
+  outside_workdir?: unknown;
   tools?: Record<string, VibeToolConfig>;
 };
 
@@ -48,11 +62,19 @@ const moduleLogger: Logger = fallbackLogger;
 /**
  * Vibe's builtin tool names are the snake_case of each tool class
  * (`BaseTool.get_name()`): `Edit` → `edit`, `WebFetch` → `web_fetch`,
- * `WebSearch` → `web_search`, alongside `read_file`, `write_file`, `bash` and
- * `grep`. `edit` and `write_file` are distinct tools — `write_file` has been
+ * `WebSearch` → `web_search`, alongside `read_file`, `write_file` and `bash`.
+ * `edit` and `write_file` are distinct tools — `write_file` has been
  * create-only since v2.14.0 — so the canonical `edit` and `write` categories
- * must not collapse onto one name. Vibe's subagent tool is `task`, the same
- * rename OpenCode needed.
+ * must not collapse onto one name.
+ *
+ * `grep` and `agent` have no table here: since v3.0.0 every session runs on
+ * the Unified Harness, which reads `[tools.*]` only for its Rust builtins
+ * (`RUST_BUILTIN_TOOL_SOURCES`). There is no grep tool any more — searching
+ * goes through the shell — and subagents are spawned by the built-in
+ * `agents.spawn` tool, which the `enable_subagents` switch governs instead of
+ * a `[tools.task]` table. See {@link VIBE_RETIRED_TOOL_TABLES}.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.2/vibe/app_server/_unified_permissions.py
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.2/vibe/app_server/_ignored_tool_settings.py
  */
 const CANONICAL_TO_VIBE_TOOL_NAMES: Record<string, string> = {
   bash: "bash",
@@ -61,9 +83,38 @@ const CANONICAL_TO_VIBE_TOOL_NAMES: Record<string, string> = {
   write: "write_file",
   webfetch: "web_fetch",
   websearch: "web_search",
+};
+
+/**
+ * The tables earlier rulesync versions wrote for canonical categories that
+ * Vibe 3.x does not read: `[tools.grep]` (Vibe warns that it "has no
+ * effect"), `[tools.task]` for the subagent tool v3.0.0 renamed to
+ * `agents.*`, and `[tools.external_directory]` — Vibe has no such tool, and
+ * its unused-settings check skips unknown tool names as custom/MCP tools, so
+ * that deny was silently inert. A regenerate that configures the category removes them — and
+ * the matching `disabled_tools` entry — instead of leaving an inert table.
+ * Import still reads them (see {@link VIBE_TO_CANONICAL_TOOL_NAMES}), so a
+ * Vibe 2.x config is lifted into the canonical categories rather than lost.
+ */
+const VIBE_RETIRED_TOOL_TABLES: Readonly<Record<string, string>> = {
   grep: "grep",
   agent: "task",
+  external_directory: "external_directory",
 };
+
+/** The canonical category Vibe's `enable_subagents` switch expresses. */
+const VIBE_SUBAGENT_CATEGORY = "agent";
+
+/** The canonical category Vibe's top-level `outside_workdir` setting expresses. */
+const VIBE_OUTSIDE_WORKDIR_CATEGORY = "external_directory";
+
+/**
+ * The values of Vibe's `outside_workdir` (v3.0.3+). There is no allow value:
+ * access outside the working directory is granted per path through a tool's
+ * `allowlist` (`vibe-path:...`) or `--add-dir`.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.3/README.md
+ */
+const VIBE_OUTSIDE_WORKDIR_VALUES: ReadonlySet<string> = new Set(["ask", "deny"]);
 
 const VIBE_TO_CANONICAL_TOOL_NAMES: Record<string, string> = {
   bash: "bash",
@@ -121,9 +172,6 @@ const VIBE_FAN_OUT_PERMISSION_KEYS = [
 /** The only key `vibe.permission.<category>` can express. */
 const VIBE_OVERRIDE_SUPPORTED_KEY = "sensitive_patterns";
 
-/** Canonical per-tool MCP category prefix: `mcp__<server>__<tool>`. */
-const MCP_CANONICAL_PREFIX = "mcp__";
-
 /** Glob metacharacters that make an MCP category impossible to address as one table. */
 const MCP_WILDCARD_PATTERN = /[*?[\]]/;
 
@@ -148,6 +196,7 @@ const CANONICAL_PERMISSION_CATEGORIES = new Set([
   "glob",
   "notebookedit",
   "agent",
+  "external_directory",
 ]);
 
 export class VibePermissions extends ToolPermissions {
@@ -163,10 +212,6 @@ export class VibePermissions extends ToolPermissions {
 
   getToml(): VibeConfig {
     return this.toml;
-  }
-
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
@@ -207,7 +252,26 @@ export class VibePermissions extends ToolPermissions {
     const existingContent = (await readFileContentOrNull(filePath)) ?? "";
     const config = parseVibeConfig(existingContent);
 
-    const permission = honorAllToolsOnBash(rulesyncPermissions.getJson().permission);
+    // Vibe has no all-tools table: `*` restrictions reach `bash` and withhold
+    // the allows they cover in the other categories. Vibe has no pattern-level
+    // ask either: each one is skipped, so it withholds the allows that cover it
+    // (a catch-all allow falls back to `permission = "ask"`).
+    // A withheld catch-all allow is written as `permission = "ask"` (Vibe's
+    // default for a read tool may be "always"), a `*` path deny is also written
+    // into the category's `denylist`. A category's own catch-all ask stays the
+    // documented default its `allowlist` entries carve out of.
+    const permission = withholdAllowsShadowedByAsks({
+      permission: honorAllToolsRestrictions({
+        permission: rulesyncPermissions.getJson().permission,
+        toolLabel: "Vibe",
+        logger,
+        restateAs: restatesAsCategoryRule(["deny"]),
+        downgradeWithheldCatchAll: true,
+      }),
+      toolLabel: "Vibe",
+      logger,
+      isSkippedAsk: ({ pattern }) => pattern !== CATCH_ALL_PATTERN,
+    });
     const vibeOverride = rulesyncPermissions.getJson().vibe;
 
     const tools = toVibeToolsRecord(config.tools);
@@ -269,17 +333,32 @@ export class VibePermissions extends ToolPermissions {
       enabledTools,
       disabledTools,
     });
+    retireLegacyToolTables({ permission, tools, disabledTools, logger });
+    const enableSubagentsPatch = resolveEnableSubagentsPatch({
+      rules: permission[VIBE_SUBAGENT_CATEGORY],
+      logger,
+    });
+    const outsideWorkdirPatch = resolveOutsideWorkdirPatch({
+      rules: permission[VIBE_OUTSIDE_WORKDIR_CATEGORY],
+      logger,
+    });
 
-    for (const [category, rules] of Object.entries(permission)) {
+    // The `agent` category was translated to `enable_subagents` and the
+    // `external_directory` category to `outside_workdir` above.
+    const tableCategories = Object.entries(permission).filter(
+      ([category]) =>
+        category !== VIBE_SUBAGENT_CATEGORY && category !== VIBE_OUTSIDE_WORKDIR_CATEGORY,
+    );
+    retireWithheldAllows({
+      source: rulesyncPermissions.getJson().permission,
+      permission,
+      tools,
+      resolveNames,
+    });
+    for (const [category, rules] of tableCategories) {
       const vibeToolNames = resolveNames(category);
       if (vibeToolNames === undefined) {
-        const ruleCount = Object.keys(rules).length;
-        if (ruleCount > 0) {
-          logger?.warn(
-            `Vibe has no tool table for the '${category}' category; skipping ${ruleCount} ` +
-              `rule(s) instead of emitting an inert [tools.${category}] table.`,
-          );
-        }
+        warnOnUnmappedCategory({ category, rules, logger });
         continue;
       }
       warnOnUnreachableToolName({ category, vibeToolNames, warned: warnedUnreachable, logger });
@@ -344,6 +423,8 @@ export class VibePermissions extends ToolPermissions {
           tools: Object.keys(tools).length > 0 ? tools : undefined,
           enabled_tools: resolveEnabledToolsPatch({ vibeOverride, enabledTools }),
           disabled_tools: disabledTools.size > 0 ? [...disabledTools].toSorted() : undefined,
+          ...enableSubagentsPatch,
+          ...outsideWorkdirPatch,
         },
         filePath,
       }),
@@ -385,7 +466,7 @@ export class VibePermissions extends ToolPermissions {
     const disablesToolName = createVibeDisabledToolMatcher(disabledToolEntries);
     // The categories a switched-off table lands in, remembered so the deny can be
     // re-asserted once every table has been read. Two Vibe tools can share one
-    // category — `task` and `agent`, `read_file` and a bare `read` MCP table —
+    // category — a legacy `task` table and an `agent` one, `read_file` and a bare `read` MCP table —
     // and only one of them need be switched off, so whichever table came later
     // in the file would otherwise decide the category's base permission. That
     // made the import depend on the order the tables happen to sit in, and in
@@ -447,6 +528,21 @@ export class VibePermissions extends ToolPermissions {
       ensurePermission(permission, category)["*"] = "deny";
     }
 
+    // `enable_subagents = false` takes subagents away from the agent outright,
+    // so it wins over whatever a legacy `[tools.task]` table said.
+    if (this.toml.enable_subagents === false) {
+      ensurePermission(permission, VIBE_SUBAGENT_CATEGORY)["*"] = "deny";
+    }
+
+    // The top-level `outside_workdir` is the native form of the canonical
+    // `external_directory` category, so it wins over a legacy
+    // `[tools.external_directory]` table an earlier rulesync wrote.
+    const outsideWorkdir = this.toml.outside_workdir;
+    if (typeof outsideWorkdir === "string" && VIBE_OUTSIDE_WORKDIR_VALUES.has(outsideWorkdir)) {
+      ensurePermission(permission, VIBE_OUTSIDE_WORKDIR_CATEGORY)["*"] =
+        outsideWorkdir === "deny" ? "deny" : "ask";
+    }
+
     warnOnUnresolvableDisabledTools({ entries: disabledToolEntries, tools: this.toml.tools });
 
     // Drop categories that ended up with no rules (e.g. a Vibe tool that carries
@@ -487,22 +583,6 @@ export class VibePermissions extends ToolPermissions {
       };
     }
   }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): VibePermissions {
-    return new VibePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: smolToml.stringify({}),
-      validate: false,
-      global,
-    });
-  }
 }
 
 /**
@@ -535,6 +615,163 @@ function clearStaleToolFilters({
     }
   }
   return removedEnabledTools;
+}
+
+/**
+ * Remove the tables (and `disabled_tools` entries) earlier rulesync versions
+ * wrote for the categories in {@link VIBE_RETIRED_TOOL_TABLES}, once the
+ * author configures that category again. They are inert on Vibe 3.x, and
+ * `[tools.grep]` makes every session open with a config warning.
+ */
+function retireLegacyToolTables({
+  permission,
+  tools,
+  disabledTools,
+  logger,
+}: {
+  permission: PermissionsConfig["permission"];
+  tools: Record<string, VibeToolConfig>;
+  disabledTools: Set<string>;
+  logger?: Logger;
+}): void {
+  const removed: string[] = [];
+  for (const [category, legacyToolName] of Object.entries(VIBE_RETIRED_TOOL_TABLES)) {
+    if (!Object.hasOwn(permission, category)) {
+      continue;
+    }
+    if (Object.hasOwn(tools, legacyToolName)) {
+      delete tools[legacyToolName];
+      removed.push(`[tools.${legacyToolName}]`);
+    }
+    if (disabledTools.delete(legacyToolName)) {
+      removed.push(`disabled_tools entry '${legacyToolName}'`);
+    }
+  }
+  if (removed.length > 0) {
+    logger?.warn(
+      `Removed ${removed.join(", ")} from the Vibe config: Vibe 3.x does not read ` +
+        `[tools.grep], the former 'task' subagent tool or an 'external_directory' tool ` +
+        `(the 'external_directory' category is written to outside_workdir instead), so those ` +
+        `entries had no effect.`,
+    );
+  }
+}
+
+/**
+ * Report the rules of a category that has no Vibe tool table. `grep` gets its
+ * own message: Vibe 3.x has no grep tool — "the agent searches through the
+ * shell", so `rg` and `grep` follow `[tools.bash]` — and the author needs to
+ * know where the restriction has to be written instead.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.2/vibe/app_server/_ignored_tool_settings.py
+ */
+function warnOnUnmappedCategory({
+  category,
+  rules,
+  logger,
+}: {
+  category: string;
+  rules: Record<string, PermissionAction>;
+  logger?: Logger;
+}): void {
+  const ruleCount = Object.keys(rules).length;
+  if (ruleCount === 0) {
+    return;
+  }
+  if (category === "grep") {
+    logger?.warn(
+      `Vibe has no grep tool (searching goes through the shell, so 'rg' and 'grep' follow ` +
+        `[tools.bash]); skipping ${ruleCount} 'grep' rule(s). Author a 'bash' rule such as ` +
+        `"grep *" or "rg *" to restrict searching on Vibe.`,
+    );
+    return;
+  }
+  logger?.warn(
+    `Vibe has no tool table for the '${category}' category; skipping ${ruleCount} ` +
+      `rule(s) instead of emitting an inert [tools.${category}] table.`,
+  );
+}
+
+/**
+ * Translate the canonical `agent` category into Vibe's `enable_subagents`
+ * switch (v2.26.1+), the only subagent control the Unified Harness reads. A
+ * `*` deny writes `enable_subagents = false`; a `*` allow or ask removes the
+ * key, leaving subagents on. Without a `*` rule the key is left as the file
+ * has it. Pattern rules have no Vibe equivalent and are skipped with a warning.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.2/README.md
+ */
+function resolveEnableSubagentsPatch({
+  rules,
+  logger,
+}: {
+  rules: Record<string, PermissionAction> | undefined;
+  logger?: Logger;
+}): { enable_subagents?: false | undefined } {
+  if (rules === undefined) {
+    return {};
+  }
+  const patternCount = Object.keys(rules).filter((pattern) => pattern !== "*").length;
+  if (patternCount > 0) {
+    logger?.warn(
+      `Vibe can only switch subagents on or off as a whole (enable_subagents); skipping ` +
+        `${patternCount} pattern rule(s) of the '${VIBE_SUBAGENT_CATEGORY}' category.`,
+    );
+  }
+  const action = rules["*"];
+  if (action === undefined) {
+    return {};
+  }
+  if (action === "ask") {
+    logger?.warn(
+      `Vibe cannot prompt before spawning a subagent; the '${VIBE_SUBAGENT_CATEGORY}' ` +
+        `category's "*": "ask" leaves subagents enabled.`,
+    );
+  }
+  return { enable_subagents: action === "deny" ? false : undefined };
+}
+
+/**
+ * Translate the canonical `external_directory` category into Vibe's top-level
+ * `outside_workdir` setting (v3.0.3+), which decides whether a file or shell
+ * tool call reaching outside the working directory prompts (`"ask"`, the
+ * default) or is refused with a tool error (`"deny"`). A `*` deny or ask writes
+ * that value; a `*` allow has no Vibe value, so it is warned about and the key
+ * is removed, leaving Vibe's default prompt. Without a `*` rule the key is left
+ * as the file has it. Pattern rules are skipped with a warning: path grants go
+ * in a tool's `allowlist` (`vibe-path:...`) instead.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.3/README.md
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.3/vibe/app_server/_unified_permissions.py
+ */
+function resolveOutsideWorkdirPatch({
+  rules,
+  logger,
+}: {
+  rules: Record<string, PermissionAction> | undefined;
+  logger?: Logger;
+}): { outside_workdir?: "ask" | "deny" | undefined } {
+  if (rules === undefined) {
+    return {};
+  }
+  const patternCount = Object.keys(rules).filter((pattern) => pattern !== "*").length;
+  if (patternCount > 0) {
+    logger?.warn(
+      `Vibe's outside_workdir applies to every path outside the working directory; skipping ` +
+        `${patternCount} pattern rule(s) of the '${VIBE_OUTSIDE_WORKDIR_CATEGORY}' category. ` +
+        `Grant a path through a tool's allowlist ("vibe-path:...") in the Vibe config instead.`,
+    );
+  }
+  const action = rules["*"];
+  if (action === undefined) {
+    return {};
+  }
+  if (action === "allow") {
+    logger?.warn(
+      `Vibe's outside_workdir only takes "ask" or "deny"; the ` +
+        `'${VIBE_OUTSIDE_WORKDIR_CATEGORY}' category's "*": "allow" leaves Vibe's default, ` +
+        `which prompts before reaching outside the working directory.`,
+    );
+    return { outside_workdir: undefined };
+  }
+  return { outside_workdir: action };
 }
 
 /**
@@ -854,6 +1091,78 @@ function applyCategoryRulesToTool({
 }
 
 /**
+ * Remove from the existing tables what the current restrictions forbid. The
+ * per-tool pass merges into the `allowlist` already on disk and only sets
+ * `permission` when the category states a `*` rule, so a regenerate would
+ * otherwise keep an `allowlist` entry (an earlier generate's, or a
+ * hand-written one) that auto-approves what a canonical ask or deny now
+ * covers, or the `permission = "always"` an earlier config wrote for an allow
+ * that is now withheld. Only the tables of categories the config manages are
+ * touched, and only entries that overlap a restriction are removed. A
+ * category's own catch-all ask is the documented default its allowlist carves
+ * out of, so it removes nothing.
+ */
+function retireWithheldAllows({
+  source,
+  permission,
+  tools,
+  resolveNames,
+}: {
+  source: PermissionsConfig["permission"];
+  permission: PermissionsConfig["permission"];
+  tools: Record<string, VibeToolConfig>;
+  resolveNames: (category: string) => string[] | undefined;
+}): void {
+  const allToolsRestrictions = Object.entries(
+    lookupOwn({ record: source, key: ALL_TOOLS_PERMISSION_CATEGORY }) ?? {},
+  ).filter(
+    ([pattern, action]) => action === "deny" || (action === "ask" && pattern !== CATCH_ALL_PATTERN),
+  );
+  for (const [category, rules] of Object.entries(source)) {
+    if (category === ALL_TOOLS_PERMISSION_CATEGORY) continue;
+    const honored = lookupOwn({ record: permission, key: category }) ?? {};
+    const withheld = new Set(
+      Object.entries(rules)
+        .filter(([pattern, action]) => action === "allow" && honored[pattern] !== "allow")
+        .map(([pattern]) => pattern),
+    );
+    const restrictions = [
+      ...Object.entries(honored).filter(
+        ([pattern, action]) => action !== "allow" && pattern !== CATCH_ALL_PATTERN,
+      ),
+      ...allToolsRestrictions,
+    ].map(([pattern]) => ({ pattern, fromAllToolsCategory: false }));
+    // `web_fetch` entries are URLs, compared as such (`evil.com` covers
+    // `https://evil.com/x`).
+    const globShadowed = createShadowingRestrictionsTest(restrictions);
+    const shadowed = (pattern: string): boolean =>
+      category === "webfetch"
+        ? restrictions.some((restriction) => urlPatternsOverlap(restriction.pattern, pattern))
+        : globShadowed(pattern).length > 0;
+    const retires = (pattern: string): boolean =>
+      withheld.has(pattern) ||
+      (restrictions.length > 0 && honored[pattern] !== "allow" && shadowed(pattern));
+    for (const vibeToolName of resolveNames(category) ?? []) {
+      if (!Object.hasOwn(tools, vibeToolName)) continue;
+      const tool = readVibeToolConfig({ tools, vibeToolName });
+      for (const key of ["allow", "allowlist"] as const) {
+        if (tool[key] !== undefined) {
+          tool[key] = toStringArray(tool[key]).filter((pattern) => !retires(pattern));
+        }
+      }
+      if (
+        withheld.size > 0 &&
+        tool.permission === "always" &&
+        !Object.hasOwn(honored, CATCH_ALL_PATTERN)
+      ) {
+        tool.permission = "ask";
+      }
+      tools[vibeToolName] = tool;
+    }
+  }
+}
+
+/**
  * `enabled_tools` is an exclusive allowlist and therefore only ever
  * rulesync-authored explicitly, through `vibe.enabled_tools`. When the
  * override declares it (even empty), rulesync owns the whole list; when it
@@ -982,9 +1291,10 @@ function expressesVibePermission(rules: Record<string, PermissionAction>): boole
  * {@link VIBE_SHELL_ALIAS_TOOL_NAMES}). A canonical category *without* one
  * (`glob`, `notebookedit`) resolves to `undefined`: Vibe has no such tool, so a
  * `deny` authored there would look applied while being silently inert — the
- * dangerous direction. Unlike `agent` → `task` there is no correct name to
- * rename to, so the caller skips it with a warning (the grokcli adapter's
- * pattern).
+ * dangerous direction. There is no correct name to rename to, so the caller
+ * skips it with a warning (the grokcli adapter's pattern). `grep` is in the
+ * same position since Vibe 3.x, and `agent` goes to `enable_subagents`
+ * instead of a table.
  *
  * A canonical MCP category (`mcp__<server>__<tool>`) is translated to Vibe's own
  * published MCP name, `<server>_<tool>` — see {@link toVibeMcpToolName}. Every
@@ -1012,13 +1322,11 @@ function resolveVibeToolNames({
     return undefined;
   }
 
-  if (category.startsWith(MCP_CANONICAL_PREFIX)) {
+  if (category.startsWith(MCP_CATEGORY_PREFIX)) {
     return toVibeMcpToolName(category);
   }
 
-  const builtin = Object.hasOwn(CANONICAL_TO_VIBE_TOOL_NAMES, category)
-    ? CANONICAL_TO_VIBE_TOOL_NAMES[category]
-    : undefined;
+  const builtin = lookupOwn({ record: CANONICAL_TO_VIBE_TOOL_NAMES, key: category });
   if (builtin === undefined) {
     return CANONICAL_PERMISSION_CATEGORIES.has(category) ? undefined : [category];
   }
@@ -1057,7 +1365,7 @@ function resolveVibeToolNames({
  * @see https://github.com/mistralai/mistral-vibe/blob/main/vibe/core/mcp/tools.py
  */
 function toVibeMcpToolName(category: string): string[] | undefined {
-  const [server, ...toolParts] = category.slice(MCP_CANONICAL_PREFIX.length).split("__");
+  const [server, ...toolParts] = category.slice(MCP_CATEGORY_PREFIX.length).split("__");
   const tool = toolParts.join("__");
   if (!server || !tool) {
     return undefined;
@@ -1559,11 +1867,11 @@ function warnOnUnreachableToolName({
   warned.add(category);
   // Only the prefix decides whether translation kicks in — a server or tool name
   // may legitimately be capitalized, and those ARE translated.
-  const prefix = category.slice(0, MCP_CANONICAL_PREFIX.length);
-  if (prefix !== MCP_CANONICAL_PREFIX && prefix.toLowerCase() === MCP_CANONICAL_PREFIX) {
+  const prefix = category.slice(0, MCP_CATEGORY_PREFIX.length);
+  if (prefix !== MCP_CATEGORY_PREFIX && prefix.toLowerCase() === MCP_CATEGORY_PREFIX) {
     logger?.warn(
       `The '${category}' category looks like an MCP category, but the canonical prefix is ` +
-        `lowercase '${MCP_CANONICAL_PREFIX}'; it is written verbatim to [tools.${category}] ` +
+        `lowercase '${MCP_CATEGORY_PREFIX}'; it is written verbatim to [tools.${category}] ` +
         `instead of being translated to Vibe's MCP tool name.`,
     );
   }
@@ -1593,9 +1901,7 @@ function warnOnUnreachableToolName({
 }
 
 function toCanonicalToolName(vibeToolName: string): string {
-  return Object.hasOwn(VIBE_TO_CANONICAL_TOOL_NAMES, vibeToolName)
-    ? (VIBE_TO_CANONICAL_TOOL_NAMES[vibeToolName] ?? vibeToolName)
-    : vibeToolName;
+  return lookupOwn({ record: VIBE_TO_CANONICAL_TOOL_NAMES, key: vibeToolName }) ?? vibeToolName;
 }
 
 /**
@@ -2172,12 +2478,6 @@ function toVibeToolConfig(value: unknown): VibeToolConfig {
     return {};
   }
   return { ...(value as Record<string, unknown>) };
-}
-
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
 }
 
 function applyWildcardPermission({

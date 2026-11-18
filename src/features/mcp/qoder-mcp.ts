@@ -5,21 +5,20 @@ import {
   QODER_PROJECT_MCP_FILE_NAME,
   QODER_SETTINGS_FILE_NAME,
 } from "../../constants/qoder-paths.js";
-import { ValidationResult } from "../../types/ai-file.js";
 import { isMcpServers, type McpServers } from "../../types/mcp.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import {
   omitPrototypePollutionKeys,
   PROTOTYPE_POLLUTION_KEYS,
 } from "../../utils/prototype-pollution.js";
-import { isPlainObject, isRecord } from "../../utils/type-guards.js";
+import { isRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
-  parseSharedConfig,
+  parseSharedConfigFile,
   sharedConfigFileKey,
   undefinedWhenEmpty,
 } from "../shared/shared-config-gateway.js";
+import { parseMcpJsonObjectOrThrow } from "./mcp-json-config.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
 import {
   ToolMcp,
@@ -48,27 +47,18 @@ function parseQoderMcpConfig({
   global: boolean;
 }): Record<string, unknown> {
   if (global) {
-    return parseSharedConfig({
-      format: "json",
+    return parseSharedConfigFile({
+      fileKey: sharedConfigFileKey(QoderMcp.getSettablePaths({ global })),
       fileContent: fileContent || "{}",
       filePath: relativePath,
-      invalidRootPolicy: "error",
     });
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fileContent || "{}");
-  } catch (error) {
-    throw new Error(`Failed to parse Qoder MCP config at ${relativePath}: ${formatError(error)}`, {
-      cause: error,
-    });
-  }
-  if (!isPlainObject(parsed)) {
-    throw new Error(
-      `Failed to parse Qoder MCP config at ${relativePath}: expected a JSON object at the root`,
-    );
-  }
-  return parsed;
+  return parseMcpJsonObjectOrThrow({
+    fileContent: fileContent || "{}",
+    relativePath,
+    label: "Qoder",
+    parse: JSON.parse,
+  });
 }
 
 /**
@@ -204,10 +194,6 @@ export class QoderMcp extends ToolMcp {
     return this.toRulesyncMcpDefault({
       fileContent: JSON.stringify({ mcpServers }, null, 2),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

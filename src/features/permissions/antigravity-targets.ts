@@ -1,13 +1,28 @@
-import type { PermissionAction } from "../../types/permissions.js";
+import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { parseGlobPattern } from "../../utils/glob.js";
 import type { Logger } from "../../utils/logger.js";
+import { getOrCreateOwn, lookupOwn } from "../../utils/own-lookup.js";
+import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import {
   ANTIGRAVITY_COMMAND_ACTIONS as COMMAND_ACTIONS,
   BRACE_ALTERNATIVES,
   type CommandTargetResult as TargetResult,
+  importAntigravityCommandTarget,
   toAntigravityCommandLiteralPrefix,
   toAntigravityCommandTarget,
 } from "./antigravity-command-patterns.js";
+import {
+  honorAllToolsRestrictions,
+  normalizeUrlPattern,
+  urlPatternsOverlap,
+} from "./shadowed-allows.js";
+import {
+  ALL_TOOLS_PERMISSION_CATEGORY,
+  CATCH_ALL_PATTERN,
+  createShadowingRestrictionsTest,
+  MCP_CATEGORY_PREFIX,
+} from "./shell-command-categories.js";
+import { parseToolPatternEntry } from "./tool-pattern-entry.js";
 
 /**
  * Build Antigravity `action(target)` permission entries from canonical rules,
@@ -23,6 +38,8 @@ import {
  * - `execute_url` takes a domain, like `read_url`.
  * - `command` and `unsandboxed` take literal words or a per-word `regex:`,
  *   matched word by word (see `antigravity-command-patterns.ts`).
+ * - `mcp` takes `server/tool` or `server/*`, matched exactly. A canonical
+ *   `mcp__<server>__<tool>` category is written as that target.
  *
  * A glob copied verbatim (`read_file(**\/*.env)`) is a literal path that
  * matches nothing, so a deny written that way blocks nothing. A pattern with
@@ -44,10 +61,60 @@ const MATCH_ALL_PATH_GLOBS = new Set(["*", "**", "**/*"]);
 // A trailing glob that means "everything under this directory".
 const DIRECTORY_CONTENTS_SUFFIX = /\/\*\*(?:\/\*)?$/;
 
-// A path that is `~` or starts with `~/` or a `$NAME` variable, or holds a
-// `${NAME}` reference. A `$` or `~` elsewhere is an ordinary file name
-// character (`routes/posts.$postId.tsx`, `~$report.docx`).
-const HOME_OR_VARIABLE_PATH = /^~(?:\/|$)|^\$[A-Za-z_]|\$\{[A-Za-z_]/;
+// A path that is `~`, starts with `~/`, `~\`, `~user` or `~user/`, starts with
+// a `$NAME` or `%NAME%` variable, or holds a `${NAME}` reference. `~user` also
+// matches on its own, since `~alice/**` is reduced to `~alice` before the check.
+// A `%NAME%` may hold parentheses and spaces, as Windows names such as
+// `%ProgramFiles(x86)%` do. A `$`, `%` or `~` elsewhere is an ordinary file
+// name character (`routes/posts.$postId.tsx`, `~$report.docx`, `~$tmp/x`).
+const HOME_OR_VARIABLE_PATH =
+  /^~(?:[A-Za-z_][\w.-]*)?(?:[/\\]|$)|^\$[A-Za-z_]|^%[A-Za-z_][\w() ]*%|\$\{[A-Za-z_]/;
+
+// A path that is the home directory itself or starts in it, written with `~`.
+const LEADING_HOME = /^~(?:\/|$)/;
+
+/**
+ * The home directory as an Antigravity path: forward slashes, no trailing
+ * slash. agy accepts `C:/Users/...` on Windows, so one spelling serves both.
+ */
+function toAntigravityHomePath(homeDirectory: string): string {
+  return homeDirectory.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+/**
+ * Rewrite a leading `~` or `~/` of a path target to the absolute home
+ * directory. agy 1.5.1 matches `~` literally, so a `~/...` rule would never
+ * apply (rulesync#3324). Only a file the user's own home holds, such as the
+ * global Antigravity CLI settings, may carry a machine-specific path, so the
+ * caller passes `homeDirectory` only then. `$HOME`, `${HOME}`, `%VAR%`, `~\`,
+ * `~user` and `~user/` are left as written and still warned about.
+ */
+function expandLeadingHome(target: string, homeDirectory: string | undefined): string {
+  if (homeDirectory === undefined || !LEADING_HOME.test(target)) {
+    return target;
+  }
+  const home = toAntigravityHomePath(homeDirectory);
+  return target === "~" ? home || "/" : `${home}${target.slice(1)}`;
+}
+
+/**
+ * The reverse of {@link expandLeadingHome} on import: an absolute path in the
+ * home directory goes back to `~/...`, so `.rulesync/permissions.jsonc` stays
+ * the same on every machine.
+ */
+function collapseLeadingHome(target: string, homeDirectory: string | undefined): string {
+  if (homeDirectory === undefined) {
+    return target;
+  }
+  const home = toAntigravityHomePath(homeDirectory);
+  if (home.length === 0) {
+    return target;
+  }
+  if (target === home) {
+    return "~";
+  }
+  return target.startsWith(`${home}/`) ? `~${target.slice(home.length)}` : target;
+}
 
 // Hostnames as Antigravity matches them: letters, digits, dots and hyphens.
 const HOSTNAME = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
@@ -58,6 +125,7 @@ const DENY_HINTS: Record<string, string> = {
   write_file: "deny a directory or file path instead",
   command: "deny the first words of the command instead",
   unsandboxed: "deny the first words of the command instead",
+  mcp: "deny the whole MCP server or tool instead",
 };
 
 // `{a,b}` is not a glob step in `parseGlobPattern`, but it is one in every tool
@@ -84,9 +152,15 @@ function toPathTarget(pattern: string): TargetResult {
   if (["", ".", "**", "**/*"].includes(path)) {
     return { target: "." };
   }
-  // `/**` leaves an empty directory, which is the filesystem root.
+  // `/**` leaves an empty directory, which is the filesystem root, and `C:/**`
+  // leaves `C:`, the drive's current directory rather than its root.
+  const stripped = path.replace(DIRECTORY_CONTENTS_SUFFIX, "");
   const directory =
-    path.replace(DIRECTORY_CONTENTS_SUFFIX, "") || (path.startsWith("/") ? "/" : "");
+    stripped === "" && path.startsWith("/")
+      ? "/"
+      : /^[A-Za-z]:$/.test(stripped) && stripped !== path
+        ? `${stripped}/`
+        : stripped;
   if (directory !== path && directory.length > 0 && !hasGlob(directory)) {
     return { target: directory };
   }
@@ -97,6 +171,36 @@ function toPathTarget(pattern: string): TargetResult {
     skipReason:
       "Antigravity file targets are paths, not globs. Only a plain path, `dir/**` or `*` can be expressed",
   };
+}
+
+/**
+ * The canonical patterns a `read_file` / `write_file` target imports as. A
+ * target can name a file or a directory, and a directory covers everything
+ * inside it, but the target alone does not say which. A plain path such as
+ * `src` imports as both `src` and `src/**`, so re-exporting it to a tool whose
+ * plain path matches only that one path keeps covering the subtree; regenerating
+ * collapses both back into one target. The bare `*`, and a target that already
+ * holds glob characters (verbatim output of an older Rulesync), stay as written.
+ */
+function fromPathTarget(target: string): string[] {
+  // A bare drive (`C:`, its current directory) has no subtree spelling:
+  // `C:/**` would generate as the drive root.
+  if (target === "*" || hasGlob(target) || /^[A-Za-z]:$/.test(target)) {
+    return [target];
+  }
+  // `./**`, not `**`: generation turns `**` into the bare action (every path).
+  if (target === ".") {
+    return [".", "./**"];
+  }
+  // A filesystem or drive root keeps its slash: `C:` alone is the drive's
+  // current directory, not its root.
+  const root = /^((?:[A-Za-z]:)?\/)\/*$/.exec(target)?.[1];
+  if (root !== undefined) {
+    return [root, `${root}**`];
+  }
+  // A trailing slash is dropped, so both patterns generate the same target.
+  const path = target.replace(/\/+$/, "");
+  return [path, `${path}/**`];
 }
 
 /**
@@ -151,6 +255,51 @@ function toTarget(action: string, pattern: string): TargetResult {
   return { target: pattern };
 }
 
+// Characters that would change how Antigravity reads `mcp(server/tool)`.
+const MCP_TARGET_SEPARATORS = /[/()]/;
+
+/**
+ * The `mcp` target of a canonical `mcp__<server>__<tool>` category:
+ * `<server>/<tool>`, `<server>/*` for a whole server (`mcp__<server>`,
+ * `mcp__<server>__*`), or `*` for every MCP tool (`mcp__*`, `mcp__*__*`). The
+ * server ends at the first `__`, as elsewhere in rulesync. Antigravity matches
+ * names exactly, so a glob, an empty name, or a `/` or parenthesis in a name
+ * has no target; when only the tool part is at fault, its server is the `lead`
+ * a deny widens to.
+ */
+function toMcpTarget(category: string): TargetResult & { lead?: string } {
+  const remainder = category.slice(MCP_CATEGORY_PREFIX.length);
+  const separator = remainder.indexOf("__");
+  const server = separator === -1 ? remainder : remainder.slice(0, separator);
+  const tool = separator === -1 ? "*" : remainder.slice(separator + 2);
+  if (server === "*" && tool === "*") {
+    return { target: "*" };
+  }
+  const skipReason =
+    "Antigravity MCP targets name one server or one tool exactly. Only `mcp__<server>`, `mcp__<server>__*`, `mcp__<server>__<tool>` or `mcp__*` can be expressed";
+  if (server.length === 0 || MCP_TARGET_SEPARATORS.test(server) || hasGlob(server)) {
+    return { skipReason };
+  }
+  if (tool === "*") {
+    return { target: `${server}/*` };
+  }
+  return tool.length === 0 || MCP_TARGET_SEPARATORS.test(tool) || hasGlob(tool)
+    ? { skipReason, lead: `${server}/*` }
+    : { target: `${server}/${tool}` };
+}
+
+/** The target of a canonical `mcp__...` rule, with the `lead` a deny widens to. */
+function toMcpRuleTarget(category: string, pattern: string): TargetResult & { lead?: string } {
+  const target = toMcpTarget(category);
+  if (pattern === "*" || !("target" in target)) {
+    return target;
+  }
+  return {
+    skipReason: "Antigravity MCP targets name a server or a tool, not the tool's arguments",
+    lead: target.target,
+  };
+}
+
 /**
  * The leading directories of a path glob (`src` for `src/*.ts`), or
  * `undefined` when it has none. A directory target covers everything inside
@@ -186,6 +335,30 @@ function toWidenedDenyTarget(action: string, pattern: string): string | undefine
     return toPathLiteralPrefix(pattern);
   }
   return undefined;
+}
+
+/** The entry a deny is widened to, and what it now blocks. */
+function describeWidenedDeny({
+  action,
+  prefix,
+  isMcp,
+}: {
+  action: string;
+  prefix: string;
+  isMcp: boolean;
+}): { entry: string; scope: string } {
+  if (isMcp) {
+    // `*` names every MCP tool, which the bare action already says.
+    return prefix === "*"
+      ? { entry: action, scope: "every MCP tool" }
+      : { entry: `${action}(${prefix})`, scope: `every call of \`${action}(${prefix})\`` };
+  }
+  return {
+    entry: `${action}(${prefix})`,
+    scope: PATH_ACTIONS.has(action)
+      ? `every path under \`${prefix}\``
+      : `every command that starts with \`${prefix}\``,
+  };
 }
 
 /**
@@ -234,12 +407,13 @@ function warnHomeOrVariablePath({
  * blocks more than it says.
  */
 export function buildAntigravityPermissionEntry({
-  action,
+  action: toolAction,
   category,
   pattern,
   decision,
   logger,
   toolLabel,
+  homeDirectory,
 }: {
   action: string;
   category: string;
@@ -247,20 +421,34 @@ export function buildAntigravityPermissionEntry({
   decision: PermissionAction;
   logger: Logger;
   toolLabel: string;
+  /**
+   * When set, a path target starting with `~/` (or exactly `~`) is written
+   * with this absolute home directory instead.
+   */
+  homeDirectory?: string;
 }): string | undefined {
-  const result = pattern === "*" ? { target: "*" } : toTarget(action, pattern);
+  const isMcp = category.startsWith(MCP_CATEGORY_PREFIX);
+  const action = isMcp ? "mcp" : toolAction;
+  const result: TargetResult & { lead?: string } = isMcp
+    ? toMcpRuleTarget(category, pattern)
+    : pattern === "*"
+      ? { target: "*" }
+      : toTarget(action, pattern);
   const rule = `${category}: { "${pattern}": "${decision}" }`;
   if ("skipReason" in result) {
-    const prefix = decision === "deny" ? toWidenedDenyTarget(action, pattern) : undefined;
+    const lead =
+      decision !== "deny" ? undefined : isMcp ? result.lead : toWidenedDenyTarget(action, pattern);
+    const prefix =
+      lead !== undefined && PATH_ACTIONS.has(action)
+        ? expandLeadingHome(lead, homeDirectory)
+        : lead;
     if (prefix !== undefined) {
-      const scope = PATH_ACTIONS.has(action)
-        ? `every path under \`${prefix}\``
-        : `every command that starts with \`${prefix}\``;
+      const { entry, scope } = describeWidenedDeny({ action, prefix, isMcp });
       logger.warn(
-        `${toolLabel} permissions: widening ${rule} to ${action}(${prefix}). ${result.skipReason}. The deny now blocks ${scope}, overriding any allow or ask for them.`,
+        `${toolLabel} permissions: widening ${rule} to ${entry}. ${result.skipReason}. The deny now blocks ${scope}, overriding any allow or ask for them.`,
       );
       warnHomeOrVariablePath({ action, target: prefix, rule, decision, logger, toolLabel });
-      return `${action}(${prefix})`;
+      return entry;
     }
     const consequence =
       decision === "deny"
@@ -283,6 +471,249 @@ export function buildAntigravityPermissionEntry({
       decision === "deny" ? ", so the deny also overrides any allow or ask there" : "";
     logger.warn(`${toolLabel} permissions: ${rule}: ${result.note}${consequence}.`);
   }
-  warnHomeOrVariablePath({ action, target: result.target, rule, decision, logger, toolLabel });
-  return result.target === "*" ? action : `${action}(${result.target})`;
+  const target = PATH_ACTIONS.has(action)
+    ? expandLeadingHome(result.target, homeDirectory)
+    : result.target;
+  warnHomeOrVariablePath({ action, target, rule, decision, logger, toolLabel });
+  return target === "*" ? action : `${action}(${target})`;
+}
+
+/**
+ * Convert rulesync permissions config to Antigravity allow/ask/deny arrays,
+ * shared by the CLI and IDE generators; `toAction` maps a canonical category to
+ * the target's tool or action name.
+ */
+export function convertRulesyncToAntigravityPermissions({
+  config,
+  toAction,
+  toolLabel,
+  logger,
+  homeDirectory,
+}: {
+  config: PermissionsConfig;
+  toAction: (category: string) => string;
+  toolLabel: string;
+  logger: Logger;
+  /** See {@link buildAntigravityPermissionEntry}. */
+  homeDirectory?: string;
+}): {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+} {
+  const allow: string[] = [];
+  const ask: string[] = [];
+  const deny: string[] = [];
+
+  // `*` restrictions reach `bash` and withhold the allows they cover in the
+  // other categories. A pattern-specific `*` deny/ask is still written as a
+  // `*(<pattern>)` entry, as before: no primary source says the tool reads a
+  // `*` tool name literally, so the entry may enforce it.
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel,
+    logger,
+  });
+  const translated: Array<{
+    action: string;
+    category: string;
+    pattern: string;
+    decision: PermissionAction;
+    entry: string | undefined;
+  }> = [];
+  for (const [category, rules] of Object.entries(permission)) {
+    const action = toAction(category);
+    for (const [pattern, decision] of Object.entries(rules)) {
+      const entry = buildAntigravityPermissionEntry({
+        action,
+        category,
+        pattern,
+        decision,
+        logger,
+        toolLabel,
+        homeDirectory,
+      });
+      translated.push({ action, category, pattern, decision, entry });
+    }
+  }
+
+  // A deny or ask Antigravity cannot express is skipped, so it withholds the
+  // allows of the same action that cover it — otherwise a catch-all
+  // `read_file` allow kept beside a skipped `**/.env` deny would auto-approve
+  // the very reads the deny was for.
+  const skippedRestrictionsByAction = new Map<string, string[]>();
+  // Every MCP tool category maps onto the one `mcp` action but names its own
+  // tool, so MCP restrictions are grouped by category rather than by action.
+  const groupOf = ({ action, category }: { action: string; category: string }): string =>
+    category.startsWith(MCP_CATEGORY_PREFIX) ? category : action;
+  for (const { action, category, pattern, decision, entry } of translated) {
+    if (entry === undefined && decision !== "allow") {
+      const group = groupOf({ action, category });
+      skippedRestrictionsByAction.set(group, [
+        ...(skippedRestrictionsByAction.get(group) ?? []),
+        pattern,
+      ]);
+    }
+  }
+  // The pattern-specific `*` restrictions were dropped above (Antigravity has
+  // no all-tools entry), so they shadow the emitted allows of every group too.
+  const allToolsRestrictions = Object.entries(
+    lookupOwn({ record: config.permission, key: ALL_TOOLS_PERMISSION_CATEGORY }) ?? {},
+  )
+    .filter(
+      ([pattern, decision]) =>
+        decision !== "allow" && pattern !== CATCH_ALL_PATTERN && !isPrototypePollutionKey(pattern),
+    )
+    .map(([pattern]) => pattern);
+  const shadowingTests = new Map<string, (allowPattern: string) => boolean>();
+  const shadowingTestOf = (group: string): ((allowPattern: string) => boolean) => {
+    const cached = shadowingTests.get(group);
+    if (cached !== undefined) return cached;
+    const patterns = [...(skippedRestrictionsByAction.get(group) ?? []), ...allToolsRestrictions];
+    let test: (allowPattern: string) => boolean;
+    if (URL_ACTIONS.has(group)) {
+      // URL targets are compared as URLs, host by host and path by path.
+      test = (allowPattern) =>
+        patterns.some((pattern) => urlPatternsOverlap(pattern, allowPattern));
+    } else {
+      // Each restriction is also compared lowercased and without a scheme,
+      // which can only add overlaps.
+      const asGlobs = createShadowingRestrictionsTest(
+        [...new Set([...patterns, ...patterns.map(normalizeUrlPattern)])].map((pattern) => ({
+          pattern,
+          fromAllToolsCategory: false,
+        })),
+      );
+      test = (allowPattern) =>
+        asGlobs(allowPattern).length > 0 || asGlobs(normalizeUrlPattern(allowPattern)).length > 0;
+    }
+    shadowingTests.set(group, test);
+    return test;
+  };
+  const withheld: string[] = [];
+
+  for (const { action, category, pattern, decision, entry } of translated) {
+    if (entry === undefined) {
+      continue;
+    }
+    switch (decision) {
+      case "allow":
+        if (
+          [pattern, effectiveTargetScope(entry)].some((candidate) =>
+            shadowingTestOf(groupOf({ action, category }))(candidate),
+          )
+        ) {
+          withheld.push(`${category}: ${pattern}`);
+          break;
+        }
+        allow.push(entry);
+        break;
+      case "ask":
+        ask.push(entry);
+        break;
+      case "deny":
+        deny.push(entry);
+        break;
+    }
+  }
+  if (withheld.length > 0) {
+    logger.warn(
+      `${toolLabel} permissions: the allow rule(s) for ${withheld.join(", ")} were not written ` +
+        `because a deny or ask rule ${toolLabel} cannot express (skipped above) covers the same ` +
+        `inputs, and the stricter rule wins.`,
+    );
+  }
+
+  // Two patterns can translate to the same entry (`npm run *` and
+  // `npm   run *`, or two denies widened to the same words), so drop repeats.
+  return { allow: [...new Set(allow)], ask: [...new Set(ask)], deny: [...new Set(deny)] };
+}
+
+/**
+ * The widest glob an emitted entry grants, for comparing an allow against the
+ * restrictions Antigravity cannot express. The emitted target can grant more
+ * than the canonical pattern it came from: a path target also covers
+ * everything inside it (and `.` the whole workspace), a command target is a
+ * word prefix (`git push` approves `git push --force`), and a domain target
+ * covers its subdomains and every URL on it. Widening only ever withholds more.
+ */
+function effectiveTargetScope(entry: string): string {
+  const { toolName, pattern: target } = parseToolPatternEntry(entry);
+  if (target === CATCH_ALL_PATTERN) {
+    return CATCH_ALL_PATTERN;
+  }
+  if (PATH_ACTIONS.has(toolName)) {
+    const path = target.replace(/\/+$/, "");
+    return path === "." || path === "" ? CATCH_ALL_PATTERN : `${path}/**`;
+  }
+  if (COMMAND_ACTIONS.has(toolName)) {
+    return target.endsWith("*") ? target : `${target}*`;
+  }
+  // A domain target is a pathless host, which `urlPatternsOverlap` reads as
+  // every URL on it and its subdomains.
+  return target;
+}
+
+/**
+ * Convert Antigravity allow/ask/deny arrays to rulesync permissions config,
+ * shared by the CLI and IDE adapters; `toCategory` maps the target's tool or
+ * action name back to a canonical category.
+ */
+export function convertAntigravityToRulesyncPermissions({
+  allow,
+  ask,
+  deny,
+  toCategory,
+  toolLabel,
+  logger,
+  homeDirectory,
+}: {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+  toCategory: (action: string) => string;
+  toolLabel: string;
+  logger: Logger;
+  /**
+   * When set, a path target in this home directory is imported as `~/...`,
+   * undoing the rewrite of {@link convertRulesyncToAntigravityPermissions}.
+   */
+  homeDirectory?: string;
+}): PermissionsConfig {
+  const permission: Record<string, Record<string, PermissionAction>> = {};
+
+  const processEntries = (entries: string[], action: PermissionAction) => {
+    for (const entry of entries) {
+      const { toolName, pattern: target } = parseToolPatternEntry(entry);
+      const canonical = toCategory(toolName);
+      const patterns = COMMAND_ACTIONS.has(toolName)
+        ? [
+            importAntigravityCommandTarget({
+              target,
+              entry,
+              decision: action,
+              logger,
+              toolLabel,
+            }),
+          ]
+        : PATH_ACTIONS.has(toolName)
+          ? fromPathTarget(collapseLeadingHome(target, homeDirectory))
+          : [target];
+      for (const pattern of patterns) {
+        // A `__proto__` or `constructor` name would not land as a plain own
+        // key, so such entries are dropped, as the other permissions adapters do.
+        if (isPrototypePollutionKey(canonical) || isPrototypePollutionKey(pattern)) {
+          continue;
+        }
+        getOrCreateOwn({ record: permission, key: canonical, create: () => ({}) })[pattern] =
+          action;
+      }
+    }
+  };
+
+  processEntries(allow, "allow");
+  processEntries(ask, "ask");
+  processEntries(deny, "deny");
+
+  return { permission };
 }

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -89,6 +89,34 @@ describe("DevinHooks", () => {
       ]);
       expect(parsed.PermissionRequest).toEqual([
         { matcher: "exec", hooks: [{ type: "prompt", prompt: "Allow?" }] },
+      ]);
+    });
+
+    it("should write the canonical failClosed as fail_closed", async () => {
+      const rulesyncHooks = makeRulesyncHooks({
+        version: 1,
+        hooks: {
+          preToolUse: [
+            { matcher: "exec", command: "./guard.sh", failClosed: true },
+            { matcher: "exec", command: "./audit.sh", failClosed: false },
+          ],
+        },
+      });
+
+      const devinHooks = await DevinHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks,
+        validate: false,
+      });
+
+      expect(JSON.parse(devinHooks.getFileContent()).PreToolUse).toEqual([
+        {
+          matcher: "exec",
+          hooks: [
+            { type: "command", command: "./guard.sh", fail_closed: true },
+            { type: "command", command: "./audit.sh", fail_closed: false },
+          ],
+        },
       ]);
     });
 
@@ -227,6 +255,35 @@ describe("DevinHooks", () => {
       expect(parsed.hooks.stop).toEqual([{ type: "command", command: "stop.sh" }]);
     });
 
+    it("should import fail_closed as the canonical failClosed", () => {
+      const fileContent = JSON.stringify({
+        PreToolUse: [
+          {
+            matcher: "exec",
+            hooks: [
+              { type: "command", command: "guard.sh", fail_closed: true },
+              { type: "prompt", prompt: "Allow?", fail_closed: false },
+              { type: "command", command: "bad.sh", fail_closed: "yes" },
+            ],
+          },
+        ],
+      });
+      const devinHooks = new DevinHooks({
+        outputRoot: testDir,
+        relativeDirPath: ".devin",
+        relativeFilePath: "hooks.v1.json",
+        fileContent,
+        validate: false,
+      });
+
+      const parsed = JSON.parse(devinHooks.toRulesyncHooks().getFileContent());
+      expect(parsed.hooks.preToolUse).toEqual([
+        { type: "command", command: "guard.sh", matcher: "exec", failClosed: true },
+        { type: "prompt", prompt: "Allow?", matcher: "exec", failClosed: false },
+        { type: "command", command: "bad.sh", matcher: "exec" },
+      ]);
+    });
+
     it("should read hooks from under the hooks key for a global config.json", () => {
       const fileContent = JSON.stringify({
         mcpServers: {},
@@ -269,6 +326,49 @@ describe("DevinHooks", () => {
       expect(parsed.hooks).toEqual(config.hooks);
     });
 
+    it("should round-trip fail_closed through the global config.json", async () => {
+      const dir = join(testDir, ".config", "devin");
+      await ensureDir(dir);
+      await writeFileContent(
+        join(dir, "config.json"),
+        JSON.stringify({ mcpServers: { a: { command: "x" } } }),
+      );
+      const config = {
+        version: 1,
+        hooks: {
+          preToolUse: [
+            { type: "command", command: "./guard.sh", matcher: "exec", failClosed: true },
+            { type: "command", command: "./audit.sh", matcher: "exec", failClosed: false },
+          ],
+        },
+      };
+
+      const generated = await DevinHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks: makeRulesyncHooks(config),
+        validate: false,
+        global: true,
+      });
+      expect(JSON.parse(generated.getFileContent()).hooks.PreToolUse).toEqual([
+        {
+          matcher: "exec",
+          hooks: [
+            { type: "command", command: "./guard.sh", fail_closed: true },
+            { type: "command", command: "./audit.sh", fail_closed: false },
+          ],
+        },
+      ]);
+      await writeFileContent(
+        join(testDir, generated.getRelativeDirPath(), generated.getRelativeFilePath()),
+        generated.getFileContent(),
+      );
+
+      const imported = await DevinHooks.fromFile({ outputRoot: testDir, global: true });
+
+      expect(imported.getRelativeFilePath()).toBe("config.json");
+      expect(imported.toRulesyncHooks().getJson().hooks).toEqual(config.hooks);
+    });
+
     it("should round-trip the postCompact event via the PostCompaction key", async () => {
       const config = {
         version: 1,
@@ -295,6 +395,51 @@ describe("DevinHooks", () => {
       // And it maps back to the canonical `postCompact` event.
       const parsed = JSON.parse(devinHooks.toRulesyncHooks().getFileContent());
       expect(parsed.hooks).toEqual(config.hooks);
+    });
+
+    it("should round-trip the preCompact event with its trigger matcher via the PreCompact key", async () => {
+      const config = {
+        version: 1,
+        hooks: {
+          preCompact: [{ type: "command", command: "pre-compact.sh", matcher: "auto" }],
+        },
+      };
+      const rulesyncHooks = makeRulesyncHooks(config);
+
+      const devinHooks = await DevinHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks,
+        validate: false,
+      });
+
+      const generated = JSON.parse(devinHooks.getFileContent());
+      expect(generated.PreCompact).toEqual([
+        { matcher: "auto", hooks: [{ type: "command", command: "pre-compact.sh" }] },
+      ]);
+
+      const parsed = JSON.parse(devinHooks.toRulesyncHooks().getFileContent());
+      expect(parsed.hooks).toEqual(config.hooks);
+    });
+
+    it("should import PostCompact as an alias of postCompact, keeping PostCompaction hooks too", () => {
+      const devinHooks = new DevinHooks({
+        outputRoot: testDir,
+        relativeDirPath: ".devin",
+        relativeFilePath: "hooks.v1.json",
+        fileContent: JSON.stringify({
+          PostCompaction: [{ hooks: [{ type: "command", command: "legacy.sh" }] }],
+          PostCompact: [{ hooks: [{ type: "command", command: "new.sh" }] }],
+        }),
+        validate: false,
+      });
+
+      const parsed = JSON.parse(devinHooks.toRulesyncHooks().getFileContent());
+      expect(parsed.hooks).toEqual({
+        postCompact: [
+          { type: "command", command: "legacy.sh" },
+          { type: "command", command: "new.sh" },
+        ],
+      });
     });
 
     it("should throw on invalid JSON content", () => {

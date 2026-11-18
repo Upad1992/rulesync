@@ -5,8 +5,13 @@ import {
   COPILOTCLI_PROJECT_SETTINGS_DIR_PATH,
   COPILOTCLI_SETTINGS_FILE_NAME,
 } from "../../constants/copilot-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
-import type { PermissionAction } from "../../types/permissions.js";
+import type { AiFileParams } from "../../types/ai-file.js";
+import {
+  COPILOTCLI_DEFAULT_PERMISSION_MODES,
+  type CopilotcliDefaultPermissionMode,
+  type PermissionAction,
+  type PermissionsConfig,
+} from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import {
@@ -15,9 +20,10 @@ import {
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { honorAllToolsRestrictions, withholdAllowsShadowedByAsks } from "./shadowed-allows.js";
+import { ALL_TOOLS_PERMISSION_CATEGORY } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -35,6 +41,35 @@ const WEBFETCH_CATEGORY = "webfetch";
 /** `~/.copilot/settings.json` and `.github/copilot/settings.json` keys. */
 const ALLOWED_URLS_KEY = "allowedUrls";
 const DENIED_URLS_KEY = "deniedUrls";
+
+/**
+ * `~/.copilot/settings.json` only: the startup permission mode for new
+ * interactive sessions, authored through the `copilotcli.defaultPermissionMode`
+ * override. It is a user setting — the repository settings file does not list
+ * it among its repo-overridable keys.
+ */
+const DEFAULT_PERMISSION_MODE_KEY = "defaultPermissionMode";
+
+function isCopilotcliDefaultPermissionMode(
+  value: unknown,
+): value is CopilotcliDefaultPermissionMode {
+  return COPILOTCLI_DEFAULT_PERMISSION_MODES.some((mode) => mode === value);
+}
+
+/** The given categories of a permission block, those it states. */
+function pickOwnCategories(
+  permission: PermissionsConfig["permission"],
+  categories: readonly string[],
+): PermissionsConfig["permission"] {
+  const picked: PermissionsConfig["permission"] = {};
+  for (const category of categories) {
+    const rules = Object.hasOwn(permission, category) ? permission[category] : undefined;
+    if (rules !== undefined) {
+      picked[category] = rules;
+    }
+  }
+  return picked;
+}
 
 function toUrlList(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -86,6 +121,13 @@ function splitUrlRules(rules: Record<string, PermissionAction>): {
  * top-level keys in the user `settings.json`, so only documented keys are ever
  * emitted there either.)
  *
+ * The `copilotcli.defaultPermissionMode` override (`manual` | `assisted` |
+ * `allow-all`) writes the user-scope `defaultPermissionMode` key in global mode
+ * only; in project mode it is skipped with a warning, since the repository
+ * settings file does not accept it. It is patched only when authored, so a mode
+ * the user picked through `/settings` otherwise survives. Writing `allow-all`
+ * warns, because it makes new sessions skip every approval prompt.
+ *
  * @see https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
  * @see https://github.com/github/copilot-cli/blob/main/changelog.md
  */
@@ -95,14 +137,6 @@ export class CopilotcliPermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "{}",
     });
-  }
-
-  /**
-   * `settings.json` holds unrelated user settings (`model`, `effortLevel`,
-   * `hooks`, ...), so it must not be deleted.
-   */
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths({
@@ -147,7 +181,21 @@ export class CopilotcliPermissions extends ToolPermissions {
     const existingContent = (await readFileContentOrNull(filePath)) ?? "{}";
 
     const config = rulesyncPermissions.getJson();
-    const rules = config.permission[WEBFETCH_CATEGORY];
+    // The CLI prompts for a URL in neither list, which is how an `ask` is
+    // honored — so an allow covering an ask, or covering a deny/ask under the
+    // all-tools `*` category, is withheld rather than auto-approving it.
+    const rules = withholdAllowsShadowedByAsks({
+      permission: honorAllToolsRestrictions({
+        permission: pickOwnCategories(config.permission, [
+          ALL_TOOLS_PERMISSION_CATEGORY,
+          WEBFETCH_CATEGORY,
+        ]),
+        toolLabel: "Copilot CLI",
+        logger,
+      }),
+      toolLabel: "Copilot CLI",
+      logger,
+    })[WEBFETCH_CATEGORY];
 
     // A canonical config that does not state `webfetch` at all leaves both keys
     // exactly as the user left them. A stated category that yields no entries
@@ -161,6 +209,22 @@ export class CopilotcliPermissions extends ToolPermissions {
       } else if (allowedUrls.length > 0) {
         logger?.warn(
           `Copilot CLI permissions: dropping ${allowedUrls.length} "webfetch" allow rule(s) at project scope — ${join(paths.relativeDirPath, paths.relativeFilePath)} does not accept "${ALLOWED_URLS_KEY}" (repository settings may only add denials). Author allow rules in global scope (\`--global\`) instead.`,
+        );
+      }
+    }
+
+    const defaultPermissionMode = config.copilotcli?.defaultPermissionMode;
+    if (defaultPermissionMode !== undefined) {
+      if (global) {
+        patch[DEFAULT_PERMISSION_MODE_KEY] = defaultPermissionMode;
+        if (defaultPermissionMode === "allow-all") {
+          logger?.warn(
+            `Copilot CLI permissions: writing "${DEFAULT_PERMISSION_MODE_KEY}": "allow-all" to ${join(paths.relativeDirPath, paths.relativeFilePath)} — new interactive sessions will start with every tool, path and URL approved without prompting (equivalent to \`--allow-all\`). Deny rules and enterprise policy still apply.`,
+          );
+        }
+      } else {
+        logger?.warn(
+          `Copilot CLI permissions: skipping "copilotcli.${DEFAULT_PERMISSION_MODE_KEY}" at project scope — ${join(paths.relativeDirPath, paths.relativeFilePath)} does not accept "${DEFAULT_PERMISSION_MODE_KEY}" (it is a user setting). Author it in global scope (\`--global\`) instead.`,
         );
       }
     }
@@ -194,13 +258,27 @@ export class CopilotcliPermissions extends ToolPermissions {
       for (const pattern of toUrlList(settings[ALLOWED_URLS_KEY])) {
         // A pattern in both lists is a deny upstream (repository denials are
         // union-merged over the user allow list), so deny wins here too.
-        rules[pattern] ??= "allow";
+        if (!Object.hasOwn(rules, pattern)) {
+          rules[pattern] = "allow";
+        }
       }
     }
 
     const permission = Object.keys(rules).length > 0 ? { [WEBFETCH_CATEGORY]: rules } : {};
+    // Only a user-scope mode the CLI honors is carried into the override; a
+    // project-scope value is not read upstream.
+    const defaultPermissionMode = this.global ? settings[DEFAULT_PERMISSION_MODE_KEY] : undefined;
     return this.toRulesyncPermissionsDefault({
-      fileContent: JSON.stringify({ permission }, null, 2),
+      fileContent: JSON.stringify(
+        {
+          permission,
+          ...(isCopilotcliDefaultPermissionMode(defaultPermissionMode) && {
+            copilotcli: { defaultPermissionMode },
+          }),
+        },
+        null,
+        2,
+      ),
     });
   }
 
@@ -222,25 +300,5 @@ export class CopilotcliPermissions extends ToolPermissions {
         { cause: error },
       );
     }
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): CopilotcliPermissions {
-    return new CopilotcliPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
-      global,
-    });
   }
 }

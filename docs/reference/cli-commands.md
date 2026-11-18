@@ -131,6 +131,8 @@ Because that budget is finite, the array carries the diagnostics a run has no ot
 
 `rulesync init` creates the `.rulesync/` directory with sample rule, MCP, subagent, skill, hooks and permissions files, plus a `rulesync.jsonc` configuration file. Existing files are never overwritten.
 
+`init` never creates a file through a symbolic link that leads outside the project (the current directory) or is dangling, so a cloned repository that commits `.rulesync -> ~/elsewhere` cannot make it write there. Such a sample file is skipped with a warning naming it, and the other files, `rulesync.jsonc` included, are still created. A file that already exists, or a symbolic link already occupying its path (dangling or not), counts as existing and is skipped without being written through. A `.rulesync` linked to a shared tree outside the project therefore keeps working: the samples it already has are kept, and the ones it lacks are reported rather than written there. A link that stays inside the project is written through.
+
 ### User-level defaults
 
 The generated `rulesync.jsonc` starts from `"targets": ["codexcli", "claudecode", "opencode"]` and `"features": ["rules", "mcp", "subagents", "skills", "hooks", "permissions"]`. To seed every new project with your own set instead, put a `rulesync.jsonc` in the user config directory: `$XDG_CONFIG_HOME/rulesync/rulesync.jsonc`, which is `~/.config/rulesync/rulesync.jsonc` when `XDG_CONFIG_HOME` is unset (a relative `XDG_CONFIG_HOME` is ignored, as the XDG specification requires).
@@ -275,8 +277,14 @@ The `generate` command reads source files from one or more rulesync source trees
 > either: what the sweep would list there are files in the link's target, not
 > Rulesync's output, so each one is kept, and every directory holding them is
 > named once in a `Refusing to delete files in` warning, the same way a write
-> through such a link is refused. A link that stays
-> inside the output root is followed as usual, and an orphan that is itself a
+> through such a link is refused. A link into version-control metadata
+> (`.git`, `.hg`, `.svn`, `.jj`) is refused the same way in every scope. At
+> project scope, an output directory reached through any symbolic link — even
+> one that stays inside the project, such as a committed `.claude/rules -> ..`
+> or `.cursor -> .claude` — is not swept either, since a repository you cloned
+> could otherwise point the sweep at your untracked files. With `--global`, a
+> link that stays inside the output root (a dotfiles checkout linked into the
+> home directory) is followed as usual, and an orphan that is itself a
 > symbolic link is removed as a link, leaving its target untouched. A generated
 > skill directory linked onto the output root itself is not written either, so
 > its `SKILL.md` never overwrites a file in the root; and only a skill directory
@@ -383,7 +391,7 @@ With the global `--json` flag, `generate` reports the files it wrote, the manage
 - `path` is relative to the output root, with `/` separators, and the operation does not name the root. A path several targets write is listed once, and so is a relative path that stands for a file in each of several output roots (`--output-roots a b`, or a tool home override such as `HERMES_HOME`): run one output root at a time when a consumer has to tell them apart.
 - The order is deterministic — features in summary order; within a feature, file writes, then key operations, then deletions; paths sorted, and keys within a path — so a `--dry-run` plan can be compared operation by operation with the plan the following real run reports.
 - A failing command's document carries no `data`, so when `--check` finds the tree out of date, or a `.rulesync/` source could not be read, the plan is reported as `error.details.plan` instead.
-- A shared configuration file Rulesync merges into (`.claude/settings.json`, `.codex/config.toml`, …) appears as a `write` of the whole file, followed by one `key` operation for each top-level key Rulesync owns outright there that the write adds or changes (`write`) or removes (`delete`), with the key's name in `key`. Removing the last MCP server from `.rulesync/mcp.jsonc`, for example, is a `delete` of `mcp_servers` in `.codex/config.toml` (and likewise for `.grok/config.toml`, `context_servers` in Zed's `settings.json`, `mcpServers` in `.augment/settings.json`, `.tabnine/agent/settings.json` and `~/.qoder/settings.json`, `mcp` in `crush.json`, `mcp_servers` in Pool's `settings.yaml`, `amp.mcpServers` in Amp's `settings.json`, `mcpServers` in `.qwen/settings.json`, and `mcp` in `opencode.json`, `.mimocode/mimocode.json` and `kilo.json`; other targets still write an empty object there): the other keys of the file are kept as they are, and the file itself is never deleted. A key Rulesync shares with the user at a deeper level — the merged `permissions` block of `.claude/settings.json`, for example — is not listed, so its change shows only as the file `write`. A key two features write in the same run (the Hermes Agent `plugins` list) is listed under each feature that changes it, which a `--dry-run`, where neither sees the other's write, can report differently from the real run. Two rewrites the `--delete` sweep itself makes are not listed at all: disabling the Hermes Agent commands plugin in its `config.yaml` and retracting Goose slash commands — so `--check` can fail with an empty `operations` list when one of them is the only difference. `version` is bumped whenever an operation gains a new `action` or `kind` value or an existing field changes meaning, so a consumer that authorizes operations should refuse a version it does not know. Version 2 added the `key` kind.
+- A shared configuration file Rulesync merges into (`.claude/settings.json`, `.codex/config.toml`, …) appears as a `write` of the whole file, followed by one `key` operation for each top-level key Rulesync owns outright there that the write adds or changes (`write`) or removes (`delete`), with the key's name in `key`. Removing the last MCP server from `.rulesync/mcp.jsonc`, for example, is a `delete` of `mcp_servers` in `.codex/config.toml` (and likewise for `.grok/config.toml`, `context_servers` in Zed's `settings.json`, `mcpServers` in `.augment/settings.json`, `.tabnine/agent/settings.json` and `~/.qoder/settings.json`, `mcp` in `crush.json`, `mcp_servers` in Pool's `settings.yaml`, `amp.mcpServers` in Amp's `settings.json`, `mcpServers` in `.qwen/settings.json`, `mcp` in `opencode.json`, `.mimocode/mimocode.json` and `kilo.json`, `servers` in `.vscode/mcp.json`, and an empty `mcp_servers` list in `.vibe/config.toml`; other targets still write an empty object there): the other keys of the file are kept as they are, and the file itself is never deleted. A key Rulesync shares with the user at a deeper level — the merged `permissions` block of `.claude/settings.json`, for example — is not listed, so its change shows only as the file `write`. A key two features write in the same run (the Hermes Agent `plugins` list) is listed under each feature that changes it, which a `--dry-run`, where neither sees the other's write, can report differently from the real run. Two rewrites the `--delete` sweep itself makes are not listed at all: disabling the Hermes Agent commands plugin in its `config.yaml` and retracting Goose slash commands — so `--check` can fail with an empty `operations` list when one of them is the only difference. `version` is bumped whenever an operation gains a new `action` or `kind` value or an existing field changes meaning, so a consumer that authorizes operations should refuse a version it does not know. Version 2 added the `key` kind.
 
 ### Watch mode
 
@@ -421,6 +429,8 @@ The `gitignore` command adds generated AI tool configuration files to `.gitignor
 You can route entries to `.gitattributes` instead by setting `gitignoreDestination` to `"gitattributes"` at root, tool, or tool × feature level. More specific settings take precedence.
 
 Set `gitignoreDestination` to `"gitexclude"` to write entries to Git's untracked, repository-local exclude file (`$GIT_COMMON_DIR/info/exclude`, usually `.git/info/exclude`) instead of a tracked file — for example from `rulesync.local.jsonc`. The path is resolved with `git rev-parse --git-path info/exclude`, so linked worktrees are supported, and the command fails with an error when the project is not inside a Git repository or is not at the repository root. Only the rulesync-fenced block in the exclude file is rewritten, and the file is untouched unless an entry is routed there. Because `.gitignore` takes precedence over the exclude file, an entry shared with a target still routed to `"gitignore"` also stays in `.gitignore`. See [Configuration](../guide/configuration.md#per-feature-options) for details.
+
+`gitignore` refuses to read or write `.gitignore` or `.gitattributes` when either is a symbolic link that leads outside the project (or a dangling link), so a cloned repository cannot make it append to a file elsewhere. A link that stays inside the project is written through. The `gitexclude` destination is located by Git and is not checked this way.
 
 > **No `rulesync.jsonc` in the project?** Entries for all supported tools are emitted. `gitignoreTargetsOnly` is only applied when a config file exists, so users without a config still get useful `.gitignore` coverage.
 
@@ -511,20 +521,20 @@ The selected configuration file must already exist. Run `rulesync init` first, o
 
 The operation fetches only the source being added; existing declarations are not re-fetched. Existing sources must already be locked and installed, otherwise run `rulesync install` first. The operation is transactional: if the new source fails to install, Rulesync restores the manifest, source lockfiles, curated rules, and curated skills to their pre-command state.
 
-| Option                | Description                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------- |
-| `--name <name>`       | Name for a rule, command, subagent, skill, or check scaffold                                      |
-| `--force`             | Replace an existing scaffold file without prompting                                               |
-| `--skills <skills>`   | Comma-separated skill names. `*` selects all skills.                                              |
-| `--rules <rules>`     | Comma-separated rule names. Names may omit `.md`; `*` selects direct `.md` files under rulesPath. |
-| `--transport <type>`  | `github` (default), `git`, or experimental `npm`                                                  |
-| `--ref <ref>`         | Git ref, npm version, or npm dist-tag                                                             |
-| `--path <path>`       | Skills path within the source; defaults to `skills`                                               |
-| `--rules-path <path>` | Rules path within the source; defaults to `rules`                                                 |
-| `--registry <url>`    | npm-compatible registry URL                                                                       |
-| `--token-env <name>`  | Environment variable containing the npm registry token                                            |
-| `--token <token>`     | GitHub token for private repositories                                                             |
-| `--config <path>`     | Configuration file to edit (default: `rulesync.jsonc`)                                            |
+| Option                | Description                                                                                               |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `--name <name>`       | Name for a rule, command, subagent, skill, or check scaffold                                              |
+| `--force`             | Replace an existing scaffold file without prompting                                                       |
+| `--skills <skills>`   | Comma-separated skill names. `*` selects all skills.                                                      |
+| `--rules <rules>`     | Comma-separated rule names. Names may omit `.md`; `*` selects direct `.md` files under rulesPath.         |
+| `--transport <type>`  | `github` (default), `git`, or experimental `npm`                                                          |
+| `--ref <ref>`         | Git ref, npm version, or npm dist-tag                                                                     |
+| `--path <path>`       | Skills path within the source; defaults to `skills`                                                       |
+| `--rules-path <path>` | Rules path within the source; defaults to `rules`                                                         |
+| `--registry <url>`    | npm-compatible registry URL                                                                               |
+| `--token-env <name>`  | Environment variable containing the npm registry token (`NPM_TOKEN`, `NODE_AUTH_TOKEN`, or `*_NPM_TOKEN`) |
+| `--token <token>`     | GitHub token for private repositories                                                                     |
+| `--config <path>`     | Configuration file to edit (default: `rulesync.jsonc`)                                                    |
 
 When neither `--skills` nor `--rules` is provided, all skills are installed for backward compatibility. Providing only `--rules` installs no skills.
 
@@ -572,6 +582,10 @@ rulesync fetch owner/repo@ref:path   # Both ref and path
 | `--interactive, -i`     | Interactively select skills to fetch via a checkbox prompt; nothing is selected initially, press `<a>` to select/deselect all (requires the skills feature and a TTY) | Disabled                         |
 | `--token <token>`       | Git provider token for private repositories                                                                                                                           | `GITHUB_TOKEN` or `GH_TOKEN` env |
 
+### Single-File Features
+
+`mcp`, `hooks` and `permissions` each have one source file that can be spelled several ways — the recommended `mcp.jsonc`, `hooks.jsonc` and `permissions.jsonc`, and the legacy `mcp.json` (plus the deprecated `.mcp.json`), `hooks.json` and `permissions.json` — and `generate` reads the first that exists, in that order. `fetch` follows the same precedence on both sides. From the remote, only the file `generate` would read is fetched, so a remote that ships both `hooks.jsonc` and `hooks.json` contributes only `hooks.jsonc`. Locally, it is written over the source already in effect: a remote `mcp.jsonc` fetched into a project that has only `.rulesync/mcp.json` replaces `mcp.json` rather than landing beside it and taking over, and with no local source it keeps its remote name. The remote content is written as it is, so a local `mcp.json` (or `hooks.json`, `permissions.json`) may end up holding JSONC — comments and trailing commas — which Rulesync reads without trouble, since every spelling is parsed as JSONC; other tools that read the file as strict JSON may not. Both the remote file left out and the change of destination are logged. `--conflict skip` therefore leaves the feature alone whenever any local spelling of its source exists.
+
 ### Executable Bits
 
 Skills can ship scripts that agents are expected to run. The GitHub contents API that `fetch` downloads from carries no file mode, so when a run fetches a skill's supporting files `fetch` reads the repository tree once and marks every such file that git records as executable (`100755`) with mode `0755` after writing it (a rules-only fetch makes no tree request); `rulesync generate` then carries that bit into each generated skill directory. Two warnings cover the cases where this cannot be done: a tree listing GitHub cut short (very large repositories), and a tree that could not be read at all. In both cases the files are still fetched, without the bit, and the warning names the file modes as what was lost so you can `chmod` them yourself.
@@ -602,7 +616,7 @@ The scope is deliberately narrow:
 - Only the `skills/<name>/` directories fetched in **this** run are pruned. A skill left out by `--skills` or `--interactive` is untouched.
 - Other features (`rules/`, `commands/`, `subagents/`, …) are never pruned — the issue only exists for directory-based skills.
 - Directories the remote skill no longer has are removed as well, and are listed in the summary under their own name with a trailing slash.
-- Symbolic links are unlinked, never followed: a link inside a skill directory can only ever lose the link itself, never whatever it points at. A skill directory that is **itself** a symbolic link is not pruned at all, since deleting through it would reach outside the output directory; Rulesync warns and leaves it alone.
+- Symbolic links are unlinked, never followed: a link inside a skill directory can only ever lose the link itself, never whatever it points at. A skill directory that is **itself** a symbolic link (one that stays inside the project, see [Symbolic Links Out of the Project](#symbolic-links-out-of-the-project)) is not pruned at all, since deleting through it would reach outside the output directory; Rulesync warns and leaves it alone. The same goes for a skill directory reached through any symbolic link on the way, such as a `.rulesync` or `.rulesync/skills` linked elsewhere in the project: a repository you cloned could otherwise point the prune at your untracked files.
 - A local file that the filesystem holds as the same file as one just fetched — a second name for it on a case-insensitive or Unicode-normalizing filesystem, or a hard link — is kept, even though the remote list does not carry that name. The same applies to a symbolic link that resolves to a file or directory this run wrote: it is kept rather than unlinked, since the fetch may have written through it.
 - A skill directory Rulesync cannot read or delete from — a permission it does not hold, a disk that gave out — stops that skill's prune where it failed rather than the whole fetch. Rulesync warns, still lists whatever it had already deleted, and moves on to the next skill.
 - Nothing more than 15 directories below the skill directory is pruned. That is a limit on the local walk, deep enough that a fetched tree stays well inside it; Rulesync warns and leaves anything deeper alone.
@@ -664,6 +678,12 @@ A zero-width joiner or a variation selector is dropped only where it hides somet
 Path names come from the remote repository, so every one that Rulesync prints — the fetch summary, warnings, and debug lines — has its control characters stripped first. A crafted path cannot forge or erase the lines around it, which is what makes the record of what was written and deleted worth reading.
 
 The `--json` output is the exception: it carries each path exactly as the repository spells it, because a machine consumer needs the real name to act on it. Anything that renders a value out of that JSON into a terminal has to strip it itself.
+
+### Symbolic Links Out of the Project
+
+`fetch` refuses to write through a local symbolic link whose real path lies outside the project root (the current directory). Every target is checked before anything is written, and the run fails with `Path resolves outside ... through a symbolic link`. A cloned repository could otherwise commit a link such as `.rulesync/skills/x -> ~/.ssh` and have the fetch write there.
+
+This rejects links made on purpose as well: an output directory such as `.rulesync -> ~/dotfiles/rulesync`, or a skill directory such as `.rulesync/skills/foo -> ~/shared-skills/foo`, can no longer be a fetch target. Fetch into a real directory inside the project instead, or point the link at a directory inside the project. A link that stays inside the project root is still written through. `rulesync install --mode gh` at project scope and `rulesync install --mode apm` are stricter: they refuse a symbolic link anywhere below the project root, even one that stays inside it, and fail with `Refusing to follow a symbolic link`.
 
 ### Examples
 
@@ -750,7 +770,7 @@ rulesync convert --from cursor --to copilot,claudecode --dry-run
 
 ## Doctor Command
 
-The `doctor` command runs read-only diagnostics against the configuration files (`rulesync.jsonc` and `rulesync.local.jsonc`) and reports problems grouped by severity (`error` / `warning` / `info`). It never writes files, which makes it a safe first step when generation does not behave as expected, and a cheap CI guard.
+The `doctor` command runs read-only diagnostics against the configuration files (`rulesync.jsonc` and `rulesync.local.jsonc`), plus a size check of the Codex CLI `AGENTS.md` files on disk, and reports problems grouped by severity (`error` / `warning` / `info`). It never writes files, which makes it a safe first step when generation does not behave as expected, and a cheap CI guard.
 
 It is especially useful for catching **silently ignored configuration**: the config schema is non-strict, so a misspelled key such as `"target"` instead of `"targets"` is normally swallowed without any error. `doctor` reports every unknown key with a "did you mean" suggestion.
 
@@ -764,10 +784,11 @@ It is especially useful for catching **silently ignored configuration**: the con
 - Conflicting target pairs (e.g. `claudecode` + `claudecode-legacy`).
 - `$schema` presence and whether it points at the current config schema URL.
 - Structural schema violations on any other key (wrong types, malformed `sources` entries).
-- `sources[].tokenEnv` naming an environment variable that is not set.
+- `sources[].tokenEnv` naming an environment variable that is not set, one that is not `NPM_TOKEN` / `NODE_AUTH_TOKEN` / `*_NPM_TOKEN` (error), or one sent to a registry not listed in `RULESYNC_NPM_TRUSTED_REGISTRIES` (error).
 - `inputRoot` or the first `inputRoots` entry pointing at a directory that does not exist. Later `inputRoots` entries are optional overlays and may be absent.
 - `inputRoot` or an `inputRoots` entry set to an empty string, which makes `generate` fail with `outputRoot cannot be an empty string` before it resolves any source tree.
 - Duplicate entries in `inputRoots` (warning; duplicates are ignored at generate time).
+- Codex CLI `AGENTS.md` size (warning, `codexcli/agents-md-size`): when the config targets `codexcli` with the `rules` feature in project scope, the `AGENTS.md` files on disk in each output root are measured against `project_doc_max_bytes`, with the same budget and chain rules the `generate` warning uses (32,768 bytes, or the positive value set in the output root's `.codex/config.toml`). The files are found the way `import` finds them: the root `AGENTS.md` plus nested ones, hand-written files included, but not those inside hidden directories, `node_modules`, `__pycache__`, gitignored directories, top-level build or vendor directories (`dist`, `build`, `vendor` and the like), or reached through symlinks. A value of `0` in `.codex/config.toml` is reported as `codexcli/project-docs-disabled` instead. Doctor measures what is on disk rather than simulating generation, so run it after `generate`; it is skipped while the config itself has errors, and `~/.codex/config.toml` is not read.
 
 ### Options
 
@@ -892,4 +913,5 @@ GITHUB_TOKEN=$(gh auth token) rulesync release-notes owner/private-repo
 - A repository with no matching releases prints a warning and exits with code `0`.
 - Range queries walk at most 10 API pages (1,000 releases); tags older than that are reported as not found.
 - Date ranges scan the whole walked history rather than stopping at the first out-of-range release, because the API orders releases by creation date and a release published from a long-lived branch can appear out of publication order.
+- Tag names, release names and bodies are written by the remote repository, so control characters (escape sequences, carriage returns, bidirectional overrides and the like) are stripped from them before they are printed; line feeds and tabs in a body are kept. The `--json` output carries the values unchanged, JSON-escaped.
 - Default output is Markdown on standard output, so it can be piped to other tools. With the global `--json` flag, the releases are emitted as structured `data` instead and no Markdown is printed; failures use the standard error document with code `RELEASE_NOTES_FAILED`.

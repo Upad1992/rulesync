@@ -17,11 +17,11 @@ import type { HooksConfig } from "../../types/hooks.js";
 import {
   CANONICAL_TO_COPILOTCLI_EVENT_NAMES,
   COPILOTCLI_HOOK_EVENTS,
+  COPILOTCLI_MATCHER_HOOK_EVENTS,
   COPILOTCLI_TO_CANONICAL_EVENT_NAMES,
   HookDefinitionSchema,
 } from "../../types/hooks.js";
 import { ToolFile } from "../../types/tool-file.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { compact } from "../../utils/object.js";
@@ -35,7 +35,6 @@ import type { RulesyncHooks } from "./rulesync-hooks.js";
 import { buildImportedHooksConfig } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
   type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
@@ -98,25 +97,13 @@ import {
  */
 /**
  * Canonical events whose Copilot CLI hook entries honor an optional `matcher`
- * field (a regex compiled as `^(?:PATTERN)$`, tested against `toolName`).
- *
- * Confirmed by the upstream changelog: v1.0.36 (2026-04-24, `preToolUse.matcher`
- * honored) and v1.0.63 (2026-06-15, "PostToolUse hook matchers (e.g.
- * `Edit|Write`) are now honored instead of silently dropped").
- * @see https://docs.github.com/en/copilot/reference/hooks-reference
+ * field (a regex compiled as `^(?:PATTERN)$`). The hooks reference filters each
+ * on a different field: the tool name for `preToolUse` / `postToolUse` /
+ * `permissionRequest`, `notification_type`, the `preCompact` trigger
+ * (`manual` | `auto`) and the `subagentStart` agent name.
+ * See {@link COPILOTCLI_MATCHER_HOOK_EVENTS}.
  */
-const COPILOTCLI_MATCHER_EVENTS: ReadonlySet<string> = new Set([
-  "preToolUse",
-  "postToolUse",
-  // The hooks reference documents `matcher` on four more events, each filtering
-  // on a different field: `notification` (notification_type),
-  // `permissionRequest` (toolName), `preCompact` (trigger: "manual" | "auto")
-  // and `subagentStart` (agentName).
-  "notification",
-  "permissionRequest",
-  "preCompact",
-  "subagentStart",
-]);
+const COPILOTCLI_MATCHER_EVENTS: ReadonlySet<string> = new Set(COPILOTCLI_MATCHER_HOOK_EVENTS);
 
 /** Human-readable list of the matcher-aware events, for the drop warning. */
 const COPILOTCLI_MATCHER_EVENTS_LABEL = [...COPILOTCLI_MATCHER_EVENTS].join("/");
@@ -547,10 +534,7 @@ export class CopilotcliHooks extends ToolHooks {
   private readonly disableAllHooks: boolean | undefined;
 
   constructor({ settingsFile, disableAllHooks, ...params }: CopilotcliHooksParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
+    super(params);
     this.settingsFile = settingsFile;
     this.disableAllHooks = disableAllHooks;
   }
@@ -640,15 +624,10 @@ export class CopilotcliHooks extends ToolHooks {
   }
 
   toRulesyncHooks(options?: { logger?: Logger }): RulesyncHooks {
-    let parsed: { version?: number; hooks?: unknown };
-    try {
-      parsed = JSON.parse(this.getFileContent());
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Copilot CLI hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        { cause: error },
-      );
-    }
+    const parsed: { version?: number; hooks?: unknown } = this.parseFileContentOrThrow({
+      displayName: "Copilot CLI",
+      parse: (fileContent) => JSON.parse(fileContent),
+    });
     const hooks = copilotCliHooksToCanonical(parsed.hooks, options?.logger);
     return this.toRulesyncHooksDefault({
       fileContent: JSON.stringify(
@@ -662,24 +641,6 @@ export class CopilotcliHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): CopilotcliHooks {
-    return new CopilotcliHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

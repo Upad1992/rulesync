@@ -1,14 +1,16 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, join, posix, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
-import { MAX_FILE_SIZE } from "../constants/rulesync-paths.js";
+import { formatMegabytes, MAX_FILE_SIZE, MAX_FILE_SIZE_MB } from "../constants/rulesync-paths.js";
 import {
   createTempDirectory,
   directoryExists,
   getFileSizeAndExecutableBit,
+  isRootDirPath,
   isSymlink,
   listDirectoryEntryNames,
+  normalizePosixDirPath,
   posixRelativePathEscapesRoot,
   readFileContent,
   removeTempDirectory,
@@ -104,21 +106,46 @@ export async function resolveDefaultRef(url: string): Promise<{ ref: string; sha
   }
 }
 
+function parseLsRemote(stdout: string): Map<string, string> {
+  const refs = new Map<string, string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.match(/^([0-9a-f]{40})\t(.+)$/);
+    if (match?.[1] && match[2]) refs.set(match[2], match[1]);
+  }
+  return refs;
+}
+
 export async function resolveRefToSha(url: string, ref: string): Promise<string> {
   validateGitUrl(url);
   validateRef(ref);
   await checkGitAvailable();
+  // Query the exact branch and tag ref names (plus the peeled `^{}` commit of
+  // an annotated tag) instead of passing `ref` as an `ls-remote` pattern:
+  // patterns match by suffix, so a branch such as `feature/v1` would otherwise
+  // be able to stand in for the tag `v1`.
+  const branchRef = `refs/heads/${ref}`;
+  const tagRef = `refs/tags/${ref}`;
+  let stdout: string;
   try {
-    const { stdout } = await execFileAsync("git", ["ls-remote", "--", url, ref], {
-      timeout: GIT_TIMEOUT_MS,
-    });
-    const sha = stdout.match(/^([0-9a-f]{40})\t/m)?.[1];
-    if (!sha) throw new GitClientError(`Ref "${ref}" not found in ${url}`);
-    return sha;
+    ({ stdout } = await execFileAsync(
+      "git",
+      ["ls-remote", "--", url, branchRef, tagRef, `${tagRef}^{}`],
+      { timeout: GIT_TIMEOUT_MS },
+    ));
   } catch (error) {
-    if (error instanceof GitClientError) throw error;
     throw new GitClientError(`Failed to resolve ref "${ref}" for ${url}`, error);
   }
+  const refs = parseLsRemote(stdout);
+  const branchSha = refs.get(branchRef);
+  const tagSha = refs.get(`${tagRef}^{}`) ?? refs.get(tagRef);
+  if (branchSha && tagSha && branchSha !== tagSha) {
+    throw new GitClientError(
+      `Ref "${ref}" is ambiguous in ${url}: a branch and a tag of that name point at different commits.`,
+    );
+  }
+  const sha = tagSha ?? branchSha;
+  if (!sha) throw new GitClientError(`Ref "${ref}" not found in ${url}`);
+  return sha;
 }
 
 /**
@@ -216,8 +243,7 @@ export async function fetchSkillFiles(params: {
   // would only yield root-level files like README.md.
   // Normalize first so variants like "./.", ".//", or Windows ".\\" are also
   // recognized as the root and don't fall back to the (buggy) sparse-checkout path.
-  const normalizedSkillsPath = posix.normalize(skillsPath.replace(/\\/g, "/")).replace(/\/+$/, "");
-  const isRootPath = normalizedSkillsPath === "" || normalizedSkillsPath === ".";
+  const isRootPath = isRootDirPath(normalizePosixDirPath(skillsPath));
   try {
     await execFileAsync(
       "git",
@@ -351,7 +377,7 @@ async function walkDirectory(
       const { size, executable } = await getFileSizeAndExecutableBit(fullPath);
       if (size > MAX_FILE_SIZE) {
         logger?.warn(
-          `Skipping file "${fullPath}" (${(size / 1024 / 1024).toFixed(2)}MB exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit).`,
+          `Skipping file "${fullPath}" (${formatMegabytes(size)}MB exceeds ${MAX_FILE_SIZE_MB}MB limit).`,
         );
         continue;
       }

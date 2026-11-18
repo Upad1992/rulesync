@@ -1,4 +1,4 @@
-import type { SourceEntry } from "../config/config.js";
+import { getSourceTransport, type SourceEntry } from "../config/config.js";
 import type { ParsedSource } from "../types/fetch.js";
 import { formatError } from "../utils/error.js";
 import type { Logger } from "../utils/logger.js";
@@ -11,12 +11,15 @@ import {
   validateNpmPackageName,
   validateNpmRegistryUrl,
 } from "./npm-client.js";
-import { getNpmLockedSource, readNpmLockFile } from "./npm-sources-lock.js";
+import { getNpmLockedSource } from "./npm-sources-lock.js";
 import { parseSource } from "./source-parser.js";
-import { getLockedSource, readLockFile } from "./sources-lock.js";
-import { resolveGitSourceRef, resolveGithubFetchRef, resolveNpmFetchVersion } from "./sources.js";
+import { resolveGitSourceRef } from "./sources-git.js";
+import { resolveGithubFetchRef } from "./sources-github.js";
+import { getLockedSource } from "./sources-lock.js";
+import { resolveNpmFetchVersion } from "./sources-npm.js";
+import { loadSourceLocks } from "./sources.js";
 
-export type OutdatedSourceStatus = "up-to-date" | "outdated" | "not-locked" | "failed";
+type OutdatedSourceStatus = "up-to-date" | "outdated" | "not-locked" | "failed";
 
 export type OutdatedSourceReport = {
   source: string;
@@ -46,17 +49,16 @@ export async function checkOutdatedSources(params: {
   logger: Logger;
 }): Promise<OutdatedSourceReport[]> {
   const { sources, projectRoot, logger } = params;
-  const lock = await readLockFile({ projectRoot, logger });
-  const npmLock = await readNpmLockFile({ projectRoot, logger });
+  const { lock, npmLock, lockKeys } = await loadSourceLocks({ sources, projectRoot, logger });
   const client = new GitHubClient({ token: GitHubClient.resolveToken(params.token) });
 
   const reports: OutdatedSourceReport[] = [];
-  for (const sourceEntry of sources) {
-    const transport = sourceEntry.transport ?? "github";
+  for (const [index, sourceEntry] of sources.entries()) {
+    const transport = getSourceTransport(sourceEntry);
     const lockedRef =
       transport === "npm"
         ? getNpmLockedSource(npmLock, sourceEntry.source)?.resolvedVersion
-        : getLockedSource(lock, sourceEntry.source)?.resolvedRef;
+        : getLockedSource(lock, lockKeys[index] ?? sourceEntry.source)?.resolvedRef;
     try {
       const { requestedRef, latestRef } = await resolveLatestRef({ sourceEntry, client, logger });
       reports.push({
@@ -91,14 +93,14 @@ async function resolveLatestRef(params: {
   logger: Logger;
 }): Promise<{ requestedRef: string; latestRef: string }> {
   const { sourceEntry, client, logger } = params;
-  const transport = sourceEntry.transport ?? "github";
+  const transport = getSourceTransport(sourceEntry);
 
   if (transport === "npm") {
     const packageName = sourceEntry.source;
     validateNpmPackageName(packageName);
     const registryUrl = sourceEntry.registry ?? DEFAULT_NPM_REGISTRY_URL;
     validateNpmRegistryUrl(registryUrl, { logger });
-    const token = resolveNpmToken({ tokenEnv: sourceEntry.tokenEnv });
+    const token = resolveNpmToken({ tokenEnv: sourceEntry.tokenEnv, registryUrl, logger });
     const requestedRef =
       resolveNpmFetchVersion({ sourceEntry, locked: undefined, updateSources: true })
         .requestedVersion ?? "latest";

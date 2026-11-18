@@ -6,17 +6,21 @@ import {
   COPILOT_MCP_DIR,
   COPILOT_VSCODE_SETTINGS_FILE_NAME,
 } from "../../constants/copilot-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import {
-  COPILOT_DEFAULT_PERMISSION_MODES,
+  COPILOT_LOCAL_PERMISSION_LEVELS,
   type CopilotDefaultPermissionMode,
+  type CopilotLocalPermissionLevel,
   type CopilotSandbox,
   CopilotSandboxEnabledSchema,
   CopilotSandboxUserConfiguredPathsSchema,
   type PermissionAction,
+  type PermissionsConfig,
 } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
+import type { Logger } from "../../utils/logger.js";
+import { lookupOwn } from "../../utils/own-lookup.js";
 import { isPlainObject } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
@@ -35,8 +39,20 @@ import {
   warnOnTrustAffectingEntries,
 } from "./sandbox-trust.js";
 import {
+  honorAllToolsRestrictions,
+  restateAllToolsRestrictionsInCategory,
+  restatesAsCategoryRule,
+  hasDoubleSlashWithoutScheme,
+  stripUrlSchemeKeepingPathCase,
+} from "./shadowed-allows.js";
+import {
+  ALL_TOOLS_PERMISSION_CATEGORY,
+  bashRulesHonoringAllTools,
+  CATCH_ALL_PATTERN,
+  SHELL_PERMISSION_CATEGORY,
+} from "./shell-command-categories.js";
+import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -70,12 +86,142 @@ const AUTO_APPROVE_KEYS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The workspace setting holding the starting permission level of new chat
- * sessions, authored through the `copilot.defaultPermissionMode` override.
+ * The workspace setting holding the starting permission level of new Local
+ * (`local` harness) chat sessions, authored through the
+ * `copilot.defaultPermissionMode` override. VS Code 1.144 narrowed it to Local
+ * sessions; the Copilot harness reads {@link DEFAULT_CONFIGURATION_KEY}.
  *
  * @see https://code.visualstudio.com/docs/agents/reference/ai-settings
  */
 const DEFAULT_PERMISSION_MODE_KEY = "chat.permissions.default";
+
+/**
+ * The workspace setting holding the starting `mode` (`interactive` / `plan` /
+ * `autopilot`) and `approvals` (`manual` / `assisted` / `allowAll`) of new
+ * agent sessions such as the Copilot harness, the default since VS Code 1.143.
+ * It shipped in stable VS Code 1.144 as an object setting with
+ * `additionalProperties: false`; older releases ignore it.
+ *
+ * @see https://github.com/microsoft/vscode/blob/1.144.0/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts
+ * @see https://github.com/microsoft/vscode/blob/1.144.0/src/vs/workbench/contrib/chat/common/constants.ts
+ */
+const DEFAULT_CONFIGURATION_KEY = "chat.defaultConfiguration";
+
+/** The `approvals` values of `chat.defaultConfiguration`. */
+type CopilotDefaultApprovals = "manual" | "assisted" | "allowAll";
+
+/**
+ * What each `copilot.defaultPermissionMode` value writes. `local` goes to
+ * `chat.permissions.default`; `approvals` and `autopilot` go to
+ * `chat.defaultConfiguration`. The Local picker has no Assisted level, so
+ * `assisted` starts Local sessions with Default Permissions — the stricter
+ * fallback. Autopilot is a permission level in the Local picker but a `mode`
+ * in `chat.defaultConfiguration`, where it runs with every tool call approved.
+ */
+const DEFAULT_PERMISSION_MODE_MAPPINGS: Readonly<
+  Record<
+    CopilotDefaultPermissionMode,
+    {
+      local: CopilotLocalPermissionLevel;
+      approvals: CopilotDefaultApprovals;
+      autopilot: boolean;
+    }
+  >
+> = {
+  default: { local: "default", approvals: "manual", autopilot: false },
+  autoApprove: { local: "autoApprove", approvals: "allowAll", autopilot: false },
+  autopilot: { local: "autopilot", approvals: "allowAll", autopilot: true },
+  assisted: { local: "default", approvals: "assisted", autopilot: false },
+};
+
+/**
+ * The `chat.defaultConfiguration` value for `mode`. Rulesync owns only whether
+ * the mode is Autopilot: authoring Autopilot sets it, and any other value
+ * removes any Autopilot mode in the file (whether an earlier run or a person
+ * wrote it, since the two cannot be told apart), while an `interactive` or
+ * `plan` mode is kept.
+ */
+function buildDefaultConfigurationValue({
+  defaultPermissionMode,
+  existingSettings,
+}: {
+  defaultPermissionMode: CopilotDefaultPermissionMode;
+  existingSettings: Record<string, unknown>;
+}): Record<string, unknown> {
+  const { approvals, autopilot } = DEFAULT_PERMISSION_MODE_MAPPINGS[defaultPermissionMode];
+  const existing = existingSettings[DEFAULT_CONFIGURATION_KEY];
+  const value: Record<string, unknown> = { ...(isPlainObject(existing) ? existing : {}) };
+  if (autopilot) {
+    value.mode = "autopilot";
+  } else if (value.mode === "autopilot") {
+    delete value.mode;
+  }
+  value.approvals = approvals;
+  return value;
+}
+
+/**
+ * The `copilot.defaultPermissionMode` values from least to most permissive,
+ * used to settle a file whose two keys disagree.
+ */
+const DEFAULT_PERMISSION_MODE_RANK: Readonly<Record<CopilotDefaultPermissionMode, number>> = {
+  default: 0,
+  assisted: 1,
+  autoApprove: 2,
+  autopilot: 3,
+};
+
+/**
+ * The `copilot.defaultPermissionMode` a `chat.defaultConfiguration` value
+ * stands for. Autopilot is recognized only together with `allowAll`, the pair
+ * Rulesync writes for it: an Autopilot mode with stricter approvals is read
+ * from `approvals` alone, so that regenerating never escalates it to Allow
+ * All. An object without `approvals` is read as `default`, since VS Code then
+ * starts sessions with Manual permissions.
+ */
+function readDefaultConfigurationMode(
+  configuration: unknown,
+): CopilotDefaultPermissionMode | undefined {
+  if (!isPlainObject(configuration)) {
+    return undefined;
+  }
+  switch (configuration.approvals) {
+    case undefined:
+    case "manual":
+      return "default";
+    case "assisted":
+      return "assisted";
+    case "allowAll":
+      return configuration.mode === "autopilot" ? "autopilot" : "autoApprove";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Read `copilot.defaultPermissionMode` back from the settings. When the two
+ * keys agree — `chat.permissions.default` holds the Local level Rulesync
+ * writes for the `chat.defaultConfiguration` value — the latter is returned,
+ * since only it can say `assisted`. When they disagree, the less permissive of
+ * the two is returned, so regenerating never raises either harness's starting
+ * permissions. Either key alone is read as it stands.
+ */
+function readDefaultPermissionMode(
+  settings: Record<string, unknown>,
+): CopilotDefaultPermissionMode | undefined {
+  const fromConfiguration = readDefaultConfigurationMode(settings[DEFAULT_CONFIGURATION_KEY]);
+  const localValue = settings[DEFAULT_PERMISSION_MODE_KEY];
+  const fromLocal = COPILOT_LOCAL_PERMISSION_LEVELS.find((level) => level === localValue);
+  if (fromConfiguration === undefined || fromLocal === undefined) {
+    return fromConfiguration ?? fromLocal;
+  }
+  if (DEFAULT_PERMISSION_MODE_MAPPINGS[fromConfiguration].local === fromLocal) {
+    return fromConfiguration;
+  }
+  return DEFAULT_PERMISSION_MODE_RANK[fromLocal] < DEFAULT_PERMISSION_MODE_RANK[fromConfiguration]
+    ? fromLocal
+    : fromConfiguration;
+}
 
 /**
  * The prefix every Agent Host sandbox setting shares. A `copilot.sandbox` leaf
@@ -254,10 +400,6 @@ function readSandboxFromSettings(settings: Record<string, unknown>): CopilotSand
   return Object.keys(sandbox).length > 0 ? sandbox : undefined;
 }
 
-function isCopilotDefaultPermissionMode(value: unknown): value is CopilotDefaultPermissionMode {
-  return COPILOT_DEFAULT_PERMISSION_MODES.some((mode) => mode === value);
-}
-
 function asAutoApproveMap(value: unknown): Record<string, boolean> {
   if (!isPlainObject(value)) {
     return {};
@@ -272,6 +414,63 @@ function asAutoApproveMap(value: unknown): Record<string, boolean> {
 }
 
 /**
+ * The edits or urls map's rules with the all-tools `*` restrictions honored.
+ * A restriction that reads as a path (edits) or URL (urls), and the catch-all
+ * `*`, is written as a `false` entry of its own, which `buildAutoApproveValue`
+ * places where it wins; a URL is written without its scheme and with only its host lowercased,
+ * since VS Code matches paths case-sensitively.
+ * Every other restriction (a command, an odd URL pattern) cannot be written
+ * there, so each `true` entry it overlaps is withheld instead.
+ */
+function honorCopilotAllToolsRestrictions({
+  permission,
+  category,
+  logger,
+}: {
+  permission: PermissionsConfig["permission"];
+  category: string;
+  logger?: Logger;
+}): Record<string, PermissionAction> {
+  const allToolsRules = lookupOwn({ record: permission, key: ALL_TOOLS_PERMISSION_CATEGORY }) ?? {};
+  const isWritable = restatesAsCategoryRule();
+  // A URL spelled `<host>//<path>` (no `:` before the `//`) is not restated:
+  // its host is ambiguous, so the `true` entries it overlaps on either reading
+  // are withheld instead.
+  const restateAs = (params: { category: string; pattern: string; action: PermissionAction }) =>
+    params.pattern === CATCH_ALL_PATTERN ||
+    (isWritable(params) &&
+      !(params.category === "webfetch" && hasDoubleSlashWithoutScheme(params.pattern)));
+  const writable: Record<string, PermissionAction> = {};
+  const notWritable: Record<string, PermissionAction> = {};
+  for (const [pattern, action] of Object.entries(allToolsRules)) {
+    if (action === "allow") continue;
+    if (restateAs({ category, pattern, action })) {
+      const key =
+        category === "webfetch" && pattern !== CATCH_ALL_PATTERN
+          ? stripUrlSchemeKeepingPathCase(pattern)
+          : pattern;
+      writable[key] = action;
+    } else {
+      notWritable[pattern] = action;
+    }
+  }
+  const restated = restateAllToolsRestrictionsInCategory({
+    permission: {
+      [ALL_TOOLS_PERMISSION_CATEGORY]: writable,
+      [category]: lookupOwn({ record: permission, key: category }) ?? {},
+    },
+    category,
+    restateAs: () => true,
+  });
+  const honored = honorAllToolsRestrictions({
+    permission: { [ALL_TOOLS_PERMISSION_CATEGORY]: notWritable, [category]: restated },
+    toolLabel: COPILOT_TOOL_LABEL,
+    logger,
+  });
+  return lookupOwn({ record: honored, key: category }) ?? {};
+}
+
+/**
  * Render one canonical category's rules as a VS Code auto-approve map. Returns
  * `undefined` when the category contributes nothing, so the key is retracted
  * rather than written as an empty object.
@@ -280,20 +479,38 @@ function asAutoApproveMap(value: unknown): Record<string, boolean> {
  * owns these keys, so a rule dropped from the canonical config disappears from
  * the settings file too.
  */
-function buildAutoApproveValue(
-  rules: Record<string, PermissionAction>,
-): Record<string, boolean> | undefined {
-  const autoApprove: Record<string, boolean> = {};
-  for (const [pattern, action] of Object.entries(rules)) {
-    if (action === "allow") {
-      autoApprove[pattern] = true;
-    } else if (action === "deny") {
-      autoApprove[pattern] = false;
-    }
-    // `ask` is represented by omitting the entry: VS Code falls through to its
-    // default in-chat approval prompt.
+function buildAutoApproveValue({
+  category,
+  rules,
+}: {
+  category: string;
+  rules: Record<string, PermissionAction>;
+}): Record<string, boolean> | undefined {
+  // `false` means "never auto-approve": VS Code prompts. It is written for
+  // `ask` as well as `deny`, because omitting an `ask` would leave a broader
+  // `true` entry (`"**/*": true` beside an ask on `src/**`) to auto-approve
+  // the very input the author wanted to be asked about.
+  const entries = Object.entries(rules).map(([pattern, action]): [string, boolean] => [
+    pattern,
+    action === "allow",
+  ]);
+  if (entries.length === 0) {
+    return undefined;
   }
-  return Object.keys(autoApprove).length > 0 ? autoApprove : undefined;
+  // VS Code does not resolve overlapping entries by strictness: the edits map
+  // lets the *last* matching glob win and the urls map the *first* matching
+  // pattern, so the `false` entries are placed where they win — last for
+  // edits, first for urls. (The terminal map checks denials first, so its
+  // order does not matter and is kept as written.)
+  const falseEntries = entries.filter(([, approved]) => !approved);
+  const trueEntries = entries.filter(([, approved]) => approved);
+  const ordered =
+    category === "edit"
+      ? [...trueEntries, ...falseEntries]
+      : category === "webfetch"
+        ? [...falseEntries, ...trueEntries]
+        : entries;
+  return Object.fromEntries(ordered);
 }
 
 /**
@@ -310,13 +527,17 @@ function buildAutoApproveValue(
  * mapped (see {@link AUTO_APPROVE_KEYS}): `bash`, `edit` and `webfetch`. In
  * every one, per-pattern rules map as: `allow` → `true` (auto-approve), `deny`
  * → `false` (VS Code then always prompts — note this is "never auto-approve",
- * not a hard block), and `ask` → the entry is OMITTED (VS Code falls through to
- * the same default prompt). A key whose canonical category is absent entirely
+ * not a hard block), and `ask` → `false` as well. Omitting an `ask` entry would
+ * let a broader `true` entry that also matches auto-approve it, so the `ask`
+ * is written explicitly; it imports back as `deny`, the stricter reading of
+ * `false`. A key whose canonical category is absent entirely
  * is left untouched, so authoring only `bash` rules never disturbs a
  * hand-written edits or urls map.
- * The `copilot.defaultPermissionMode` override writes `chat.permissions.default`
- * (the starting permission level of new chat sessions); without it the key is
- * left untouched. The `copilot.sandbox` override writes the Agent Host sandbox
+ * The `copilot.defaultPermissionMode` override writes both
+ * `chat.permissions.default` (Local sessions) and `chat.defaultConfiguration`
+ * (Copilot-harness sessions, VS Code 1.144+; see
+ * {@link DEFAULT_PERMISSION_MODE_MAPPINGS}); without it both keys are left
+ * untouched. The `copilot.sandbox` override writes the Agent Host sandbox
  * settings (`chat.agent.sandbox.*`, see {@link SANDBOX_LEAVES}) per key, and
  * warns about every value it writes that loosens the sandbox.
  * Only project scope is modeled: VS Code's user-scope settings.json lives at a
@@ -328,14 +549,6 @@ export class CopilotPermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "{}",
     });
-  }
-
-  /**
-   * `.vscode/settings.json` is a user-managed workspace file with unrelated
-   * settings, so it must not be deleted.
-   */
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
@@ -380,18 +593,32 @@ export class CopilotPermissions extends ToolPermissions {
     // whose category is absent stays exactly as the user left it — otherwise
     // adopting rulesync for `bash` alone would wipe a hand-authored
     // `chat.tools.edits.autoApprove`. A category that IS stated but yields
-    // nothing (all `ask`) still retracts its key, since rulesync owns it.
+    // nothing (an empty map) still retracts its key, since rulesync owns it.
     const patch: Record<string, unknown> = {};
     for (const [category, settingKey] of Object.entries(AUTO_APPROVE_KEYS)) {
-      const rules = config.permission[category];
-      if (rules === undefined) {
+      if (!Object.hasOwn(config.permission, category)) {
         continue;
       }
-      patch[settingKey] = buildAutoApproveValue(rules);
+      // A `*` deny/ask covers this surface too: shell commands take every one
+      // (as `honorAllToolsOnBash` does), and the edits/urls maps take the ones
+      // that read as a path or URL as `false` entries, which are placed where
+      // they win over a broader `true`.
+      const rules =
+        category === SHELL_PERMISSION_CATEGORY
+          ? bashRulesHonoringAllTools(config.permission)
+          : honorCopilotAllToolsRestrictions({ permission: config.permission, category, logger });
+      patch[settingKey] = buildAutoApproveValue({ category, rules });
     }
+    const existingSettings = (): Record<string, unknown> =>
+      parseSharedConfig({ format: "jsonc", fileContent: existingContent, filePath });
     const defaultPermissionMode = config.copilot?.defaultPermissionMode;
     if (defaultPermissionMode !== undefined) {
-      patch[DEFAULT_PERMISSION_MODE_KEY] = defaultPermissionMode;
+      patch[DEFAULT_PERMISSION_MODE_KEY] =
+        DEFAULT_PERMISSION_MODE_MAPPINGS[defaultPermissionMode].local;
+      patch[DEFAULT_CONFIGURATION_KEY] = buildDefaultConfigurationValue({
+        defaultPermissionMode,
+        existingSettings: existingSettings(),
+      });
     }
     const sandbox = config.copilot?.sandbox;
     if (sandbox !== undefined) {
@@ -399,11 +626,7 @@ export class CopilotPermissions extends ToolPermissions {
         patch,
         buildSandboxPatch({
           sandbox,
-          existingSettings: parseSharedConfig({
-            format: "jsonc",
-            fileContent: existingContent,
-            filePath,
-          }),
+          existingSettings: existingSettings(),
         }),
       );
       warnOnTrustAffectingEntries({
@@ -469,10 +692,10 @@ export class CopilotPermissions extends ToolPermissions {
       }
     }
 
-    const defaultPermissionMode = settings[DEFAULT_PERMISSION_MODE_KEY];
+    const defaultPermissionMode = readDefaultPermissionMode(settings);
     const sandbox = readSandboxFromSettings(settings);
     const copilot = {
-      ...(isCopilotDefaultPermissionMode(defaultPermissionMode) && { defaultPermissionMode }),
+      ...(defaultPermissionMode !== undefined && { defaultPermissionMode }),
       ...(sandbox !== undefined && { sandbox }),
     };
     return this.toRulesyncPermissionsDefault({
@@ -484,24 +707,6 @@ export class CopilotPermissions extends ToolPermissions {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): CopilotPermissions {
-    return new CopilotPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
     });
   }
 }

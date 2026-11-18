@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
@@ -127,6 +127,8 @@ describe("QoderHooks", () => {
               once: true,
               async: true,
               asyncRewake: true,
+              rewakeMessage: "Lint failed:",
+              rewakeSummary: "Lint errors found",
               args: ["--fix"],
               env: { FOO: "bar" },
             },
@@ -150,9 +152,179 @@ describe("QoderHooks", () => {
         once: true,
         async: true,
         asyncRewake: true,
+        rewakeMessage: "Lint failed:",
+        rewakeSummary: "Lint errors found",
         args: ["--fix"],
         env: { FOO: "bar" },
       });
+    });
+
+    it("should warn when rewakeSummary exceeds Qoder's 300-character cap but still emit it", async () => {
+      const summary = "x".repeat(301);
+      const rulesyncHooks = buildRulesyncHooks(testDir, {
+        version: 1,
+        hooks: {
+          stop: [
+            { type: "command", command: "check.sh", asyncRewake: true, rewakeSummary: summary },
+          ],
+        },
+      });
+
+      const logger = createMockLogger();
+      const warnSpy = vi.spyOn(logger, "warn");
+      const qoderHooks = await QoderHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks,
+        validate: false,
+        logger,
+      });
+
+      const parsed = JSON.parse(qoderHooks.getFileContent());
+      expect(parsed.hooks.Stop[0].hooks[0].rewakeSummary).toBe(summary);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('caps "rewakeSummary" at 300 characters'),
+      );
+    });
+
+    it("should not warn when rewakeSummary is exactly 300 characters", async () => {
+      const rulesyncHooks = buildRulesyncHooks(testDir, {
+        version: 1,
+        hooks: {
+          stop: [
+            {
+              type: "command",
+              command: "check.sh",
+              asyncRewake: true,
+              rewakeSummary: "x".repeat(300),
+            },
+          ],
+        },
+      });
+
+      const logger = createMockLogger();
+      const warnSpy = vi.spyOn(logger, "warn");
+      await QoderHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks,
+        validate: false,
+        logger,
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([299, 300, 301])(
+      "should measure rewakeSummary after collapsing whitespace (%i characters)",
+      async (length) => {
+        const summary = `  ${"x".repeat(length - 2)}${" \t".repeat(200)}y   `;
+        const rulesyncHooks = buildRulesyncHooks(testDir, {
+          version: 1,
+          hooks: {
+            stop: [
+              { type: "command", command: "check.sh", asyncRewake: true, rewakeSummary: summary },
+            ],
+          },
+        });
+        const logger = createMockLogger();
+        const qoderHooks = await QoderHooks.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks,
+          validate: false,
+          logger,
+        });
+
+        expect(JSON.parse(qoderHooks.getFileContent()).hooks.Stop[0].hooks[0].rewakeSummary).toBe(
+          summary,
+        );
+        if (length > 300) {
+          expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(
+              `is ${length} characters long after collapsing whitespace; ` +
+                'this tool caps "rewakeSummary" at 300 characters',
+            ),
+          );
+        } else {
+          expect(logger.warn).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([
+      { asyncRewake: undefined, warns: true },
+      { asyncRewake: false, warns: true },
+      { asyncRewake: true, warns: false },
+    ])(
+      "should warn about rewakeMessage and rewakeSummary without asyncRewake but still emit them (asyncRewake: $asyncRewake)",
+      async ({ asyncRewake, warns }) => {
+        const rulesyncHooks = buildRulesyncHooks(testDir, {
+          version: 1,
+          hooks: {
+            stop: [
+              {
+                type: "command",
+                command: "check.sh",
+                ...(asyncRewake === undefined ? {} : { asyncRewake }),
+                rewakeMessage: "Check failed:",
+                rewakeSummary: "Checks found issues",
+              },
+            ],
+          },
+        });
+        const logger = createMockLogger();
+        const qoderHooks = await QoderHooks.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks,
+          validate: false,
+          logger,
+        });
+
+        const hook = JSON.parse(qoderHooks.getFileContent()).hooks.Stop[0].hooks[0];
+        expect(hook.rewakeMessage).toBe("Check failed:");
+        expect(hook.rewakeSummary).toBe("Checks found issues");
+        if (warns) {
+          expect(logger.warn).toHaveBeenCalledTimes(2);
+          for (const field of ["rewakeMessage", "rewakeSummary"]) {
+            expect(logger.warn).toHaveBeenCalledWith(
+              expect.stringContaining(
+                `"${field}" on a "command" hook on "stop" has no effect without "asyncRewake": true`,
+              ),
+            );
+          }
+        } else {
+          expect(logger.warn).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it("should drop rewakeMessage and rewakeSummary from non-command hooks", async () => {
+      const rulesyncHooks = buildRulesyncHooks(testDir, {
+        version: 1,
+        hooks: {
+          stop: [
+            {
+              type: "prompt",
+              prompt: "Done?",
+              rewakeMessage: "Prefix:",
+              rewakeSummary: "Summary",
+            },
+          ],
+        },
+      });
+
+      const logger = createMockLogger();
+      const warnSpy = vi.spyOn(logger, "warn");
+      const qoderHooks = await QoderHooks.fromRulesyncHooks({
+        outputRoot: testDir,
+        rulesyncHooks,
+        validate: false,
+        logger,
+      });
+
+      const hook = JSON.parse(qoderHooks.getFileContent()).hooks.Stop[0].hooks[0];
+      expect(hook).not.toHaveProperty("rewakeMessage");
+      expect(hook).not.toHaveProperty("rewakeSummary");
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Dropping "rewakeMessage"'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Dropping "rewakeSummary"'));
     });
 
     it("should anchor dot-relative commands to $QODER_PROJECT_DIR", async () => {
@@ -358,6 +530,41 @@ describe("QoderHooks", () => {
       });
       // Sibling settings keys must not leak into the canonical model.
       expect((json as Record<string, unknown>).model).toBeUndefined();
+    });
+
+    it("should round-trip rewakeMessage and rewakeSummary on command hooks", () => {
+      const qoderHooks = new QoderHooks({
+        outputRoot: testDir,
+        relativeDirPath: ".qoder",
+        relativeFilePath: "settings.json",
+        fileContent: JSON.stringify({
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command: "check.sh",
+                    asyncRewake: true,
+                    rewakeMessage: "Check failed:",
+                    rewakeSummary: "Checks found issues",
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        validate: false,
+      });
+
+      const json = qoderHooks.toRulesyncHooks().getJson();
+
+      expect(json.hooks.stop?.[0]).toMatchObject({
+        command: "check.sh",
+        asyncRewake: true,
+        rewakeMessage: "Check failed:",
+        rewakeSummary: "Checks found issues",
+      });
     });
   });
 });

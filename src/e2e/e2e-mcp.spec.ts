@@ -4,7 +4,7 @@ import { setTimeout } from "node:timers/promises";
 
 import { load } from "js-yaml";
 import * as smolToml from "smol-toml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   RULESYNC_MCP_LEGACY_RELATIVE_FILE_PATH,
@@ -16,6 +16,7 @@ import { getZedGlobalDir } from "../constants/zed-paths.js";
 import { McpProcessor } from "../features/mcp/mcp-processor.js";
 import { fileExists, readFileContent, writeFileContent } from "../utils/file.js";
 import { getHermesagentGlobalDir } from "../utils/hermesagent.js";
+import { parseJson5 } from "../utils/json5.js";
 import {
   assertGenerateMatrixCoversTargets,
   runGenerate,
@@ -43,6 +44,7 @@ const mcpGenerateTargets = [
   { target: "codebuff", outputPath: join(".agents", "mcp.json") },
   { target: "cursor", outputPath: join(".cursor", "mcp.json") },
   { target: "codearts-cli", outputPath: join(".codeartsdoer", "codearts_cli.json") },
+  { target: "codearts-ide", outputPath: join(".codeartsdoer", "mcp", "mcp_settings.json") },
   { target: "trae", outputPath: join(".trae", "mcp.json") },
   { target: "qwencode", outputPath: join(".qwen", "settings.json") },
   { target: "codexcli", outputPath: join(".codex", "config.toml") },
@@ -50,6 +52,7 @@ const mcpGenerateTargets = [
   { target: "codebuddy", outputPath: ".mcp.json" },
   { target: "commandcode", outputPath: ".mcp.json" },
   { target: "qoder", outputPath: ".mcp.json" },
+  { target: "xum", outputPath: join(".xum", "mcp.jsonc") },
   { target: "gitlabduo", outputPath: join(".gitlab", "duo", "mcp.json") },
   { target: "grokcli", outputPath: join(".grok", "config.toml") },
   { target: "copilot", outputPath: join(".vscode", "mcp.json") },
@@ -58,10 +61,12 @@ const mcpGenerateTargets = [
   { target: "mimocode", outputPath: join(".mimocode", "mimocode.jsonc") },
   { target: "omp", outputPath: join(".omp", "mcp.json") },
   { target: "opencode", outputPath: "opencode.jsonc" },
+  { target: "opencodev1", outputPath: "opencode.jsonc" },
   { target: "pi", outputPath: join(".pi", "mcp.json") },
   { target: "pool", outputPath: join(".poolside", "settings.yaml") },
   { target: "deepagents", outputPath: join(".deepagents", ".mcp.json") },
   { target: "factorydroid", outputPath: join(".factory", "mcp.json") },
+  { target: "firebender", outputPath: "firebender.json" },
   { target: "goose", outputPath: join(".agents", "plugins", "rulesync", ".mcp.json") },
   { target: "kilo", outputPath: "kilo.jsonc" },
   { target: "kimi-code", outputPath: join(".kimi-code", "mcp.json") },
@@ -121,6 +126,41 @@ describe("E2E: mcp", () => {
 
     const generatedContent = await readFileContent(join(testDir, outputPath));
     expect(generatedContent).toContain("test-server");
+  });
+
+  it("should write the CodeArts Agent IDE MCP file under mcpServers", async () => {
+    const testDir = getTestDir();
+    await writeFileContent(
+      join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH),
+      JSON.stringify({
+        mcpServers: {
+          local: {
+            type: "stdio",
+            command: "node",
+            args: ["server.js"],
+            env: { API_KEY: "value" },
+          },
+          remote: { type: "sse", url: "https://example.com/mcp/sse" },
+        },
+      }),
+    );
+
+    await runGenerate({ target: "codearts-ide", features: "mcp" });
+
+    const generated = JSON.parse(
+      await readFileContent(join(testDir, ".codeartsdoer", "mcp", "mcp_settings.json")),
+    );
+    expect(generated.mcpServers).toEqual({
+      local: {
+        command: "node",
+        args: ["server.js"],
+        env: { API_KEY: "value" },
+      },
+      remote: {
+        url: "https://example.com/mcp/sse",
+        type: "sse",
+      },
+    });
   });
 
   it("should point rovodev config.yml at the generated project mcp.json", async () => {
@@ -282,6 +322,76 @@ describe("E2E: mcp", () => {
     );
     expect(imported.mcpServers.github.enabledTools).toEqual(["create_issue", "list_issues"]);
     expect(imported.mcpServers.github.tools).toBeUndefined();
+  });
+
+  it("should keep factorydroid enabledTools and disabledTools in both directions", async () => {
+    const testDir = getTestDir();
+
+    // Droid reads both per-server filters (https://docs.factory.com/harness/mcp);
+    // the processor used to strip `enabledTools`, so the server loaded every tool.
+    const server = { command: "srv", enabledTools: ["t1"], disabledTools: ["t2"] };
+    await writeFileContent(
+      join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH),
+      JSON.stringify({ mcpServers: { filtered: server } }),
+    );
+
+    await runGenerate({ target: "factorydroid", features: "mcp" });
+
+    const generated = JSON.parse(await readFileContent(join(testDir, ".factory", "mcp.json")));
+    expect(generated.mcpServers.filtered.enabledTools).toEqual(["t1"]);
+    expect(generated.mcpServers.filtered.disabledTools).toEqual(["t2"]);
+
+    await runImport({ target: "factorydroid", features: "mcp" });
+
+    const imported = JSON.parse(
+      await readFileContent(join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH)),
+    );
+    expect(imported.mcpServers.filtered.enabledTools).toEqual(["t1"]);
+    expect(imported.mcpServers.filtered.disabledTools).toEqual(["t2"]);
+  });
+
+  it("should keep antigravity-cli tool filters and convert timeout to timeoutSeconds in both directions", async () => {
+    const testDir = getTestDir();
+
+    // Antigravity documents `enabledTools`, `disabledTools` and `timeoutSeconds`
+    // (https://antigravity.google/docs/mcp); the canonical `timeout` is in ms.
+    await writeFileContent(
+      join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH),
+      JSON.stringify({
+        mcpServers: {
+          filtered: {
+            url: "https://example.com/mcp",
+            enabledTools: ["t1"],
+            disabledTools: ["t2"],
+            timeout: 600000,
+          },
+        },
+      }),
+    );
+
+    await runGenerate({ target: "antigravity-cli", features: "mcp" });
+
+    const generated = JSON.parse(
+      await readFileContent(join(testDir, ".agents", "mcp_config.json")),
+    );
+    expect(generated.mcpServers.filtered).toEqual({
+      serverUrl: "https://example.com/mcp",
+      enabledTools: ["t1"],
+      disabledTools: ["t2"],
+      timeoutSeconds: 600,
+    });
+
+    await runImport({ target: "antigravity-cli", features: "mcp" });
+
+    const imported = JSON.parse(
+      await readFileContent(join(testDir, RULESYNC_MCP_RELATIVE_FILE_PATH)),
+    );
+    expect(imported.mcpServers.filtered).toEqual({
+      url: "https://example.com/mcp",
+      enabledTools: ["t1"],
+      disabledTools: ["t2"],
+      timeout: 600000,
+    });
   });
 
   it("should translate deepagents MCP transports and tool filters in both directions", async () => {
@@ -457,10 +567,13 @@ describe("E2E: mcp", () => {
     { target: "codebuddy", orphanPath: ".mcp.json" },
     { target: "commandcode", orphanPath: ".mcp.json" },
     { target: "qoder", orphanPath: ".mcp.json" },
+    { target: "xum", orphanPath: join(".xum", "mcp.jsonc") },
     { target: "continue", orphanPath: join(".continue", "mcpServers", "mcp.json") },
     { target: "cursor", orphanPath: join(".cursor", "mcp.json") },
     { target: "trae", orphanPath: join(".trae", "mcp.json") },
-    { target: "copilot", orphanPath: join(".vscode", "mcp.json") },
+    // `.vscode/mcp.json` keeps its other keys and only retracts `servers`, so
+    // the orphan has to hold `servers` for the check to see a change.
+    { target: "copilot", orphanPath: join(".vscode", "mcp.json"), orphanKey: "servers" },
     { target: "copilotcli", orphanPath: join(".github", "mcp.json") },
     { target: "deepagents", orphanPath: join(".deepagents", ".mcp.json") },
     { target: "gitlabduo", orphanPath: join(".gitlab", "duo", "mcp.json") },
@@ -473,7 +586,7 @@ describe("E2E: mcp", () => {
     { target: "bob", orphanPath: join(".bob", "mcp.json") },
   ])(
     "should fail in check mode when delete would remove an orphan $target mcp file",
-    async ({ target, orphanPath }) => {
+    async ({ target, orphanPath, orphanKey = "mcpServers" }) => {
       const testDir = getTestDir();
 
       await writeFileContent(join(testDir, ".rulesync", ".gitkeep"), "");
@@ -482,7 +595,7 @@ describe("E2E: mcp", () => {
         JSON.stringify({ mcpServers: {} }),
       );
       const orphanContent = JSON.stringify(
-        { mcpServers: { "orphan-server": { command: "echo", args: ["orphan"] } } },
+        { [orphanKey]: { "orphan-server": { command: "echo", args: ["orphan"] } } },
         null,
         2,
       );
@@ -534,6 +647,11 @@ describe("E2E: mcp", () => {
       content: JSON.stringify({ theme: "dark", mcp: {} }, null, 2),
     },
     {
+      target: "opencodev1",
+      outputPath: "opencode.jsonc",
+      content: JSON.stringify({ theme: "dark", mcp: {} }, null, 2),
+    },
+    {
       target: "kilo",
       outputPath: "kilo.jsonc",
       content: JSON.stringify({ theme: "dark", mcp: {} }, null, 2),
@@ -557,6 +675,11 @@ describe("E2E: mcp", () => {
       target: "pool",
       outputPath: join(".poolside", "settings.yaml"),
       content: "pool:\n  worktree_prefix: feat-\n",
+    },
+    {
+      target: "firebender",
+      outputPath: "firebender.json",
+      content: JSON.stringify({ useCursorRules: false }, null, 2),
     },
   ])(
     "should succeed in check mode when a $target mcp file is non-deletable",
@@ -844,6 +967,7 @@ describe("E2E: mcp (import)", () => {
     { target: "deepagents", sourcePath: join(".deepagents", ".mcp.json") },
     { target: "gitlabduo", sourcePath: join(".gitlab", "duo", "mcp.json") },
     { target: "factorydroid", sourcePath: join(".factory", "mcp.json") },
+    { target: "firebender", sourcePath: "firebender.json" },
     { target: "kimi-code", sourcePath: join(".kimi-code", "mcp.json") },
     { target: "roo", sourcePath: join(".roo", "mcp.json") },
     { target: "kiro", sourcePath: join(".kiro", "settings", "mcp.json") },
@@ -876,6 +1000,13 @@ describe("E2E: mcp (import)", () => {
     { target: "antigravity-ide", sourcePath: join(".agents", "mcp_config.json") },
     { target: "antigravity-cli", sourcePath: join(".agents", "mcp_config.json") },
     { target: "warp", sourcePath: join(".warp", ".mcp.json") },
+    // Xum keys its servers by `servers` and writes a stdio server as one shell
+    // command string.
+    {
+      target: "xum",
+      sourcePath: join(".xum", "mcp.jsonc"),
+      sourceContent: '{\n  // Xum MCP servers\n  "servers": { "test-server": "echo hello" },\n}\n',
+    },
     // Crush keys its servers by the top-level `mcp` object (with a required
     // `type`) instead of `mcpServers`.
     {
@@ -1026,7 +1157,9 @@ const mcpGlobalTargets = [
   { target: "hermesagent", outputPath: join(getHermesagentGlobalDir(), "config.yaml") },
   { target: "mimocode", outputPath: join(".config", "mimocode", "mimocode.jsonc") },
   { target: "omp", outputPath: join(".omp", "agent", "mcp.json") },
+  { target: "openclaw", outputPath: join(".openclaw", "openclaw.json") },
   { target: "opencode", outputPath: join(".config", "opencode", "opencode.jsonc") },
+  { target: "opencodev1", outputPath: join(".config", "opencode", "opencode.jsonc") },
   { target: "pi", outputPath: join(".pi", "agent", "mcp.json") },
   { target: "pool", outputPath: join(".config", "poolside", "settings.yaml") },
   { target: "codearts-cli", outputPath: join(".codeartsdoer", "codearts_cli.json") },
@@ -1035,6 +1168,7 @@ const mcpGlobalTargets = [
   { target: "grokcli", outputPath: join(".grok", "config.toml") },
   { target: "copilotcli", outputPath: join(".copilot", "mcp-config.json") },
   { target: "factorydroid", outputPath: join(".factory", "mcp.json") },
+  { target: "firebender", outputPath: join(".firebender", "firebender.json") },
   { target: "rovodev", outputPath: join(".rovodev", "mcp.json") },
   {
     target: "cline",
@@ -1046,6 +1180,7 @@ const mcpGlobalTargets = [
   { target: "codebuddy", outputPath: join(".codebuddy", ".mcp.json") },
   { target: "commandcode", outputPath: join(".commandcode", "mcp.json") },
   { target: "qoder", outputPath: join(".qoder", "settings.json") },
+  { target: "xum", outputPath: join(".xum", "mcp.jsonc") },
   { target: "musecode", outputPath: join(".config", "muse", "settings.json") },
   { target: "kilo", outputPath: join(".config", "kilo", "kilo.jsonc") },
   { target: "kimi-code", outputPath: join(".kimi-code", "mcp.json") },
@@ -1096,7 +1231,7 @@ describe("E2E: mcp (global mode)", () => {
     });
   });
 
-  it("should generate and import the Kimi Code global MCP timeout defaults", async () => {
+  it("should generate and import the Kimi Code global MCP [mcp] defaults", async () => {
     const projectDir = getProjectDir();
     const homeDir = getHomeDir();
 
@@ -1106,7 +1241,13 @@ describe("E2E: mcp (global mode)", () => {
       join(projectDir, RULESYNC_MCP_RELATIVE_FILE_PATH),
       JSON.stringify({
         mcpServers: { remote: { type: "http", url: "https://example.com/mcp" } },
-        "kimi-code": { startupTimeoutMs: 45000, toolTimeoutMs: 90000 },
+        "kimi-code": {
+          startupTimeoutMs: 45000,
+          toolTimeoutMs: 90000,
+          defaultDeferred: true,
+          reconnectInitialDelayMs: 2000,
+          reconnectMaxDelayMs: 60000,
+        },
       }),
     );
 
@@ -1120,7 +1261,13 @@ describe("E2E: mcp (global mode)", () => {
     const generated = smolToml.parse(
       await readFileContent(join(homeDir, ".kimi-code", "config.toml")),
     );
-    expect(generated.mcp).toEqual({ startup_timeout_ms: 45000, tool_timeout_ms: 90000 });
+    expect(generated.mcp).toEqual({
+      startup_timeout_ms: 45000,
+      tool_timeout_ms: 90000,
+      default_deferred: true,
+      reconnect_initial_delay_ms: 2000,
+      reconnect_max_delay_ms: 60000,
+    });
     // The servers themselves stay in mcp.json.
     expect(
       JSON.parse(await readFileContent(join(homeDir, ".kimi-code", "mcp.json"))).mcpServers.remote
@@ -1137,7 +1284,13 @@ describe("E2E: mcp (global mode)", () => {
     const imported = JSON.parse(
       await readFileContent(join(homeDir, RULESYNC_MCP_RELATIVE_FILE_PATH)),
     );
-    expect(imported["kimi-code"]).toEqual({ startupTimeoutMs: 45000, toolTimeoutMs: 90000 });
+    expect(imported["kimi-code"]).toEqual({
+      startupTimeoutMs: 45000,
+      toolTimeoutMs: 90000,
+      defaultDeferred: true,
+      reconnectInitialDelayMs: 2000,
+      reconnectMaxDelayMs: 60000,
+    });
   });
 
   it("should merge dsh MCP rows into ~/.dsh/cordis.patch.yml and import them back", async () => {
@@ -1297,6 +1450,13 @@ describe("E2E: mcp (global mode)", () => {
           include: ["read"],
           exclude: ["delete"],
         });
+      }
+      if (target === "openclaw") {
+        const server = toTable(toTable(toTable(parseJson5(generatedContent)).mcp).servers)[
+          "test-server"
+        ];
+        expect(toTable(server).toolFilter).toEqual({ include: ["read"], exclude: ["delete"] });
+        expect(toTable(server)).not.toHaveProperty("type");
       }
     },
   );

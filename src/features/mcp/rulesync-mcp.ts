@@ -67,14 +67,23 @@ const toolScopedMcpSchema = z.looseObject({
 /**
  * Kimi Code's tool-scoped block also carries the `[mcp]` defaults from its
  * shared user config: connect and per-tool-call timeouts that apply to *every*
- * MCP server, including ones rulesync did not write. Per-server
- * `startupTimeoutMs` / `toolTimeoutMs` in `mcpServers` still win.
+ * MCP server, including ones rulesync did not write, and (Kimi Code 2.3.0)
+ * `defaultDeferred`, which loads every server's tools on demand unless the
+ * server opts out. Per-server `startupTimeoutMs` / `toolTimeoutMs` / `deferred`
+ * in `mcpServers` still win. `defaultDeferred` only takes effect when Kimi's
+ * experimental `tool-select` flag is on, and is captured when a server connects
+ * (MoonshotAI/kimi-code#4210). `reconnectInitialDelayMs` / `reconnectMaxDelayMs`
+ * (Kimi Code 2.4.0) set the first delay and the cap of the automatic reconnect
+ * backoff for workspace-level servers (MoonshotAI/kimi-code#4283).
  *
  * @see https://moonshotai.github.io/kimi-code/en/configuration/config-files.html#mcp
  */
 const kimiCodeScopedMcpSchema = z.extend(toolScopedMcpSchema, {
   startupTimeoutMs: z.optional(z.number()),
   toolTimeoutMs: z.optional(z.number()),
+  defaultDeferred: z.optional(z.boolean()),
+  reconnectInitialDelayMs: z.optional(z.int().check(z.nonnegative())),
+  reconnectMaxDelayMs: z.optional(z.int().check(z.nonnegative())),
 });
 
 /**
@@ -123,6 +132,7 @@ export const RulesyncMcpFileSchema = z.looseObject({
   devin: z.optional(toolScopedMcpSchema),
   dsh: z.optional(toolScopedMcpSchema),
   factorydroid: z.optional(toolScopedMcpSchema),
+  firebender: z.optional(toolScopedMcpSchema),
   gitlabduo: z.optional(toolScopedMcpSchema),
   goose: z.optional(toolScopedMcpSchema),
   grokcli: z.optional(toolScopedMcpSchema),
@@ -133,7 +143,9 @@ export const RulesyncMcpFileSchema = z.looseObject({
   kiro: z.optional(toolScopedMcpSchema),
   mimocode: z.optional(toolScopedMcpSchema),
   omp: z.optional(toolScopedMcpSchema),
+  openclaw: z.optional(toolScopedMcpSchema),
   opencode: z.optional(toolScopedMcpSchema),
+  opencodev1: z.optional(toolScopedMcpSchema),
   pi: z.optional(toolScopedMcpSchema),
   qoder: z.optional(toolScopedMcpSchema),
   qwencode: z.optional(qwencodeScopedMcpSchema),
@@ -146,6 +158,7 @@ export const RulesyncMcpFileSchema = z.looseObject({
   vibe: z.optional(toolScopedMcpSchema),
   warp: z.optional(toolScopedMcpSchema),
   warpcli: z.optional(toolScopedMcpSchema),
+  xum: z.optional(toolScopedMcpSchema),
   zed: z.optional(toolScopedMcpSchema),
 });
 
@@ -156,7 +169,7 @@ export type RulesyncMcpFromFileParams = Pick<
   "outputRoot" | "validate" | "relativeDirPath"
 >;
 
-export type RulesyncMcpSettablePaths = RulesyncSourceSettablePaths;
+type RulesyncMcpSettablePaths = RulesyncSourceSettablePaths;
 
 /**
  * The tool-scoped block keys that carry a `{toolname}.mcpServers` sub-map.
@@ -655,12 +668,14 @@ export class RulesyncMcp extends RulesyncFile {
           // others: it decides whether a third-party server's own instructions
           // are pasted into the agent's system prompt, so carrying it to a tool
           // the author never named would widen what steers the model.
-          // The `crush*` OAuth and sessionless keys — and the raw Crush
+          // The `crush*` OAuth, sessionless and channel keys — and the raw Crush
           // spellings someone copying a `crush.json` entry writes — are
           // re-merged by the crush generator the same way; the client secret
           // among them is the reason they must not reach any other tool.
           // `poolAllow` is Pool's approval allowlist, re-merged by the pool
           // generator the same way; it is an approval decision only Pool reads.
+          // `zcodeOauth` is ZCode's OAuth block, re-merged by the zcode
+          // generators the same way; it may carry a client secret.
           // `enabled` is stripped because OpenCode, Kilo, Grok CLI
           // and Goose have a NATIVE `enabled` field with different semantics a
           // leaked value would silently collide with.
@@ -682,11 +697,16 @@ export class RulesyncMcp extends RulesyncFile {
               "crushOauthClientSecret",
               "crushOauthCallbackPort",
               "crushSessionless",
+              "crushChannelEnabled",
+              "crushChannelReply",
               "poolAllow",
+              "zcodeOauth",
               "oauth_client_id",
               "oauth_client_secret",
               "oauth_callback_port",
               "sessionless",
+              "channel_enabled",
+              "channel_reply",
               "enabled",
             ]),
           ];

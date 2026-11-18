@@ -1,7 +1,8 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { AntigravityCliHooks, AntigravityIdeHooks } from "./antigravity-hooks.js";
 import { RulesyncHooks } from "./rulesync-hooks.js";
@@ -64,6 +65,7 @@ describe("AntigravityHooks", () => {
                 sessionStart: [{ type: "command", command: "echo start" }],
                 preToolUse: [{ type: "command", command: "echo pre" }],
                 stop: [{ type: "command", command: "echo stop" }],
+                sessionEnd: [{ type: "command", command: "echo end" }],
               },
             }),
           }),
@@ -82,24 +84,28 @@ describe("AntigravityHooks", () => {
         const hookEntry = parsed.rulesync;
         expect(hookEntry).toBeDefined();
 
-        // Supported canonical events are mapped to their Antigravity names.
-        expect(hookEntry.PreToolUse).toBeDefined();
-        expect(hookEntry.PreToolUse[0].hooks[0].command).toBe("echo pre");
-        expect(hookEntry.Stop).toBeDefined();
-        expect(hookEntry.Stop[0].hooks[0].command).toBe("echo stop");
+        // Tool events keep the matcher-group shape; SessionStart and Stop are
+        // flat handler lists.
+        expect(hookEntry.PreToolUse).toEqual([
+          { hooks: [{ type: "command", command: "echo pre" }] },
+        ]);
+        expect(hookEntry.SessionStart).toEqual([{ type: "command", command: "echo start" }]);
+        expect(hookEntry.Stop).toEqual([{ type: "command", command: "echo stop" }]);
 
-        // The unsupported `sessionStart` event is dropped entirely.
-        expect(hookEntry.SessionStart).toBeUndefined();
-        expect(hookEntry.sessionStart).toBeUndefined();
+        // The unsupported `sessionEnd` event is dropped entirely.
+        expect(Object.keys(hookEntry).toSorted()).toEqual(["PreToolUse", "SessionStart", "Stop"]);
       });
 
-      it("should emit matcher-less PreInvocation/PostInvocation handler lists", async () => {
+      it("should emit matcher-less events as flat handler lists", async () => {
         const rulesyncHooks = new RulesyncHooks(
           createMockAiFileParams({
             fileContent: JSON.stringify({
               version: 1,
               hooks: {
-                preModelInvocation: [{ type: "command", command: "echo pre-model" }],
+                preModelInvocation: [
+                  { type: "command", command: "echo pre-model", timeout: 10 },
+                  { type: "command", command: "echo pre-model-2", matcher: "ignored" },
+                ],
                 postModelInvocation: [{ type: "command", command: "echo post-model" }],
               },
             }),
@@ -114,12 +120,15 @@ describe("AntigravityHooks", () => {
 
         const hookEntry = JSON.parse(hooks.getFileContent()).rulesync;
 
-        // Model-invocation events map to Antigravity's PascalCase names and are
-        // emitted as matcher-less handler lists (no `matcher` field).
-        expect(hookEntry.PreInvocation[0]).toEqual({
-          hooks: [{ type: "command", command: "echo pre-model" }],
-        });
-        expect(hookEntry.PostInvocation[0].hooks[0].command).toBe("echo post-model");
+        // Model-invocation events map to Antigravity's PascalCase names, and
+        // their handlers sit directly under the event key: Antigravity rejects
+        // a `{ hooks: [...] }` group there and skips the whole file. Handlers
+        // from different matcher groups are merged into the one list.
+        expect(hookEntry.PreInvocation).toEqual([
+          { type: "command", command: "echo pre-model", timeout: 10 },
+          { type: "command", command: "echo pre-model-2" },
+        ]);
+        expect(hookEntry.PostInvocation).toEqual([{ type: "command", command: "echo post-model" }]);
       });
 
       it(`should apply the ${overrideKey} per-target override`, async () => {
@@ -154,6 +163,216 @@ describe("AntigravityHooks", () => {
       });
     });
 
+    describe("matcher translation", () => {
+      const generate = async (matcher: string) => {
+        const logger = createMockLogger();
+        const warnSpy = vi.spyOn(logger, "warn");
+        const hooks = await HooksClass.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks: new RulesyncHooks(
+            createMockAiFileParams({
+              fileContent: JSON.stringify({
+                version: 1,
+                hooks: { preToolUse: [{ type: "command", command: "echo pre", matcher }] },
+              }),
+            }),
+          ),
+          validate: true,
+          logger,
+        });
+        return {
+          matcher: JSON.parse(hooks.getFileContent()).rulesync.PreToolUse[0].matcher,
+          warnSpy,
+        };
+      };
+
+      it("should translate canonical tool names to the names Antigravity reports", async () => {
+        const { matcher, warnSpy } = await generate("Bash|Read|Write|Edit|WebSearch");
+
+        expect(matcher).toBe(
+          "run_command|(?:read_file|view_file)|(?:write_file|write_to_file)|" +
+            "(?:edit_file|replace_file_content)|search_web",
+        );
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("should keep a translated file tool one regex unit inside an anchored matcher", async () => {
+        const { matcher } = await generate("^Read$");
+
+        expect(matcher).toBe("^(?:read_file|view_file)$");
+        const pattern = new RegExp(matcher);
+        expect(pattern.test("read_file")).toBe(true);
+        expect(pattern.test("view_file")).toBe(true);
+        expect(pattern.test("read_file_extra")).toBe(false);
+      });
+
+      it("should translate postToolUse matchers", async () => {
+        const hooks = await HooksClass.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks: new RulesyncHooks(
+            createMockAiFileParams({
+              fileContent: JSON.stringify({
+                version: 1,
+                hooks: {
+                  postToolUse: [{ type: "command", command: "echo post", matcher: "Bash|Edit" }],
+                },
+              }),
+            }),
+          ),
+          validate: true,
+        });
+
+        expect(JSON.parse(hooks.getFileContent()).rulesync.PostToolUse[0].matcher).toBe(
+          "run_command|(?:edit_file|replace_file_content)",
+        );
+      });
+
+      it(`should put a ${overrideKey} override matcher and the canonical name it translates from in one group`, async () => {
+        const hooks = await HooksClass.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks: new RulesyncHooks(
+            createMockAiFileParams({
+              fileContent: JSON.stringify({
+                version: 1,
+                hooks: {},
+                [overrideKey]: {
+                  hooks: {
+                    preToolUse: [
+                      { type: "command", command: "echo native", matcher: "run_command" },
+                      { type: "command", command: "echo canonical", matcher: "Bash" },
+                    ],
+                  },
+                },
+              }),
+            }),
+          ),
+          validate: true,
+        });
+
+        expect(JSON.parse(hooks.getFileContent()).rulesync.PreToolUse).toEqual([
+          {
+            matcher: "run_command",
+            hooks: [
+              { type: "command", command: "echo native" },
+              { type: "command", command: "echo canonical" },
+            ],
+          },
+        ]);
+      });
+
+      it("should leave Antigravity names, MCP names and regex syntax as written", async () => {
+        const { matcher, warnSpy } = await generate("run_command|browser_.*|mcp__srv__Bash");
+
+        expect(matcher).toBe("run_command|browser_.*|mcp__srv__Bash");
+        expect(warnSpy).not.toHaveBeenCalled();
+      });
+
+      it("should translate a whole name between regex escapes", async () => {
+        const { matcher } = await generate("\\bRead\\b");
+
+        expect(matcher).toBe("\\b(?:read_file|view_file)\\b");
+      });
+
+      it("should warn once about a capitalized name it cannot translate", async () => {
+        const { matcher, warnSpy } = await generate("Glob|Edit|Glob");
+
+        expect(matcher).toBe("Glob|(?:edit_file|replace_file_content)|Glob");
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"Glob"'));
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Antigravity reports lowercase tool names"),
+        );
+      });
+
+      it("should name the documented candidates for untranslated tools in the warning", async () => {
+        const { matcher, warnSpy } = await generate("Grep|Glob|WebFetch|MultiEdit|Task");
+
+        expect(matcher).toBe("Grep|Glob|WebFetch|MultiEdit|Task");
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        const [message] = warnSpy.mock.calls[0] ?? [];
+        for (const candidate of [
+          '`grep_search` for "Grep"',
+          '`find_by_name` for "Glob"',
+          '`read_url_content` for "WebFetch"',
+          '`multi_replace_file_content` for "MultiEdit"',
+        ]) {
+          expect(message).toContain(candidate);
+        }
+        expect(message).not.toContain('for "Task"');
+      });
+
+      it("should import Antigravity tool names as canonical names", () => {
+        const hooks = new HooksClass(
+          createMockAiFileParams({
+            fileContent: JSON.stringify({
+              rulesync: {
+                PreToolUse: [
+                  {
+                    matcher: "write_file|edit_file|read_file|run_command|search_web",
+                    hooks: [{ type: "command", command: "echo pre" }],
+                  },
+                ],
+              },
+            }),
+          }),
+        );
+
+        expect(hooks.toRulesyncHooks().getJson().hooks.preToolUse?.[0]?.matcher).toBe(
+          "Write|Edit|Read|Bash|WebSearch",
+        );
+      });
+
+      it("should import the documented file tool names as canonical names", () => {
+        const hooks = new HooksClass(
+          createMockAiFileParams({
+            fileContent: JSON.stringify({
+              rulesync: {
+                PreToolUse: [
+                  {
+                    matcher: "^(view_file|write_to_file|replace_file_content|grep_search)$",
+                    hooks: [{ type: "command", command: "echo pre" }],
+                  },
+                ],
+              },
+            }),
+          }),
+        );
+
+        expect(hooks.toRulesyncHooks().getJson().hooks.preToolUse?.[0]?.matcher).toBe(
+          "^(Read|Write|Edit|grep_search)$",
+        );
+      });
+
+      it("should round-trip the alternation groups back to canonical names", async () => {
+        const generated = await HooksClass.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks: new RulesyncHooks(
+            createMockAiFileParams({
+              fileContent: JSON.stringify({
+                version: 1,
+                hooks: {
+                  preToolUse: [
+                    { type: "command", command: "echo pre", matcher: "^(Read|Write|Edit|Bash)$" },
+                  ],
+                  postToolUse: [{ type: "command", command: "echo post", matcher: "\\bEdit\\b" }],
+                },
+              }),
+            }),
+          ),
+          validate: true,
+        });
+
+        const imported = new HooksClass(
+          createMockAiFileParams({ fileContent: generated.getFileContent() }),
+        )
+          .toRulesyncHooks()
+          .getJson();
+
+        expect(imported.hooks.preToolUse?.[0]?.matcher).toBe("^(Read|Write|Edit|Bash)$");
+        expect(imported.hooks.postToolUse?.[0]?.matcher).toBe("\\bEdit\\b");
+      });
+    });
+
     describe("toRulesyncHooks", () => {
       it("should convert a top-level Antigravity hook map back to canonical events", () => {
         const hooks = new HooksClass(
@@ -177,6 +396,70 @@ describe("AntigravityHooks", () => {
         expect(parsed.hooks.stop?.[0]).toEqual({
           type: "command",
           command: "echo stop",
+        });
+      });
+
+      it("should import flat handler lists for matcher-less events", () => {
+        const hooks = new HooksClass(
+          createMockAiFileParams({
+            fileContent: JSON.stringify({
+              rulesync: {
+                SessionStart: [{ type: "command", command: "echo start" }],
+                PreToolUse: [
+                  { matcher: "run_command", hooks: [{ type: "command", command: "echo pre" }] },
+                ],
+                PreInvocation: [{ type: "command", command: "echo pre-model", timeout: 5 }],
+                PostInvocation: [{ command: "echo post-model" }],
+                Stop: [
+                  { type: "command", command: "echo stop-1" },
+                  { type: "command", command: "echo stop-2" },
+                ],
+              },
+            }),
+          }),
+        );
+
+        const parsed = hooks.toRulesyncHooks().getJson();
+
+        expect(parsed.hooks).toEqual({
+          sessionStart: [{ type: "command", command: "echo start" }],
+          preToolUse: [{ type: "command", command: "echo pre", matcher: "Bash" }],
+          preModelInvocation: [{ type: "command", command: "echo pre-model", timeout: 5 }],
+          postModelInvocation: [{ type: "command", command: "echo post-model" }],
+          stop: [
+            { type: "command", command: "echo stop-1" },
+            { type: "command", command: "echo stop-2" },
+          ],
+        });
+      });
+
+      it("should round-trip generated matcher-less events", async () => {
+        const rulesyncHooks = new RulesyncHooks(
+          createMockAiFileParams({
+            fileContent: JSON.stringify({
+              version: 1,
+              hooks: {
+                sessionStart: [{ type: "command", command: "echo start" }],
+                stop: [{ type: "command", command: "echo stop", timeout: 3 }],
+              },
+            }),
+          }),
+        );
+        const generated = await HooksClass.fromRulesyncHooks({
+          outputRoot: testDir,
+          rulesyncHooks,
+          validate: true,
+        });
+
+        const parsed = new HooksClass(
+          createMockAiFileParams({ fileContent: generated.getFileContent() }),
+        )
+          .toRulesyncHooks()
+          .getJson();
+
+        expect(parsed.hooks).toEqual({
+          sessionStart: [{ type: "command", command: "echo start" }],
+          stop: [{ type: "command", command: "echo stop", timeout: 3 }],
         });
       });
 

@@ -1,7 +1,7 @@
 import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_CURATED_RULES_RELATIVE_DIR_PATH,
@@ -24,8 +24,9 @@ import { JunieRule } from "./junie-rule.js";
 import { OpenCodeRule } from "./opencode-rule.js";
 import { PiRule } from "./pi-rule.js";
 import { RovodevRule } from "./rovodev-rule.js";
-import { RulesProcessor, type RulesProcessorToolTarget } from "./rules-processor.js";
+import { RulesProcessor } from "./rules-processor.js";
 import { RulesyncRule } from "./rulesync-rule.js";
+import { type RulesProcessorToolTarget } from "./tool-rule-factories.js";
 import { WarpRule } from "./warp-rule.js";
 
 const logger = createMockLogger();
@@ -176,6 +177,57 @@ describe("RulesProcessor", () => {
       expect(logger.warn).not.toHaveBeenCalledWith(
         expect.stringContaining("will no longer be read"),
       );
+    });
+
+    describe("augmentcode-plugin rules under Auggie 1.x", () => {
+      const findWarning = () =>
+        logger.warn.mock.calls
+          .map(([message]) => String(message))
+          .find((message) => message.includes("Auggie 1.x no longer reads rules/ from plugins"));
+
+      it("should warn that plugin rules load on Auggie 0.x only, and still write them", async () => {
+        const processor = new RulesProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "augmentcode-plugin",
+        });
+
+        const toolFiles = await processor.convertRulesyncFilesToToolFiles([
+          new RulesyncRule({
+            outputRoot: testDir,
+            relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+            relativeFilePath: "style.md",
+            frontmatter: { targets: ["*"] },
+            body: "Style guide",
+          }),
+        ]);
+
+        // Stable Auggie (0.36.0) still loads plugin rules, so the output is unchanged.
+        expect(toolFiles.map((file) => file.getRelativePathFromCwd())).toEqual([
+          join("rules", "style.md"),
+        ]);
+        expect(findWarning()).toBeDefined();
+      });
+
+      it("should not warn for the augmentcode target", async () => {
+        const processor = new RulesProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "augmentcode",
+        });
+
+        await processor.convertRulesyncFilesToToolFiles([
+          new RulesyncRule({
+            outputRoot: testDir,
+            relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+            relativeFilePath: "style.md",
+            frontmatter: { targets: ["*"] },
+            body: "Style guide",
+          }),
+        ]);
+
+        expect(findWarning()).toBeUndefined();
+      });
     });
 
     describe("Warp legacy WARP.md", () => {
@@ -419,9 +471,9 @@ describe("RulesProcessor", () => {
       expect(rootRule?.getFileContent()).not.toContain("Personal overrides");
     });
 
-    // `buildLocalRootFile` dispatches on the rule class and returns `null` for
-    // any class it has no branch for, which drops the file silently. That is how
-    // `zoocode` (fixed by `isClassOrSubclassOf`) and later `codebuddy` ended up
+    // `buildLocalRootFile` delegates to the rule class's static
+    // `buildLocalRootFile` hook and returns `null` for a class without one, which
+    // drops the file silently. That is how `zoocode` and later `codebuddy` ended up
     // declaring `separate-local-file` while emitting nothing. Declaring the mode
     // is the visible half; this asserts the invisible half actually happens.
     it.each(
@@ -2352,6 +2404,7 @@ describe("RulesProcessor", () => {
         "junie",
         "kiro",
         "opencode",
+        "opencodev1",
         "qwencode",
         "roo",
         "zoocode",
@@ -2359,6 +2412,7 @@ describe("RulesProcessor", () => {
         "takt",
         "trae",
         "warp",
+        "xum",
         "devin",
       ];
 
@@ -2650,6 +2704,7 @@ Content that would fail parsing`;
         "crush",
         "deepagents",
         "factorydroid",
+        "firebender",
         "goose",
         "gitlabduo",
         "grokcli",
@@ -2662,6 +2717,7 @@ Content that would fail parsing`;
         "mimocode",
         "omp",
         "opencode",
+        "opencodev1",
         "openclaw",
         "pi",
         "pool",
@@ -2675,6 +2731,7 @@ Content that would fail parsing`;
         "takt",
         "vibe",
         "warp",
+        "xum",
         "devin",
         "zcode",
         "zed",
@@ -2713,7 +2770,6 @@ Content that would fail parsing`;
       expect(globalTargets).toContain("claudecode");
       expect(globalTargets).toContain("claudecode-legacy");
       expect(globalTargets).toContain("cline");
-      expect(globalTargets).toContain("codearts-cli");
       expect(globalTargets).toContain("codebuddy");
       expect(globalTargets).toContain("codexcli");
       expect(globalTargets).toContain("copilot");
@@ -2729,6 +2785,7 @@ Content that would fail parsing`;
       expect(globalTargets).toContain("gitlabduo");
       expect(globalTargets).toContain("mimocode");
       expect(globalTargets).toContain("opencode");
+      expect(globalTargets).toContain("opencodev1");
       expect(globalTargets).toContain("pi");
       expect(globalTargets).toContain("roo");
       expect(globalTargets).toContain("rovodev");
@@ -2747,7 +2804,8 @@ Content that would fail parsing`;
       expect(globalTargets).toContain("commandcode");
       expect(globalTargets).toContain("openclaw");
       expect(globalTargets).toContain("qoder");
-      expect(globalTargets.length).toBe(49);
+      expect(globalTargets).toContain("xum");
+      expect(globalTargets.length).toBe(52);
 
       // These targets should NOT be in global mode
       expect(globalTargets).not.toContain("cursor");
@@ -2928,6 +2986,33 @@ Content that would fail parsing`;
   });
 
   describe("convertRulesyncFilesToToolFiles collision handling", () => {
+    it("should compose antigravity-plugin root fragments under one trigger block", async () => {
+      const processor = new RulesProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "antigravity-plugin",
+      });
+      const rulesyncRules = ["10-first-root.md", "20-second-root.md"].map(
+        (relativeFilePath, index) =>
+          new RulesyncRule({
+            outputRoot: testDir,
+            relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+            relativeFilePath,
+            frontmatter: { root: true, targets: ["*"] },
+            body: `# Root Fragment ${index + 1}`,
+          }),
+      );
+
+      const result = await processor.convertRulesyncFilesToToolFiles(rulesyncRules);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.getRelativeDirPath()).toBe("rules");
+      expect(result[0]?.getRelativeFilePath()).toBe("AGENTS.md");
+      expect(result[0]?.getFileContent()).toBe(
+        "---\ntrigger: always_on\n---\n# Root Fragment 1\n\n# Root Fragment 2\n",
+      );
+    });
+
     it.each(["devin", "antigravity-ide"] as const)(
       "should warn for metadata-bearing project rules normalized to the same %s path",
       async (toolTarget) => {
@@ -3606,6 +3691,34 @@ globs: ["packages/api/**/*"]
       expect(warnings[0]).not.toContain("~/.codex/config.toml");
     });
 
+    it("should say project docs are disabled when project_doc_max_bytes is 0", async () => {
+      await writeFileContent(join(testDir, ".codex", "config.toml"), "project_doc_max_bytes = 0\n");
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "codexcli" });
+
+      await processor.convertRulesyncFilesToToolFiles([
+        rule({ name: "overview.md", body: "small", root: true }),
+        rule({ name: "svc1.md", body: "b".repeat(40000), subprojectPath: "services/svc1" }),
+      ]);
+
+      const warnings = budgetWarnings();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        "`project_doc_max_bytes` in `.codex/config.toml` (honored only if the project is trusted) is set to 0",
+      );
+      expect(warnings[0]).toContain("disables codexcli's project instruction files");
+      expect(warnings[0]).toContain("AGENTS.md, services/svc1/AGENTS.md will not be loaded");
+      expect(warnings[0]).not.toContain("byte default limit");
+    });
+
+    it("should not warn when project_doc_max_bytes is 0 and no rule is generated", async () => {
+      await writeFileContent(join(testDir, ".codex", "config.toml"), "project_doc_max_bytes = 0\n");
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "codexcli" });
+
+      await processor.convertRulesyncFilesToToolFiles([]);
+
+      expect(budgetWarnings()).toHaveLength(0);
+    });
+
     it("should read the configured budget from the output root's .codex/config.toml", async () => {
       const outputRoot = join(testDir, "packages", "app");
       await writeFileContent(
@@ -3879,6 +3992,52 @@ globs: ["packages/api/**/*"]
       const localRule = findLocalRule(rulesyncFiles, "AGENTS.local.md");
       expect(localRule).toBeInstanceOf(RulesyncRule);
       expect((localRule as RulesyncRule).getFrontmatter().localRoot).toBe(true);
+    });
+
+    it("should import AGENTS.local.md as a localRoot rulesync rule for dsh (issue #3526)", async () => {
+      await writeFileContent(join(testDir, "AGENTS.md"), "# Root");
+      await writeFileContent(join(testDir, "AGENTS.local.md"), "# Personal dsh rules");
+
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "dsh" });
+      const rulesyncFiles = await processor.convertToolFilesToRulesyncFiles(
+        await processor.loadToolFiles(),
+      );
+
+      const localRule = findLocalRule(rulesyncFiles, "AGENTS.local.md");
+      expect(localRule).toBeInstanceOf(RulesyncRule);
+      expect((localRule as RulesyncRule).getFrontmatter().localRoot).toBe(true);
+      expect((localRule as RulesyncRule).getFrontmatter().targets).toEqual(["dsh"]);
+      expect((localRule as RulesyncRule).getBody()).toBe("# Personal dsh rules");
+    });
+
+    it("should round-trip the dsh AGENTS.local.md through import and generate (issue #3526)", async () => {
+      await writeFileContent(join(testDir, "AGENTS.md"), "# Root");
+      await writeFileContent(join(testDir, "AGENTS.local.md"), "# Personal dsh rules");
+
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "dsh" });
+      const rulesyncFiles = await processor.convertToolFilesToRulesyncFiles(
+        await processor.loadToolFiles(),
+      );
+      const regenerated = await processor.convertRulesyncFilesToToolFiles(rulesyncFiles);
+
+      const localFile = regenerated.find((r) => r.getRelativeFilePath() === "AGENTS.local.md");
+      expect(localFile?.getRelativeDirPath()).toBe(".");
+      expect(localFile?.getFileContent().trim()).toBe("# Personal dsh rules");
+      const rootFile = regenerated.find((r) => r.getRelativeFilePath() === "AGENTS.md");
+      expect(rootFile?.getFileContent()).toContain("# Root");
+      expect(rootFile?.getFileContent()).not.toContain("# Personal dsh rules");
+    });
+
+    it("should list the dsh AGENTS.local.md as a deletion candidate (issue #3526)", async () => {
+      await writeFileContent(join(testDir, "AGENTS.md"), "# Root");
+      await writeFileContent(join(testDir, "AGENTS.local.md"), "# Personal dsh rules");
+
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "dsh" });
+      const forDeletion = await processor.loadToolFiles({ forDeletion: true });
+      const deletionPaths = forDeletion.map((file) =>
+        join(file.getRelativeDirPath(), file.getRelativeFilePath()),
+      );
+      expect(deletionPaths).toContain("AGENTS.local.md");
     });
 
     it("should import REASONIX.local.md as a localRoot rulesync rule for reasonix", async () => {
@@ -4349,6 +4508,69 @@ targets: ["*"]
       // Plain markdown: Devin's local file carries no trigger frontmatter.
       expect(localRule?.getFileContent()).toBe("# Personal overrides");
       const rootRule = result.find((r) => r.getRelativeFilePath() === "AGENTS.md");
+      expect(rootRule?.getFileContent()).not.toContain("# Personal overrides");
+    });
+
+    it("should generate AGENTS.local.md for dsh instead of folding it into AGENTS.md (issue #3526)", async () => {
+      const processor = new RulesProcessor({ logger, outputRoot: testDir, toolTarget: "dsh" });
+
+      const rulesyncRules = [
+        new RulesyncRule({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+          relativeFilePath: "root.md",
+          frontmatter: { root: true, targets: ["dsh"] },
+          body: "# Root",
+        }),
+        new RulesyncRule({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+          relativeFilePath: "local.md",
+          frontmatter: { localRoot: true, targets: ["dsh"] },
+          body: "# Personal overrides",
+        }),
+      ];
+
+      const result = await processor.convertRulesyncFilesToToolFiles(rulesyncRules);
+
+      const localRule = result.find((r) => r.getRelativeFilePath() === "AGENTS.local.md");
+      expect(localRule).toBeDefined();
+      expect(localRule?.getRelativeDirPath()).toBe(".");
+      expect(localRule?.getFileContent()).toBe("# Personal overrides");
+      const rootRule = result.find((r) => r.getRelativeFilePath() === "AGENTS.md");
+      expect(rootRule?.getFileContent()).not.toContain("# Personal overrides");
+    });
+
+    it("should not emit AGENTS.local.md for dsh in global mode (issue #3526)", async () => {
+      const processor = new RulesProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "dsh",
+        global: true,
+      });
+
+      const rulesyncRules = [
+        new RulesyncRule({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+          relativeFilePath: "root.md",
+          frontmatter: { root: true, targets: ["dsh"] },
+          body: "# Root",
+        }),
+        new RulesyncRule({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+          relativeFilePath: "local.md",
+          frontmatter: { localRoot: true, targets: ["dsh"] },
+          body: "# Personal overrides",
+        }),
+      ];
+
+      const result = await processor.convertRulesyncFilesToToolFiles(rulesyncRules);
+
+      expect(result.some((r) => r.getRelativeFilePath() === "AGENTS.local.md")).toBe(false);
+      const rootRule = result.find((r) => r.getRelativeFilePath() === "AGENTS.md");
+      expect(rootRule?.getRelativeDirPath()).toBe(".dsh");
       expect(rootRule?.getFileContent()).not.toContain("# Personal overrides");
     });
 
@@ -5786,6 +6008,7 @@ targets: ["factorydroid"]
         "reasonix",
         "vibe",
         "warp",
+        "xum",
         "zcode",
         "dsh",
       ]);

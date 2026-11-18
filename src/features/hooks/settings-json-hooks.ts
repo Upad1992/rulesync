@@ -1,8 +1,6 @@
 import { join } from "node:path";
 
-import type { ValidationResult } from "../../types/ai-file.js";
 import type { HooksConfig } from "../../types/hooks.js";
-import type { ToolFile } from "../../types/tool-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
@@ -13,7 +11,7 @@ import {
   parseSharedConfig,
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
-import { HOOKS_OWNERSHIP_LOCK_FILE_NAME, parseHooksOwnershipLock } from "./hooks-ownership-lock.js";
+import { readPreviouslyOwnedHooks } from "./hooks-ownership-lock.js";
 import { mergeGeneratedHookLists } from "./preserve-unowned-hook-commands.js";
 import type { RulesyncHooks } from "./rulesync-hooks.js";
 import type { ToolHooksConverterConfig } from "./tool-hooks-converter.js";
@@ -24,10 +22,7 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
-  type ToolHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
 
@@ -65,13 +60,6 @@ export type SettingsJsonHooksSpec = {
  * through {@link ToolHooks.supportsPreserveUnowned}.
  */
 export abstract class SettingsJsonHooks extends ToolHooks {
-  constructor(params: ToolHooksParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   override isDeletable(): boolean {
     // The settings file carries user-managed settings beyond hooks, so it is
     // never removed wholesale; clearing hooks happens via an in-place merge.
@@ -106,44 +94,6 @@ export abstract class SettingsJsonHooks extends ToolHooks {
     return sharedConfigFileKey(paths);
   }
 
-  /**
-   * `new this(params)` for the concrete adapter the static method was called
-   * on; the cast is what an abstract class needs to be constructed through
-   * `this`, and lives in one place.
-   */
-  private static instantiate(params: ToolHooksParams): SettingsJsonHooks {
-    const ctor = this as unknown as new (p: ToolHooksParams) => SettingsJsonHooks;
-    return new ctor(params);
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<SettingsJsonHooks> {
-    const paths = this.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return this.instantiate({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
-  }
-
-  static override async getAuxiliaryFiles({
-    toolHooks,
-  }: {
-    outputRoot?: string;
-    global?: boolean;
-    toolHooks?: ToolHooks;
-    logger?: Logger;
-  } = {}): Promise<ToolFile[]> {
-    return toolHooks instanceof this ? toolHooks.getOwnershipLockFiles() : [];
-  }
-
   static async fromRulesyncHooks({
     outputRoot = process.cwd(),
     rulesyncHooks,
@@ -168,11 +118,7 @@ export abstract class SettingsJsonHooks extends ToolHooks {
     });
     const preserving = preserveUnowned && this.supportsPreserveUnowned();
     const previouslyOwned = preserving
-      ? parseHooksOwnershipLock(
-          await readFileContentOrNull(
-            join(outputRoot, paths.relativeDirPath, HOOKS_OWNERSHIP_LOCK_FILE_NAME),
-          ),
-        )
+      ? await readPreviouslyOwnedHooks({ outputRoot, relativeDirPath: paths.relativeDirPath })
       : undefined;
     const merged = mergeGeneratedHookLists({
       existingContent,
@@ -233,24 +179,6 @@ export abstract class SettingsJsonHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): SettingsJsonHooks {
-    return this.instantiate({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

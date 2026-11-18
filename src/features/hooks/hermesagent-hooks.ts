@@ -5,7 +5,7 @@ import {
   HERMESAGENT_GLOBAL_DIR,
 } from "../../constants/hermesagent-paths.js";
 import type { SharedWritePath } from "../../lib/shared-file-derive.js";
-import { type AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import {
   CANONICAL_TO_HERMESAGENT_EVENT_NAMES,
   HERMESAGENT_HOOK_EVENTS,
@@ -251,7 +251,7 @@ function canonicalToHermesHooks({
       );
     } else if (!HERMESAGENT_NATIVE_EVENTS.has(nativeEvent)) {
       logger?.warn(
-        `Hermes hook event "${nativeEvent}" is not documented by Hermes Agent v0.21.6; preserving it for forward compatibility.`,
+        `Hermes hook event "${nativeEvent}" is not documented by Hermes Agent v0.22.3; preserving it for forward compatibility.`,
       );
     }
     setHermesHookEntries({ result, event: nativeEvent, definitions, logger });
@@ -420,10 +420,6 @@ export class HermesagentHooks extends ToolHooks {
       ...params,
       ...HermesagentHooks.getSettablePaths({ global: params.global }),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   override isDeletable(): boolean {

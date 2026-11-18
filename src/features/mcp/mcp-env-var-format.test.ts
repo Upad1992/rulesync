@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { McpServers } from "../../types/mcp.js";
 import {
@@ -184,6 +184,34 @@ describe("mcp-env-var-format", () => {
 
       expect(result["server"]?.env).toBeUndefined();
       expect(result["server"]?.headers).toBeUndefined();
+    });
+  });
+
+  describe("non-string values", () => {
+    it("should pass numbers and null through unchanged in both directions", () => {
+      // Tool files are read without schema validation; VS Code's mcp.json
+      // allows numbers and null as env values.
+      const mcpServers = {
+        server: {
+          command: "node",
+          env: { PORT: 8080, UNSET: null, KEY: "${env:KEY}" },
+          headers: { "X-Retry": 3 },
+        },
+      } as unknown as McpServers;
+
+      const imported = convertEnvVarRefsFromToolFormat({
+        mcpServers,
+        pattern: /\$\{env:([^}:]+)\}/g,
+      });
+      expect(imported.server?.env).toEqual({ PORT: 8080, UNSET: null, KEY: "${KEY}" });
+      expect(imported.server?.headers).toEqual({ "X-Retry": 3 });
+
+      const exported = convertEnvVarRefsToToolFormat({
+        mcpServers: imported,
+        replacement: "${env:$1}",
+      });
+      expect(exported.server?.env).toEqual({ PORT: 8080, UNSET: null, KEY: "${env:KEY}" });
+      expect(findServersWithEnvVarRefs(mcpServers)).toEqual([]);
     });
   });
 

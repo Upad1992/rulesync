@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import { load } from "js-yaml";
 import * as smolToml from "smol-toml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { CLAUDECODE_SETTINGS_SCHEMA_URL } from "../constants/claudecode-paths.js";
 import {
@@ -43,6 +43,8 @@ function assertHookCommandsPreserved(parsed: { hooks?: unknown }): void {
 const hooksKeyedEventNames: Record<string, { sessionStart: string; stop: string }> = {
   // Cursor uses camelCase event names.
   cursor: { sessionStart: "sessionStart", stop: "stop" },
+  // Firebender follows Cursor's `{ version, hooks }` layout and event names.
+  firebender: { sessionStart: "sessionStart", stop: "stop" },
   // Copilot and Copilot CLI use camelCase event names and both map the
   // canonical `stop` event to `agentStop`.
   copilot: { sessionStart: "sessionStart", stop: "agentStop" },
@@ -66,6 +68,9 @@ const hooksKeyedEventNames: Record<string, { sessionStart: string; stop: string 
   // ~/.snowflake/cortex/hooks.json (global); commands are anchored with
   // $CORTEX_PROJECT_DIR only when they start with `./`.
   cortexcode: { sessionStart: "SessionStart", stop: "Stop" },
+  // TRAE stores Claude-style PascalCase events under the `hooks` key of the
+  // dedicated .trae/hooks.json in both scopes.
+  trae: { sessionStart: "SessionStart", stop: "Stop" },
   // CodeBuddy Code stores Claude-style PascalCase events under the `hooks`
   // key of .codebuddy/settings.json in both scopes; dot-relative commands are
   // anchored with $CODEBUDDY_PROJECT_DIR.
@@ -104,6 +109,40 @@ function assertHooksKeyedEvents({
   expect(serialized).toContain(".rulesync/hooks/session-start.sh");
   expect(serialized).toContain(".rulesync/hooks/audit.sh");
   expect(serialized).not.toContain("$CLAUDE_PROJECT_DIR");
+}
+
+/**
+ * OpenCode-family targets that write a JavaScript plugin. OpenCode 2.x
+ * (`opencode`) emits a V2 `{ id, setup }` plugin reading lifecycle events from
+ * `ctx.event.subscribe()`; OpenCode 1.x (`opencodev1`) and its MiMo Code
+ * distribution keep the V1 `RulesyncHooksPlugin` module.
+ */
+const OPENCODE_PLUGIN_TARGETS: ReadonlySet<string> = new Set([
+  "opencode",
+  "opencodev1",
+  "mimocode",
+]);
+
+function assertOpencodePluginHooks({
+  target,
+  generatedContent,
+}: {
+  target: string;
+  generatedContent: string;
+}): void {
+  if (target === "opencode") {
+    expect(generatedContent).toContain("export default {");
+    expect(generatedContent).toContain("setup: async (ctx) => {");
+    expect(generatedContent).not.toContain("RulesyncHooksPlugin");
+    expect(generatedContent).toContain('"session.created"');
+    expect(generatedContent).toContain('"session.execution.succeeded"');
+  } else {
+    expect(generatedContent).toContain("export const RulesyncHooksPlugin");
+    expect(generatedContent).toContain('"session.created"');
+    expect(generatedContent).toContain('"session.idle"');
+  }
+  expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
+  expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
 }
 
 function isPiExtensionTarget(target: string): target is "pi" | "omp" {
@@ -149,8 +188,10 @@ const hooksGenerateTargets = [
   { target: "claudecode-plugin", outputPath: join("hooks", "hooks.json") },
   { target: "zcode-plugin", outputPath: join("hooks", "hooks.json") },
   { target: "cursor", outputPath: join(".cursor", "hooks.json") },
+  { target: "firebender", outputPath: join(".firebender", "hooks.json") },
   { target: "mimocode", outputPath: join(".mimocode", "plugins", "rulesync-hooks.js") },
   { target: "opencode", outputPath: join(".opencode", "plugins", "rulesync-hooks.js") },
+  { target: "opencodev1", outputPath: join(".opencode", "plugins", "rulesync-hooks.js") },
   { target: "kilo", outputPath: join(".kilo", "plugins", "rulesync-hooks.js") },
   { target: "pi", outputPath: join(".pi", "extensions", "rulesync-hooks.ts") },
   { target: "omp", outputPath: join(".omp", "extensions", "rulesync-hooks.ts") },
@@ -175,6 +216,7 @@ const hooksGenerateTargets = [
   { target: "bob", outputPath: join(".bob", "settings.json") },
   { target: "tabnine", outputPath: join(".tabnine", "agent", "settings.json") },
   { target: "cortexcode", outputPath: join(".cortex", "settings.json") },
+  { target: "trae", outputPath: join(".trae", "hooks.json") },
   { target: "codebuddy", outputPath: join(".codebuddy", "settings.json") },
   { target: "commandcode", outputPath: join(".commandcode", "settings.json") },
   { target: "continue", outputPath: join(".continue", "settings.json") },
@@ -236,13 +278,8 @@ describe("E2E: hooks", () => {
       expect(generatedContent).toContain('amp.on("agent.end"');
       expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
       expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
-    } else if (target === "opencode" || target === "mimocode") {
-      // OpenCode (and its MiMo Code distribution) generates a JavaScript plugin file, not JSON
-      expect(generatedContent).toContain("export const RulesyncHooksPlugin");
-      expect(generatedContent).toContain('"session.created"');
-      expect(generatedContent).toContain('"session.idle"');
-      expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
-      expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
+    } else if (OPENCODE_PLUGIN_TARGETS.has(target)) {
+      assertOpencodePluginHooks({ target, generatedContent });
     } else if (target === "kilo") {
       // Kilo also emits a JavaScript plugin (.kilo/plugins/rulesync-hooks.js),
       // so assert the canonical command paths survive rather than parsing JSON.
@@ -294,13 +331,16 @@ describe("E2E: hooks", () => {
         target === "antigravity-cli" ||
         target === "antigravity-plugin"
       ) {
-        // Antigravity nests the event → matcher-entry map under a generated
-        // `rulesync` hook name and supports preToolUse/postToolUse/
-        // preModelInvocation/postModelInvocation/stop (see ANTIGRAVITY_HOOK_EVENTS
-        // in src/types/hooks.ts). `sessionStart` is therefore dropped, and only
-        // audit.sh — mapped to `Stop` — survives generation.
-        expect(parsed.rulesync.Stop).toBeDefined();
-        expect(JSON.stringify(parsed)).toContain(".rulesync/hooks/audit.sh");
+        // Antigravity nests the event map under a generated `rulesync` hook
+        // name (see ANTIGRAVITY_HOOK_EVENTS in src/types/hooks.ts).
+        // `SessionStart` and `Stop` are matcher-less, so their handlers sit
+        // directly under the event key instead of in a `{ hooks: [...] }` group.
+        expect(parsed.rulesync.SessionStart).toEqual([
+          { type: "command", command: ".rulesync/hooks/session-start.sh" },
+        ]);
+        expect(parsed.rulesync.Stop).toEqual([
+          { type: "command", command: ".rulesync/hooks/audit.sh" },
+        ]);
       } else if (target === "kiro-ide" || target === "kiro-cli") {
         // Kiro's standalone hooks format, shared by the IDE and by CLI 3.0:
         // a `{ version: "v1", hooks: [...] }` envelope with one entry per hook.
@@ -510,6 +550,8 @@ describe("E2E: hooks", () => {
     // Snake_case event types and the matcher mapped to `match`.
     expect(generatedContent).toContain('type = "pre_tool"');
     expect(generatedContent).toContain('type = "post_agent"');
+    // A canonical shell matcher also catches background commands.
+    expect(generatedContent).toContain('match = "re:bash|process_start"');
     expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
     expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
 
@@ -645,17 +687,20 @@ describe("E2E: hooks", () => {
     ]);
   });
 
-  it("should generate crush hooks into the hooks.PreToolUse list of crush.json", async () => {
+  it("should generate crush hooks into the hooks block of crush.json", async () => {
     const testDir = getTestDir();
 
-    // Crush only fires PreToolUse, so the generic matrix fixture (sessionStart/
-    // stop) would produce nothing; seed the one event it supports instead.
+    // Crush spells `stop` as `TurnEnd` and rejects a matcher on a non-tool
+    // event, so the matcher on sessionStart must be dropped.
     const hooksContent = JSON.stringify(
       {
         version: 1,
         hooks: {
           preToolUse: [{ command: ".rulesync/hooks/audit.sh", matcher: "bash", timeout: 5 }],
+          postToolUse: [{ command: ".rulesync/hooks/after.sh", matcher: "edit" }],
+          sessionStart: [{ command: ".rulesync/hooks/on-start.sh", matcher: "startup" }],
           stop: [{ command: ".rulesync/hooks/on-stop.sh" }],
+          subagentStop: [{ command: ".rulesync/hooks/on-subagent-stop.sh" }],
         },
       },
       null,
@@ -673,6 +718,9 @@ describe("E2E: hooks", () => {
     const parsed = JSON.parse(await readFileContent(join(testDir, "crush.json")));
     expect(parsed.hooks).toEqual({
       PreToolUse: [{ matcher: "bash", command: ".rulesync/hooks/audit.sh", timeout: 5 }],
+      PostToolUse: [{ matcher: "edit", command: ".rulesync/hooks/after.sh" }],
+      SessionStart: [{ command: ".rulesync/hooks/on-start.sh" }],
+      TurnEnd: [{ command: ".rulesync/hooks/on-stop.sh" }],
     });
     expect(parsed.options).toEqual({ debug: true });
   });
@@ -683,7 +731,13 @@ describe("E2E: hooks", () => {
     await writeFileContent(
       join(testDir, "crush.json"),
       JSON.stringify(
-        { hooks: { PreToolUse: [{ matcher: "bash|edit", command: "echo audit" }] } },
+        {
+          hooks: {
+            PreToolUse: [{ matcher: "bash|edit", command: "echo audit" }],
+            TurnEnd: [{ command: "echo done" }],
+            PermissionResult: [{ command: "echo result" }],
+          },
+        },
         null,
         2,
       ),
@@ -697,6 +751,10 @@ describe("E2E: hooks", () => {
     expect(imported.hooks.preToolUse).toEqual([
       { type: "command", matcher: "bash|edit", command: "echo audit" },
     ]);
+    expect(imported.hooks.stop).toEqual([{ type: "command", command: "echo done" }]);
+    expect(imported.crush.hooks).toEqual({
+      PermissionResult: [{ type: "command", command: "echo result" }],
+    });
   });
 
   it("should generate pool hooks into the hooks block of .poolside/settings.yaml", async () => {
@@ -866,8 +924,10 @@ describe("E2E: hooks", () => {
     // claudecode, kiro use shared config files (isDeletable=false) — excluded.
     // factorydroid now writes a dedicated .factory/hooks.json (isDeletable=true).
     { target: "cursor", orphanPath: join(".cursor", "hooks.json") },
+    { target: "firebender", orphanPath: join(".firebender", "hooks.json") },
     { target: "mimocode", orphanPath: join(".mimocode", "plugins", "rulesync-hooks.js") },
     { target: "opencode", orphanPath: join(".opencode", "plugins", "rulesync-hooks.js") },
+    { target: "opencodev1", orphanPath: join(".opencode", "plugins", "rulesync-hooks.js") },
     { target: "pi", orphanPath: join(".pi", "extensions", "rulesync-hooks.ts") },
     { target: "omp", orphanPath: join(".omp", "extensions", "rulesync-hooks.ts") },
     { target: "codexcli", orphanPath: join(".codex", "hooks.json") },
@@ -981,6 +1041,16 @@ describe("E2E: hooks (import)", () => {
       },
     },
     {
+      target: "firebender",
+      sourcePath: join(".firebender", "hooks.json"),
+      sourceContent: {
+        version: 1,
+        hooks: {
+          sessionStart: [{ command: "echo session started" }],
+        },
+      },
+    },
+    {
       target: "factorydroid",
       sourcePath: join(".factory", "hooks.json"),
       sourceContent: {
@@ -1078,6 +1148,20 @@ describe("E2E: hooks (import)", () => {
       target: "cortexcode",
       sourcePath: join(".cortex", "settings.json"),
       sourceContent: {
+        hooks: {
+          SessionStart: [
+            { hooks: [{ type: "command", command: "echo session started", timeout: 30 }] },
+          ],
+        },
+      },
+    },
+    {
+      // TRAE stores hooks under the `hooks` key of .trae/hooks.json using
+      // PascalCase event names.
+      target: "trae",
+      sourcePath: join(".trae", "hooks.json"),
+      sourceContent: {
+        version: 1,
         hooks: {
           SessionStart: [
             { hooks: [{ type: "command", command: "echo session started", timeout: 30 }] },
@@ -1239,6 +1323,10 @@ const hooksGlobalTargets = [
   },
   { target: "mimocode", outputPath: join(".config", "mimocode", "plugins", "rulesync-hooks.js") },
   { target: "opencode", outputPath: join(".config", "opencode", "plugins", "rulesync-hooks.js") },
+  {
+    target: "opencodev1",
+    outputPath: join(".config", "opencode", "plugins", "rulesync-hooks.js"),
+  },
   { target: "kilo", outputPath: join(".config", "kilo", "plugins", "rulesync-hooks.js") },
   { target: "pi", outputPath: join(".pi", "agent", "extensions", "rulesync-hooks.ts") },
   { target: "omp", outputPath: join(".omp", "agent", "extensions", "rulesync-hooks.ts") },
@@ -1246,6 +1334,7 @@ const hooksGlobalTargets = [
   { target: "deepagents", outputPath: join(".deepagents", "hooks.json") },
   { target: "junie", outputPath: join(".junie", "config.json") },
   { target: "cursor", outputPath: join(".cursor", "hooks.json") },
+  { target: "firebender", outputPath: join(".firebender", "hooks.json") },
   { target: "copilot", outputPath: join(".copilot", "hooks", "copilot-ide-hooks.json") },
   { target: "copilotcli", outputPath: join(".copilot", "hooks", "copilot-hooks.json") },
   { target: "antigravity-ide", outputPath: join(".gemini", "config", "hooks.json") },
@@ -1254,6 +1343,7 @@ const hooksGlobalTargets = [
   { target: "bob", outputPath: join(".bob", "settings", "settings.json") },
   { target: "tabnine", outputPath: join(".tabnine", "agent", "settings.json") },
   { target: "cortexcode", outputPath: join(".snowflake", "cortex", "hooks.json") },
+  { target: "trae", outputPath: join(".trae", "hooks.json") },
   { target: "codebuddy", outputPath: join(".codebuddy", "settings.json") },
   { target: "commandcode", outputPath: join(".commandcode", "settings.json") },
   { target: "continue", outputPath: join(".continue", "settings.json") },
@@ -1326,10 +1416,8 @@ describe("E2E: hooks (global mode)", () => {
         expect(generatedContent).toContain('amp.on("agent.end"');
         expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
         expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
-      } else if (target === "opencode" || target === "mimocode") {
-        expect(generatedContent).toContain("RulesyncHooksPlugin");
-        expect(generatedContent).toContain(".rulesync/hooks/session-start.sh");
-        expect(generatedContent).toContain(".rulesync/hooks/audit.sh");
+      } else if (OPENCODE_PLUGIN_TARGETS.has(target)) {
+        assertOpencodePluginHooks({ target, generatedContent });
       } else if (target === "cline") {
         expect(JSON.parse(generatedContent).events).toEqual(["TaskStart"]);
         expect(
@@ -1363,8 +1451,9 @@ describe("E2E: hooks (global mode)", () => {
         expect(Object.keys(parsed.hooks)).toEqual(["SessionStart"]);
         expect(JSON.stringify(parsed.hooks)).toContain(".rulesync/hooks/session-start.sh");
       } else if (target === "junie") {
-        // Junie CLI supports SessionStart, UserPromptSubmit, Stop, and SessionEnd
-        // (PascalCase), so both `sessionStart` and `stop` (audit.sh) survive.
+        // Junie CLI supports both SessionStart and Stop (PascalCase; see
+        // CANONICAL_TO_JUNIE_EVENT_NAMES), so `sessionStart` and `stop`
+        // (audit.sh) both survive.
         const parsed = JSON.parse(generatedContent);
         expect(parsed.hooks.SessionStart).toBeDefined();
         expect(parsed.hooks.Stop).toBeDefined();

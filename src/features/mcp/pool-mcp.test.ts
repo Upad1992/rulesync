@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_MCP_SCHEMA_URL } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
@@ -137,7 +137,7 @@ describe("PoolMcp", () => {
             poolAllow: ["read_*"],
             disabled: true,
           },
-          "empty-filters": { command: "srv", enabledTools: [], disabledTools: [], poolAllow: [] },
+          "empty-filters": { command: "srv", disabledTools: [], poolAllow: [] },
           "bare-allow": { command: "srv", allow: ["read_*"] },
         }),
       });

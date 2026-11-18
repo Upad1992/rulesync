@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import { ZCODE_PLUGIN_MCP_FILE_NAME } from "../../constants/plugin-paths.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { isRecord } from "../../utils/type-guards.js";
@@ -97,6 +96,7 @@ export class ZcodePluginMcp extends ToolMcp {
       mcpServers: rulesyncMcp.getMcpServers(),
       logger,
       enableKey: ZCODE_PLUGIN_ENABLE_KEY,
+      rawServerOf: (name) => rulesyncMcp.getRawMcpServer(name),
     });
     return new ZcodePluginMcp({
       outputRoot,
@@ -110,15 +110,10 @@ export class ZcodePluginMcp extends ToolMcp {
   toRulesyncMcp(): RulesyncMcp {
     const mcpServers = convertFromZcodeFormat({
       zcodeServers: serversOf(this.json),
-      enableKey: ZCODE_PLUGIN_ENABLE_KEY,
     });
     return this.toRulesyncMcpDefault({
       fileContent: JSON.stringify({ mcpServers }, null, 2),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

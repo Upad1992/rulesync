@@ -13,12 +13,15 @@ import type {
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull, toPosixPath } from "../../utils/file.js";
 import { fallbackLogger, type Logger, warnWithFallback } from "../../utils/logger.js";
+import { getOrCreateOwn, invertRecord, lookupOwn } from "../../utils/own-lookup.js";
+import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { honorAllToolsRestrictions, restatesAsCategoryRule } from "./shadowed-allows.js";
+import { buildToolPatternEntry } from "./tool-pattern-entry.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -64,16 +67,16 @@ const CANONICAL_TO_QWEN_TOOL_NAMES: Record<string, string> = {
   agent: "Agent",
 };
 
-const QWEN_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries(
-  Object.entries(CANONICAL_TO_QWEN_TOOL_NAMES).map(([k, v]) => [v, k]),
+const QWEN_TO_CANONICAL_TOOL_NAMES: Record<string, string> = invertRecord(
+  CANONICAL_TO_QWEN_TOOL_NAMES,
 );
 
 function toQwenToolName(canonical: string): string {
-  return CANONICAL_TO_QWEN_TOOL_NAMES[canonical] ?? canonical;
+  return lookupOwn({ record: CANONICAL_TO_QWEN_TOOL_NAMES, key: canonical }) ?? canonical;
 }
 
 function toCanonicalToolName(qwenName: string): string {
-  return QWEN_TO_CANONICAL_TOOL_NAMES[qwenName] ?? qwenName;
+  return lookupOwn({ record: QWEN_TO_CANONICAL_TOOL_NAMES, key: qwenName }) ?? qwenName;
 }
 
 type ParsedQwenEntry =
@@ -107,13 +110,6 @@ function parseQwenPermissionEntry(
   }
   const pattern = entry.slice(parenIndex + 1, lastParenIndex);
   return { ok: true, toolName, pattern: pattern || "*" };
-}
-
-function buildQwenPermissionEntry(toolName: string, pattern: string): string {
-  if (pattern === "*") {
-    return toolName;
-  }
-  return `${toolName}(${pattern})`;
 }
 
 // The `tools`/`security` sub-keys that the `qwencode` override authors and that
@@ -869,10 +865,6 @@ export class QwencodePermissions extends ToolPermissions {
     }
   }
 
-  override isDeletable(): boolean {
-    return false;
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
     return {
       relativeDirPath: QWENCODE_DIR,
@@ -937,7 +929,7 @@ export class QwencodePermissions extends ToolPermissions {
     );
 
     const config = rulesyncPermissions.getJson();
-    const { allow, ask, deny } = convertRulesyncToQwenPermissions(config);
+    const { allow, ask, deny } = convertRulesyncToQwenPermissions({ config, logger });
 
     const managedToolNames = new Set(
       Object.keys(config.permission).map((category) => toQwenToolName(category)),
@@ -1129,23 +1121,15 @@ export class QwencodePermissions extends ToolPermissions {
       };
     }
   }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): QwencodePermissions {
-    return new QwencodePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ permissions: {} }, null, 2),
-      validate: false,
-    });
-  }
 }
 
-function convertRulesyncToQwenPermissions(config: PermissionsConfig): {
+function convertRulesyncToQwenPermissions({
+  config,
+  logger,
+}: {
+  config: PermissionsConfig;
+  logger?: Logger;
+}): {
   allow: string[];
   ask: string[];
   deny: string[];
@@ -1154,10 +1138,22 @@ function convertRulesyncToQwenPermissions(config: PermissionsConfig): {
   const ask: string[] = [];
   const deny: string[] = [];
 
-  for (const [category, rules] of Object.entries(config.permission)) {
+  // `*` restrictions reach `bash` and withhold the allows they cover in the
+  // other categories. A pattern-specific `*` deny/ask is still written as a
+  // `*(<pattern>)` entry, as before: no primary source says the tool reads a
+  // `*` tool name literally, so the entry may enforce it.
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Qwen Code",
+    logger,
+    // The default for an input with no rule may auto-approve it (reads), so a
+    // `*` path or URL restriction is also written as a rule of each category.
+    restateAs: restatesAsCategoryRule(),
+  });
+  for (const [category, rules] of Object.entries(permission)) {
     const qwenToolName = toQwenToolName(category);
     for (const [pattern, action] of Object.entries(rules)) {
-      const entry = buildQwenPermissionEntry(qwenToolName, pattern);
+      const entry = buildToolPatternEntry({ toolName: qwenToolName, pattern });
       switch (action) {
         case "allow":
           allow.push(entry);
@@ -1197,19 +1193,21 @@ function convertQwenToRulesyncPermissions(params: {
         //   already-emitted warn from `parseQwenPermissionEntry` makes the drop visible.
         if (action === "deny") {
           const canonical = toCanonicalToolName(parsed.toolName);
-          if (!permission[canonical]) {
-            permission[canonical] = {};
+          if (isPrototypePollutionKey(canonical)) {
+            continue;
           }
-          permission[canonical]["*"] = action;
+          getOrCreateOwn({ record: permission, key: canonical, create: () => ({}) })["*"] = action;
         }
         continue;
       }
       const { toolName, pattern } = parsed;
       const canonical = toCanonicalToolName(toolName);
-      if (!permission[canonical]) {
-        permission[canonical] = {};
+      // A `__proto__` or `constructor` name would not land as a plain own key,
+      // so such entries are dropped, as the other permissions adapters do.
+      if (isPrototypePollutionKey(canonical) || isPrototypePollutionKey(pattern)) {
+        continue;
       }
-      permission[canonical][pattern] = action;
+      getOrCreateOwn({ record: permission, key: canonical, create: () => ({}) })[pattern] = action;
     }
   };
 

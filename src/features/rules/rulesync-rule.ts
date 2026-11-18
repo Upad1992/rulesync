@@ -15,7 +15,11 @@ import {
 import { RulesyncTargetsSchema } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { getGlobsStaticPrefix } from "../../utils/glob-static-prefix.js";
 import { warnOnceWithFallback } from "../../utils/logger.js";
 
@@ -26,6 +30,10 @@ import { warnOnceWithFallback } from "../../utils/logger.js";
  * before any consumer reads the frontmatter.
  */
 export const AUTO_SUBPROJECT_PATH = "auto";
+
+/** The rules' paths, comma-separated, for messages. */
+export const formatRulePaths = (rules: RulesyncRule[]): string =>
+  rules.map((r) => join(r.getRelativeDirPath(), r.getRelativeFilePath())).join(", ");
 
 export const RulesyncRuleFrontmatterSchema = z.object({
   root: z.optional(z.boolean()),
@@ -65,6 +73,19 @@ export const RulesyncRuleFrontmatterSchema = z.object({
       // `false` stops CodeBuddy from loading the rule at all.
       enabled: z.optional(z.boolean()),
       description: z.optional(z.string()),
+    }),
+  ),
+  cline: z.optional(
+    z.looseObject({
+      // Cline's own on/off toggle for a non-root rule. Since Cline v4.1.26
+      // switching a rule off in the UI writes `disabled: true` into the rule
+      // file, and Cline treats `enabled: false` the same way. Both must be
+      // booleans: Cline rejects the whole rule file otherwise. Any other key in
+      // this section is written into the rule's frontmatter verbatim, except
+      // `paths` / `alwaysApply` / `description`, which come from the canonical
+      // `globs` and `description`.
+      disabled: z.optional(z.boolean()),
+      enabled: z.optional(z.boolean()),
     }),
   ),
   continue: z.optional(
@@ -449,18 +470,12 @@ export class RulesyncRule extends RulesyncFile {
       return { success: true, error: null };
     }
 
-    const result = RulesyncRuleFrontmatterSchema.safeParse(this.frontmatter);
-
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: RulesyncRuleFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static async fromFile({

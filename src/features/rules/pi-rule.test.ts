@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -40,15 +40,6 @@ describe("PiRule", () => {
         relativeFilePath: "AGENTS.md",
       });
       expect(paths.nonRoot).toBeUndefined();
-    });
-
-    it("should honor excludeToolDir for global paths", () => {
-      const paths = PiRule.getSettablePaths({ global: true, excludeToolDir: true });
-
-      expect(paths.root).toEqual({
-        relativeDirPath: "agent",
-        relativeFilePath: "AGENTS.md",
-      });
     });
 
     it("should expose the append system-prompt path (project)", () => {

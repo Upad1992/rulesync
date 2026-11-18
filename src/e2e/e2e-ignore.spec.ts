@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { parse as parseToml } from "smol-toml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { CLAUDECODE_SETTINGS_SCHEMA_URL } from "../constants/claudecode-paths.js";
 import {
@@ -35,6 +35,7 @@ import {
 
 const ignoreGenerateTargets = [
   { target: "cursor", outputPath: ".cursorignore", format: "plaintext" as const },
+  { target: "firebender", outputPath: "firebender.json", format: "json" as const },
   {
     target: "claudecode",
     outputPath: join(".claude", "settings.json"),
@@ -64,6 +65,7 @@ const ignoreGenerateTargets = [
   },
   { target: "junie", outputPath: ".aiignore", format: "plaintext" as const },
   { target: "aiassistant", outputPath: ".aiignore", format: "plaintext" as const },
+  { target: "androidstudio", outputPath: ".aiexclude", format: "plaintext" as const },
   { target: "augmentcode", outputPath: ".augmentignore", format: "plaintext" as const },
   { target: "codebuff", outputPath: ".codebuffignore", format: "plaintext" as const },
   { target: "bob", outputPath: ".bobignore", format: "plaintext" as const },
@@ -158,6 +160,10 @@ credentials/
           extends: "workspace",
           deny: ["**/tmp/**", "**/credentials/**", "**/*.secret", "**/*.secret/**"],
         });
+      } else if (format === "json" && target === "firebender") {
+        // Firebender keeps the patterns in the `ignore` key of firebender.json.
+        const parsed = JSON.parse(generatedContent);
+        expect(parsed.ignore).toEqual(["tmp/", "credentials/", "*.secret"]);
       } else if (format === "json" && target === "zed") {
         // Zed uses JSON format with private_files
         const parsed = JSON.parse(generatedContent);
@@ -226,6 +232,7 @@ credentials/
     { target: "kiro-ide", orphanPath: KIRO_IGNORE_FILE_NAME },
     { target: "lettacode", orphanPath: join(".letta", ".lettaignore") },
     { target: "junie", orphanPath: ".aiignore" },
+    { target: "androidstudio", orphanPath: ".aiexclude" },
     { target: "augmentcode", orphanPath: ".augmentignore" },
     { target: "codebuff", orphanPath: ".codebuffignore" },
     { target: "bob", orphanPath: ".bobignore" },
@@ -306,6 +313,7 @@ describe("E2E: ignore (import)", () => {
     { target: "kiro-ide", sourcePath: KIRO_IGNORE_FILE_NAME },
     { target: "lettacode", sourcePath: join(".letta", ".lettaignore") },
     { target: "junie", sourcePath: ".aiignore" },
+    { target: "androidstudio", sourcePath: ".aiexclude" },
     { target: "augmentcode", sourcePath: ".augmentignore" },
     { target: "codebuff", sourcePath: ".codebuffignore" },
     { target: "bob", sourcePath: ".bobignore" },
@@ -324,6 +332,23 @@ credentials/
     await writeFileContent(join(testDir, sourcePath), ignoreContent);
 
     await runImport({ target, features: "ignore" });
+
+    const importedContent = await readFileContent(
+      join(testDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH),
+    );
+    expect(importedContent).toContain("tmp/");
+    expect(importedContent).toContain("credentials/");
+  });
+
+  it("should import firebender ignore from the ignore key of firebender.json", async () => {
+    const testDir = getTestDir();
+
+    await writeFileContent(
+      join(testDir, "firebender.json"),
+      JSON.stringify({ ignore: ["tmp/", "credentials/"], useCursorRules: false }),
+    );
+
+    await runImport({ target: "firebender", features: "ignore" });
 
     const importedContent = await readFileContent(
       join(testDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH),
@@ -378,6 +403,8 @@ describe("E2E: ignore (global mode)", () => {
     // Kilo's global ignore file stays in the legacy `~/.kilocode/` tree.
     { target: "kilo", outputPath: join(KILO_LEGACY_GLOBAL_DIR, KILO_IGNORE_FILE_NAME) },
     { target: "kiro", outputPath: join(KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME) },
+    // Kiro CLI V3 reads the same user-level file as the IDE.
+    { target: "kiro-cli", outputPath: join(KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME) },
     { target: "kiro-ide", outputPath: join(KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME) },
     {
       target: "reasonix",
@@ -388,6 +415,7 @@ describe("E2E: ignore (global mode)", () => {
       outputPath: join(getZedGlobalDir(), ZED_SETTINGS_FILE_NAME),
     },
     { target: "grokcli", outputPath: join(GROKCLI_DIR, GROKCLI_SANDBOX_FILE_NAME) },
+    { target: "firebender", outputPath: join(".firebender", "firebender.json") },
   ] as const;
 
   it("global matrix must cover every native global ignore tool target", () => {
@@ -444,27 +472,51 @@ describe("E2E: ignore (global mode)", () => {
     expect(imported).toContain("*.pem");
   });
 
-  it("should import the Kiro IDE user-level ignore file", async () => {
+  it("should import the Reasonix user-level read denies into the project", async () => {
     const projectDir = getProjectDir();
     const homeDir = getHomeDir();
     await writeFileContent(
-      join(homeDir, KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME),
-      "private/\n",
+      join(homeDir, REASONIX_GLOBAL_DIR, REASONIX_GLOBAL_PERMISSIONS_FILE_NAME),
+      '[permissions]\ndeny = ["read_file(private/)", "Bash(rm *)"]\n',
     );
 
     await runImport({
-      target: "kiro-ide",
+      target: "reasonix",
       features: "ignore",
       global: true,
       env: { HOME_DIR: homeDir },
     });
 
-    expect(await readFileContent(join(projectDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH))).toContain(
-      "private/",
-    );
+    const imported = await readFileContent(join(projectDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH));
+    expect(imported).toContain("private/");
+    expect(imported).not.toContain("rm *");
+    expect(await fileExists(join(homeDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH))).toBe(false);
   });
 
-  it("should not write the user-level kiroignore for kiro-cli, which only the IDE reads", async () => {
+  it.each(["kiro-cli", "kiro-ide"])(
+    "should import the user-level kiroignore for %s",
+    async (target) => {
+      const projectDir = getProjectDir();
+      const homeDir = getHomeDir();
+      await writeFileContent(
+        join(homeDir, KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME),
+        "private/\n",
+      );
+
+      await runImport({
+        target,
+        features: "ignore",
+        global: true,
+        env: { HOME_DIR: homeDir },
+      });
+
+      expect(
+        await readFileContent(join(projectDir, RULESYNC_AIIGNORE_RELATIVE_FILE_PATH)),
+      ).toContain("private/");
+    },
+  );
+
+  it("should write the shared user-level kiroignore once for kiro-cli and kiro-ide", async () => {
     const projectDir = getProjectDir();
     const homeDir = getHomeDir();
     await writeFileContent(
@@ -472,15 +524,21 @@ describe("E2E: ignore (global mode)", () => {
       "credentials/\n",
     );
 
-    await runGenerate({
-      target: "kiro-cli",
+    const { stdout } = await runGenerate({
+      target: "kiro-cli,kiro-ide",
       features: "ignore",
       global: true,
-      env: { HOME_DIR: homeDir },
+      // Lift the test-env log suppression so the write summary is printed.
+      env: { HOME_DIR: homeDir, NODE_ENV: "e2e" },
     });
 
-    expect(
-      await fileExists(join(homeDir, KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME)),
-    ).toBe(false);
+    // Each write replaces the whole file, so its content cannot reveal a
+    // second write; the reported write count does.
+    expect(stdout).toContain("Written 1 ignore file\n");
+    expect(stdout).toContain("Written 1 file(s) total (1 ignore files)");
+    const generatedContent = await readFileContent(
+      join(homeDir, KIRO_SETTINGS_DIR_PATH, KIRO_GLOBAL_IGNORE_FILE_NAME),
+    );
+    expect(generatedContent.match(/credentials\//g)).toHaveLength(1);
   });
 });

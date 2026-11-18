@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { PROCESSOR_REGISTRY } from "./processor-registry.js";
 import {
   ALL_TOOL_TARGETS,
   ALL_TOOL_TARGETS_WITH_WILDCARD,
+  isTargetedByTargets,
   RulesyncTargetsSchema,
   ToolTargetSchema,
   ToolTargetsSchema,
@@ -43,6 +44,7 @@ describe("tool targets", () => {
         "cursor",
         "deepagents",
         "factorydroid",
+        "firebender",
         "goose",
         "grokcli",
         "gitlabduo",
@@ -58,6 +60,7 @@ describe("tool targets", () => {
         "mimocode",
         "omp",
         "opencode",
+        "opencodev1",
         "openclaw",
         "pi",
         "pool",
@@ -72,14 +75,17 @@ describe("tool targets", () => {
         "trae",
         "vibe",
         "warp",
+        "xum",
         "devin",
         "devin-plugin",
         "zcode",
         "zed",
         "zoocode",
         "dsh",
+        "androidstudio",
         "lettacode",
         "claudecode-plugin",
+        "codearts-ide",
         "vibe-plugin",
         "warpcli",
         "zcode-plugin",
@@ -317,5 +323,23 @@ describe("tool targets", () => {
       }
       expect([...union].toSorted()).toEqual([...ALL_TOOL_TARGETS].toSorted());
     });
+  });
+});
+
+describe("isTargetedByTargets", () => {
+  it("selects every tool when targets is missing", () => {
+    expect(isTargetedByTargets({ targets: undefined, toolTarget: "cursor" })).toBe(true);
+  });
+
+  it("selects every tool for a wildcard entry", () => {
+    expect(isTargetedByTargets({ targets: ["*"], toolTarget: "cursor" })).toBe(true);
+  });
+
+  it("selects only the listed tools", () => {
+    expect(isTargetedByTargets({ targets: ["claudecode", "cursor"], toolTarget: "cursor" })).toBe(
+      true,
+    );
+    expect(isTargetedByTargets({ targets: ["claudecode"], toolTarget: "cursor" })).toBe(false);
+    expect(isTargetedByTargets({ targets: [], toolTarget: "cursor" })).toBe(false);
   });
 });

@@ -4,7 +4,6 @@ import {
   TABNINE_AGENT_DIR_PATH,
   TABNINE_SETTINGS_FILE_NAME,
 } from "../../constants/tabnine-paths.js";
-import { ValidationResult } from "../../types/ai-file.js";
 import { isMcpServers, type McpServers } from "../../types/mcp.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
@@ -15,7 +14,7 @@ import {
 import { isRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
-  parseSharedConfig,
+  parseSharedConfigFile,
   sharedConfigFileKey,
   undefinedWhenEmpty,
 } from "../shared/shared-config-gateway.js";
@@ -215,11 +214,10 @@ export class TabnineMcp extends ToolMcp {
     // Fail closed on malformed JSON or a non-object root (`null`, an array, a
     // scalar), matching the write path's shared-config declaration, so a
     // broken settings file is surfaced rather than partially imported.
-    this.json = parseSharedConfig({
-      format: "json",
+    this.json = parseSharedConfigFile({
+      fileKey: sharedConfigFileKey(TabnineMcp.getSettablePaths({ global: this.global })),
       fileContent: this.fileContent || "{}",
       filePath: join(this.relativeDirPath, this.relativeFilePath),
-      invalidRootPolicy: "error",
     });
   }
 
@@ -304,10 +302,6 @@ export class TabnineMcp extends ToolMcp {
     return this.toRulesyncMcpDefault({
       fileContent: JSON.stringify({ mcpServers }, null, 2),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -38,16 +38,6 @@ describe("AntigravityCliPermissions", () => {
     expect(paths.relativeFilePath).toBe("settings.json");
   });
 
-  it("should not be deletable because settings.json holds other CLI settings", () => {
-    const permissions = AntigravityCliPermissions.forDeletion({
-      outputRoot: testDir,
-      relativeDirPath: join(".gemini", "antigravity-cli"),
-      relativeFilePath: "settings.json",
-    });
-
-    expect(permissions.isDeletable()).toBe(false);
-  });
-
   it("should report validation success", () => {
     const permissions = new AntigravityCliPermissions({
       outputRoot: testDir,
@@ -82,6 +72,76 @@ describe("AntigravityCliPermissions", () => {
     // `*` copied into it would be a literal character and never match.
     expect(settings.permissions?.allow).toEqual(["command(git status)"]);
     expect(settings.permissions?.deny).toEqual(["command(rm -rf)"]);
+  });
+
+  describe("~/ path targets", () => {
+    const source = () =>
+      new RulesyncPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "permissions.json",
+        fileContent: JSON.stringify({
+          permission: {
+            read: { "~/x.txt": "deny", "~": "ask", "$HOME/y.txt": "deny" },
+            write: { "~/notes/**": "allow" },
+          },
+        }),
+      });
+
+    it("writes ~/ with the absolute home directory, since agy does not expand it", async () => {
+      const logger = createMockLogger();
+      const permissions = await AntigravityCliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: source(),
+        logger,
+      });
+
+      const settings = JSON.parse(permissions.getFileContent()) as SettingsJson;
+      expect(settings.permissions?.deny).toEqual([
+        "read_file($HOME/y.txt)",
+        `read_file(${testDir}/x.txt)`,
+      ]);
+      expect(settings.permissions?.ask).toEqual([`read_file(${testDir})`]);
+      expect(settings.permissions?.allow).toEqual([`write_file(${testDir}/notes)`]);
+      // Only the `$HOME` rule is left unexpanded, so only it is warned about.
+      const warnings = vi.mocked(logger.warn).mock.calls.map(([message]) => String(message));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("read_file($HOME/y.txt)");
+      expect(warnings[0]).toContain("this deny may block nothing");
+    });
+
+    it("imports the absolute home paths back as ~/ and regenerates the same file", async () => {
+      const emitted = await AntigravityCliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: source(),
+        logger: createMockLogger(),
+      });
+      await writeFileContent(
+        join(testDir, ".gemini", "antigravity-cli", "settings.json"),
+        emitted.getFileContent(),
+      );
+
+      const loaded = await AntigravityCliPermissions.fromFile({ outputRoot: testDir });
+      const json = loaded.toRulesyncPermissions().getJson();
+      expect(json.permission).toEqual({
+        read: {
+          "~/x.txt": "deny",
+          "~/x.txt/**": "deny",
+          "~": "ask",
+          "~/**": "ask",
+          "$HOME/y.txt": "deny",
+          "$HOME/y.txt/**": "deny",
+        },
+        write: { "~/notes": "allow", "~/notes/**": "allow" },
+      });
+
+      const regenerated = await AntigravityCliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: loaded.toRulesyncPermissions(),
+        logger: createMockLogger(),
+      });
+      expect(regenerated.getFileContent()).toBe(emitted.getFileContent());
+    });
   });
 
   it("should write globs inside words as per-word regex rules", async () => {
@@ -267,7 +327,7 @@ describe("AntigravityCliPermissions", () => {
     expect(settings.permissions?.ask).not.toContain("command(*)");
   });
 
-  it("should pass non-bash categories through unchanged as the tool name", async () => {
+  it("should write a canonical MCP tool category as an mcp(server/tool) target", async () => {
     const rulesyncPermissions = new RulesyncPermissions({
       outputRoot: testDir,
       relativeDirPath: ".rulesync",
@@ -275,6 +335,8 @@ describe("AntigravityCliPermissions", () => {
       fileContent: JSON.stringify({
         permission: {
           mcp__server__tool: { "*": "allow" },
+          mcp__github: { "*": "ask" },
+          mcp__sql__execute__mutation: { "*": "deny" },
         },
       }),
     });
@@ -285,7 +347,10 @@ describe("AntigravityCliPermissions", () => {
     });
 
     const settings = JSON.parse(permissions.getFileContent()) as SettingsJson;
-    expect(settings.permissions?.allow).toContain("mcp__server__tool");
+    expect(settings.permissions?.allow).toEqual(["mcp(server/tool)"]);
+    expect(settings.permissions?.ask).toEqual(["mcp(github/*)"]);
+    // The server ends at the first `__`; the rest is the tool name.
+    expect(settings.permissions?.deny).toEqual(["mcp(sql/execute__mutation)"]);
   });
 
   it("should map read/write/edit/webfetch to the engine action vocabulary", async () => {
@@ -420,6 +485,38 @@ describe("AntigravityCliPermissions", () => {
     expect(settings.permissions?.allow).toContain("command(git status)");
     // Unrelated top-level settings are also preserved.
     expect(settings.someOtherSetting).toBe(true);
+  });
+
+  it("should replace stale mcp(...) and legacy mcp__ entries once an MCP category is configured", async () => {
+    const dir = join(testDir, ".gemini", "antigravity-cli");
+    await ensureDir(dir);
+    await writeFileContent(
+      join(dir, "settings.json"),
+      JSON.stringify({
+        // `mcp__github__list` is the bare action earlier releases wrote.
+        permissions: {
+          allow: ["mcp(github/*)", "mcp__github__list", "execute_url(https://deploy.example.com)"],
+        },
+      }),
+    );
+
+    const rulesyncPermissions = new RulesyncPermissions({
+      outputRoot: testDir,
+      relativeDirPath: ".rulesync",
+      relativeFilePath: "permissions.json",
+      fileContent: JSON.stringify({
+        permission: { mcp__github__delete: { "*": "ask" } },
+      }),
+    });
+
+    const permissions = await AntigravityCliPermissions.fromRulesyncPermissions({
+      outputRoot: testDir,
+      rulesyncPermissions,
+    });
+
+    const settings = JSON.parse(permissions.getFileContent()) as SettingsJson;
+    expect(settings.permissions?.allow).toEqual(["execute_url(https://deploy.example.com)"]);
+    expect(settings.permissions?.ask).toEqual(["mcp(github/delete)"]);
   });
 
   it("should replace existing read_file entries when the read category is managed", async () => {
@@ -767,6 +864,37 @@ describe("AntigravityCliPermissions", () => {
       expect(json["antigravity-cli"]).toEqual({ agentMode: "accept-edits" });
     });
 
+    it("authors and round-trips agentMode: auto (issue #2666)", async () => {
+      const rulesyncPermissions = new RulesyncPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "permissions.json",
+        fileContent: JSON.stringify({
+          permission: {},
+          "antigravity-cli": { agentMode: "auto", enableTerminalSandbox: true },
+        }),
+      });
+
+      const permissions = await AntigravityCliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions,
+      });
+
+      const settings = JSON.parse(permissions.getFileContent()) as SettingsJson & {
+        agentMode?: string;
+      };
+      expect(settings.agentMode).toBe("auto");
+
+      const dir = join(testDir, ".gemini", "antigravity-cli");
+      await ensureDir(dir);
+      await writeFileContent(join(dir, "settings.json"), permissions.getFileContent());
+      const loaded = await AntigravityCliPermissions.fromFile({ outputRoot: testDir });
+      const json = loaded.toRulesyncPermissions().getJson() as {
+        "antigravity-cli"?: Record<string, unknown>;
+      };
+      expect(json["antigravity-cli"]).toEqual({ agentMode: "auto", enableTerminalSandbox: true });
+    });
+
     it("drops an agentMode value outside the documented enum on import", async () => {
       const dir = join(testDir, ".gemini", "antigravity-cli");
       await ensureDir(dir);
@@ -828,6 +956,46 @@ describe("AntigravityCliPermissions", () => {
         "antigravity-cli"?: unknown;
       };
       expect(json["antigravity-cli"]).toBeUndefined();
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("generates a canonical category named like a prototype member verbatim", async () => {
+      const permissions = await AntigravityCliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".rulesync",
+          relativeFilePath: "permissions.json",
+          fileContent: JSON.stringify({
+            permission: { valueOf: { x: "allow", y: "deny" }, toString: { "*": "ask" } },
+          }),
+        }),
+        logger: createMockLogger(),
+      });
+
+      const settings = JSON.parse(permissions.getFileContent()) as SettingsJson;
+      expect(settings.permissions?.allow).toEqual(["valueOf(x)"]);
+      expect(settings.permissions?.ask).toEqual(["toString"]);
+      expect(settings.permissions?.deny).toEqual(["valueOf(y)"]);
+    });
+
+    it("imports a native tool named like a prototype member as its own category", () => {
+      const permissions = new AntigravityCliPermissions({
+        outputRoot: testDir,
+        relativeDirPath: join(".gemini", "antigravity-cli"),
+        relativeFilePath: "settings.json",
+        fileContent: JSON.stringify({
+          permissions: { allow: ["valueOf(foo)", "toString"] },
+        }),
+        global: true,
+      });
+
+      const json = permissions.toRulesyncPermissions().getJson();
+      expect(json.permission).toEqual({
+        valueOf: { foo: "allow" },
+        toString: { "*": "allow" },
+      });
     });
   });
 });

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -868,6 +868,19 @@ globs: ["packages/api/**/*"]
     it("should validate minimal valid frontmatter", () => {
       const result = RulesyncRuleFrontmatterSchema.safeParse({});
       expect(result.success).toBe(true);
+    });
+
+    it("should accept a cline section and keep its unknown keys", () => {
+      const result = RulesyncRuleFrontmatterSchema.safeParse({
+        cline: { disabled: true, enabled: false, name: "my-rule" },
+      });
+      expect(result.success).toBe(true);
+      expect(result.data?.cline).toEqual({ disabled: true, enabled: false, name: "my-rule" });
+    });
+
+    it("should reject a non-boolean cline.enabled", () => {
+      const result = RulesyncRuleFrontmatterSchema.safeParse({ cline: { enabled: "no" } });
+      expect(result.success).toBe(false);
     });
 
     it("should validate complete valid frontmatter", () => {

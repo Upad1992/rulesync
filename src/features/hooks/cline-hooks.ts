@@ -95,7 +95,7 @@ export class ClineHooks extends ToolHooks {
   private readonly scriptsByEvent: Record<string, string[]>;
 
   constructor(params: AiFileParams & { scriptsByEvent?: Record<string, string[]> }) {
-    super({ ...params, fileContent: params.fileContent ?? "" });
+    super(params);
     this.scriptsByEvent = params.scriptsByEvent ?? {};
   }
 
@@ -255,10 +255,6 @@ export class ClineHooks extends ToolHooks {
     throw new Error(
       "Not implemented because generated Cline hook scripts cannot be imported back into canonical hooks.",
     );
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

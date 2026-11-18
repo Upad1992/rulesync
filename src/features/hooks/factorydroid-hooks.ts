@@ -6,14 +6,11 @@ import {
   FACTORYDROID_LEGACY_HOOKS_DIR_PATH,
   FACTORYDROID_SETTINGS_FILE_NAME,
 } from "../../constants/factorydroid-paths.js";
-import type { AiFileParams } from "../../types/ai-file.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import {
   FACTORYDROID_HOOK_EVENTS,
   FACTORYDROID_TO_CANONICAL_EVENT_NAMES,
   CANONICAL_TO_FACTORYDROID_EVENT_NAMES,
 } from "../../types/hooks.js";
-import { formatError } from "../../utils/error.js";
 import { readFactorydroidSettingsWithLocalOverlay } from "../../utils/factorydroid-settings.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
@@ -27,7 +24,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
   type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
@@ -49,7 +45,7 @@ function declaresHooksKey(fileContent: string): boolean {
   return isRecord(parsed) && isRecord(parsed["hooks"]);
 }
 
-const FACTORYDROID_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const FACTORYDROID_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedEvents: FACTORYDROID_HOOK_EVENTS,
   canonicalToToolEventNames: CANONICAL_TO_FACTORYDROID_EVENT_NAMES,
   toolToCanonicalEventNames: FACTORYDROID_TO_CANONICAL_EVENT_NAMES,
@@ -90,13 +86,6 @@ function hasFactorydroidEventKey(parsed: object): boolean {
 }
 
 export class FactorydroidHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolHooksSettablePaths {
     // Factory Droid's primary hooks file is `.factory/hooks.json` (project) and
     // `~/.factory/hooks.json` (global). The home directory is resolved by the
@@ -197,17 +186,10 @@ export class FactorydroidHooks extends ToolHooks {
   }
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
-    let parsed: { hooks?: unknown };
-    try {
-      parsed = JSON.parse(this.getFileContent());
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Factory Droid hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const parsed: { hooks?: unknown } = this.parseFileContentOrThrow({
+      displayName: "Factory Droid",
+      parse: (fileContent) => JSON.parse(fileContent),
+    });
     // Both shapes are read: a standalone `hooks.json` keyed by event name, and
     // the `hooks`-wrapped `settings.json` that `fromFile` falls back to. The
     // top level wins when it names an event, so a file carrying an event
@@ -223,24 +205,6 @@ export class FactorydroidHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): FactorydroidHooks {
-    return new FactorydroidHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

@@ -31,7 +31,7 @@ export const SKILL_DESCRIPTION_MAX_LENGTH = 1024;
 // "Lowercase letters, numbers, and hyphens only", with no leading/trailing
 // hyphen and no consecutive hyphens — all four rules expressed as alphanumeric
 // runs joined by single hyphens.
-export const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
  * Check a skill `name` against the length and character rules, phrased for the
@@ -164,7 +164,7 @@ export async function getLocalSkillDirNames(sourceTree: string): Promise<Set<str
  * The rulesync skill frontmatter exposes a root-level `disable-model-invocation`
  * default that applies to every tool supporting the flag (claudecode, codebuddy, copilot,
  * copilotcli, crush, cursor, zed, pi, omp, qwencode, vibe, grokcli, factorydroid, dsh, reasonix,
- * commandcode, lettacode, opencode, mimocode). Each tool's own section may override that
+ * commandcode, lettacode, opencode, opencodev1, mimocode, xum). Each tool's own section may override that
  * default with a per-target value. A defined section value (including `false`)
  * always wins over the root default.
  *
@@ -191,7 +191,7 @@ export function resolveDisableModelInvocation({
  * The rulesync skill frontmatter exposes a root-level `user-invocable` default
  * that applies to every tool supporting the flag (claudecode, codebuddy, copilot,
  * copilotcli, crush, cursor, qwencode, vibe, grokcli, factorydroid, dsh, reasonix, commandcode,
- * lettacode). Each tool's own section may override that default with a
+ * lettacode, xum). Each tool's own section may override that default with a
  * per-target value. A defined section value (including `false`) always wins
  * over the root default.
  *
@@ -286,4 +286,70 @@ export function resolveMetadata<TSection = Record<string, unknown>>({
   section: { metadata?: TSection } | undefined;
 }): TSection | Record<string, unknown> | undefined {
   return section?.metadata ?? rootFrontmatter.metadata;
+}
+
+/**
+ * The Agent Skills spec types `allowed-tools` as "a space-separated string of
+ * tools", so an array from a rulesync input is joined rather than emitted as a
+ * YAML sequence.
+ */
+export function toAllowedToolsString(value: string | string[]): string {
+  return Array.isArray(value) ? value.join(" ") : value;
+}
+
+/**
+ * Inverse of {@link toAllowedToolsString}: normalize back to the canonical
+ * rulesync array representation on import, so a generate → import round trip
+ * leaves `.rulesync/skills/**` in the shape it started in.
+ */
+export function toAllowedToolsArray(value: string | string[]): string[] {
+  return Array.isArray(value) ? value : value.split(/\s+/).filter((tool) => tool.length > 0);
+}
+
+/**
+ * The Agent Skills standard fields (`license`, `compatibility`, `metadata`)
+ * that are set, in that order, leaving out the undefined ones so they are not
+ * written as keys.
+ */
+export function pickStandardSkillFields<TLicense, TCompatibility, TMetadata>({
+  license,
+  compatibility,
+  metadata,
+}: {
+  license?: TLicense;
+  compatibility?: TCompatibility;
+  metadata?: TMetadata;
+}): { license?: TLicense; compatibility?: TCompatibility; metadata?: TMetadata } {
+  return {
+    ...(license !== undefined && { license }),
+    ...(compatibility !== undefined && { compatibility }),
+    ...(metadata !== undefined && { metadata }),
+  };
+}
+
+/**
+ * {@link pickStandardSkillFields} after resolving each field through
+ * {@link resolveLicense}, {@link resolveCompatibility} and
+ * {@link resolveMetadata} (a defined section value wins over the root default).
+ */
+export function resolveStandardSkillFields<
+  TLicense = string,
+  TCompatibility = string | Record<string, unknown>,
+  TMetadata = Record<string, unknown>,
+>({
+  rootFrontmatter,
+  section,
+}: {
+  rootFrontmatter: {
+    license?: string;
+    compatibility?: string | Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  };
+  section: { license?: TLicense; compatibility?: TCompatibility; metadata?: TMetadata } | undefined;
+}) {
+  return pickStandardSkillFields({
+    license: resolveLicense({ rootFrontmatter, section }),
+    compatibility: resolveCompatibility({ rootFrontmatter, section }),
+    metadata: resolveMetadata({ rootFrontmatter, section }),
+  });
 }

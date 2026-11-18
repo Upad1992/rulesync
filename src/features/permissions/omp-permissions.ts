@@ -1,18 +1,20 @@
 import { join } from "node:path";
 
 import { OMP_CONFIG_FILE_NAME, OMP_DIR, OMP_GLOBAL_DIR } from "../../constants/omp-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import {
   OMP_APPROVAL_MODES,
   type OmpApprovalMode,
+  type OmpPermissionsOverride,
   type PermissionAction,
   type PermissionsConfig,
 } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
+import { invertRecord, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
-import { isRecord } from "../../utils/type-guards.js";
+import { isRecord, toRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
@@ -22,6 +24,7 @@ import { RulesyncPermissions } from "./rulesync-permissions.js";
 import {
   ALL_TOOLS_PERMISSION_CATEGORY,
   bashRulesHonoringAllTools,
+  CATCH_ALL_PATTERN,
   SHELL_PERMISSION_CATEGORY,
 } from "./shell-command-categories.js";
 import {
@@ -31,7 +34,6 @@ import {
 } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -41,11 +43,13 @@ type OmpApproval = "allow" | "prompt" | "deny";
 
 type OmpBashPattern = { match: string; approval: OmpApproval };
 
-const CATCH_ALL_PATTERN = "*";
-
 // The `tools` key holding oh-my-pi's approval mode, authored through the
 // `omp.approvalMode` override.
 const APPROVAL_MODE_KEY = "approvalMode";
+
+// The `tools` key holding oh-my-pi's restricted folders (v18.13.1+), authored
+// through the `omp.restrictedFolders` override.
+const RESTRICTED_FOLDERS_KEY = "restrictedFolders";
 
 const ACTION_TO_OMP_APPROVAL: Record<PermissionAction, OmpApproval> = {
   allow: "allow",
@@ -69,9 +73,7 @@ const CATEGORY_TO_OMP_TOOL: Record<string, string> = {
   agent: "task",
 };
 
-const OMP_TOOL_TO_CATEGORY: Record<string, string> = Object.fromEntries(
-  Object.entries(CATEGORY_TO_OMP_TOOL).map(([category, tool]) => [tool, category]),
-);
+const OMP_TOOL_TO_CATEGORY: Record<string, string> = invertRecord(CATEGORY_TO_OMP_TOOL);
 
 // Canonical categories with no oh-my-pi tool to key a policy on: web pages are
 // fetched through `read` (or a mounted device), there is no notebook tool, and
@@ -102,9 +104,9 @@ const MANAGED_OMP_TOOLS: ReadonlySet<string> = new Set([
  *
  * - `tools.approval.<tool>: allow | prompt | deny` is a per-tool policy honored
  *   in every approval mode. A category's catch-all `*` rule maps here
- *   (`ask` → `prompt`). oh-my-pi has no per-path matcher, so a non-bash category
- *   with pattern-specific rules collapses to one action (deny > ask > allow, with
- *   an implicit `ask` when there is no catch-all) and a warning.
+ *   (`ask` → `prompt`). `tools.approval` has no per-path matcher, so a non-bash
+ *   category with pattern-specific rules collapses to one action (deny > ask >
+ *   allow, with an implicit `ask` when there is no catch-all) and a warning.
  * - `bash.patterns: [{ match, approval }]` is an ordered, first-match-wins list
  *   of command globs (only `*` is a wildcard). Every `bash` rule except a
  *   catch-all `allow` is written there, ordered deny → prompt → allow so that
@@ -120,13 +122,16 @@ const MANAGED_OMP_TOOLS: ReadonlySet<string> = new Set([
  *   catch-all one at its own strictness, a pattern-specific one as `prompt`).
  *
  * The `omp.approvalMode` override writes `tools.approvalMode` (`always-ask`,
- * `write` or `yolo`); without it the key is left as it is in the file, and on
- * import a recognized value is read back into the override.
+ * `always-ask-cached`, `write` or `yolo`); without it the key is left as it is in the file, and on
+ * import a recognized value is read back into the override. Likewise the
+ * `omp.restrictedFolders` override writes `tools.restrictedFolders` (folders
+ * where every action prompts in every approval mode, `yolo` included), is left
+ * alone when absent, and is read back on import.
  *
  * `config.yml` carries every other oh-my-pi setting, so only `tools.approval`
  * (the keys rulesync manages), `bash.patterns` and an authored
- * `tools.approvalMode` are rewritten; sibling keys such as `bash.enabled` are
- * kept, and the file is never deleted.
+ * `tools.approvalMode` or `tools.restrictedFolders` are rewritten; sibling
+ * keys such as `bash.enabled` are kept, and the file is never deleted.
  *
  * @see https://github.com/can1357/oh-my-pi/blob/main/docs/settings.md
  * @see https://github.com/can1357/oh-my-pi/blob/main/docs/approval-mode.md
@@ -137,11 +142,6 @@ export class OmpPermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "",
     });
-  }
-
-  /** `config.yml` holds unrelated user settings, so it must not be deleted. */
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths({
@@ -187,8 +187,9 @@ export class OmpPermissions extends ToolPermissions {
     const config = rulesyncPermissions.getJson();
     const { approval, patterns, floor } = convertRulesyncToOmp({ config, logger });
     const approvalMode = config.omp?.approvalMode;
+    const restrictedFolders = config.omp?.restrictedFolders;
 
-    const existingTools = isRecord(existing.tools) ? existing.tools : {};
+    const existingTools = toRecord(existing.tools);
     // A kept key is still raised to the all-tools floor, so a hand-written
     // `eval: allow` cannot outlive an all-tools deny.
     const keptApproval = isRecord(existingTools.approval)
@@ -203,12 +204,15 @@ export class OmpPermissions extends ToolPermissions {
     if (approvalMode !== undefined) {
       toolsSiblings[APPROVAL_MODE_KEY] = approvalMode;
     }
+    if (restrictedFolders !== undefined) {
+      toolsSiblings[RESTRICTED_FOLDERS_KEY] = restrictedFolders;
+    }
     const nextTools =
       Object.keys(nextApproval).length > 0
         ? { ...toolsSiblings, approval: nextApproval }
         : toolsSiblings;
 
-    const existingBash = isRecord(existing.bash) ? existing.bash : {};
+    const existingBash = toRecord(existing.bash);
     const bashSiblings = withoutKey(existingBash, "patterns");
     const nextBash = patterns.length > 0 ? { ...bashSiblings, patterns } : bashSiblings;
 
@@ -248,36 +252,10 @@ export class OmpPermissions extends ToolPermissions {
       fileContent: JSON.stringify(convertOmpToRulesync(config), null, 2),
     });
   }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): OmpPermissions {
-    return new OmpPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global,
-    });
-  }
 }
 
 function withoutKey(record: Record<string, unknown>, key: string): Record<string, unknown> {
   return Object.fromEntries(Object.entries(record).filter(([name]) => name !== key));
-}
-
-// `Object.hasOwn` keeps an inherited name such as `toString` from resolving to
-// a function instead of falling through to the name itself.
-function renamed(map: Record<string, string>, name: string): string {
-  return Object.hasOwn(map, name) ? (map[name] ?? name) : name;
 }
 
 function stricter(a: PermissionAction | undefined, b: PermissionAction): PermissionAction {
@@ -462,7 +440,7 @@ function convertRulesyncToOmp({ config, logger }: { config: PermissionsConfig; l
       );
     }
     // `agent` and a verbatim `task` share one key, so the stricter one wins.
-    const tool = renamed(CATEGORY_TO_OMP_TOOL, category);
+    const tool = lookupOwn({ record: CATEGORY_TO_OMP_TOOL, key: category }) ?? category;
     if (/^mcp__.+__/u.test(tool)) {
       logger?.warn(
         `oh-my-pi registers MCP tools as "mcp__<server>_<tool>", so "${tool}" may never match; ` +
@@ -563,11 +541,11 @@ function importBashPatterns(value: unknown): Record<string, PermissionAction> {
 
 function convertOmpToRulesync(config: Record<string, unknown>): PermissionsConfig {
   const permission: Record<string, Record<string, PermissionAction>> = {};
-  const tools = isRecord(config.tools) ? config.tools : {};
-  const bash = isRecord(config.bash) ? config.bash : {};
+  const tools = toRecord(config.tools);
+  const bash = toRecord(config.bash);
 
   const bashRules = importBashPatterns(bash.patterns);
-  const approvals = isRecord(tools.approval) ? tools.approval : {};
+  const approvals = toRecord(tools.approval);
   const bashApproval = toOmpApproval(approvals.bash);
   importBashPolicy(
     bashRules,
@@ -585,7 +563,7 @@ function convertOmpToRulesync(config: Record<string, unknown>): PermissionsConfi
         continue;
       }
       // A verbatim `agent` key and `task` import to one category; the stricter wins.
-      const category = renamed(OMP_TOOL_TO_CATEGORY, tool);
+      const category = lookupOwn({ record: OMP_TOOL_TO_CATEGORY, key: tool }) ?? tool;
       permission[category] = {
         [CATCH_ALL_PATTERN]: stricter(permission[category]?.[CATCH_ALL_PATTERN], action),
       };
@@ -597,12 +575,30 @@ function convertOmpToRulesync(config: Record<string, unknown>): PermissionsConfi
   }
 
   const approvalMode = tools[APPROVAL_MODE_KEY];
-  return {
-    permission,
+  const restrictedFolders = importRestrictedFolders(tools[RESTRICTED_FOLDERS_KEY]);
+  const omp: OmpPermissionsOverride = {
     // oh-my-pi matches the mode exactly and falls back to `yolo` otherwise, so
     // only a value it honors is carried into the override.
-    ...(isOmpApprovalMode(approvalMode) && { omp: { approvalMode } }),
+    ...(isOmpApprovalMode(approvalMode) && { approvalMode }),
+    ...(restrictedFolders !== undefined && { restrictedFolders }),
   };
+  return {
+    permission,
+    ...(Object.keys(omp).length > 0 && { omp }),
+  };
+}
+
+/**
+ * `tools.restrictedFolders` as the override list: its string entries, or
+ * `undefined` when it is unset or no entry survives (so a list of non-strings
+ * is not imported as `[]` and then rewritten as an empty list).
+ */
+function importRestrictedFolders(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const folders = value.filter((entry): entry is string => typeof entry === "string");
+  return folders.length === 0 && value.length > 0 ? undefined : folders;
 }
 
 function isOmpApprovalMode(value: unknown): value is OmpApprovalMode {

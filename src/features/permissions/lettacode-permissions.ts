@@ -1,23 +1,26 @@
 import { join } from "node:path";
 
 import { LETTACODE_DIR, LETTACODE_SETTINGS_FILE_NAME } from "../../constants/lettacode-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
+import { getOrCreateOwn, invertRecord, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
-import { isRecord } from "../../utils/type-guards.js";
+import { isRecord, toStringArray } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { honorAllToolsOnBash } from "./shell-command-categories.js";
+import { honorAllToolsRestrictions, restatesAsCategoryRule } from "./shadowed-allows.js";
+import { CATCH_ALL_PATTERN } from "./shell-command-categories.js";
+import { isStricterAction } from "./single-action-collapse.js";
+import { splitToolRule } from "./tool-pattern-entry.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -25,8 +28,6 @@ import {
 
 /** Top-level key of `.letta/settings.json` that rulesync owns. */
 const LETTACODE_PERMISSIONS_KEY = "permissions";
-
-const CATCH_ALL_PATTERN = "*";
 
 /** Letta Code's `Bash(prefix:*)` prefix-match suffix. */
 const PREFIX_SUFFIX = ":*";
@@ -51,9 +52,7 @@ const CATEGORY_TO_LETTACODE_TOOL: Record<string, string> = {
 // canonical names are ever written.
 // https://github.com/letta-ai/letta-code/blob/main/src/permissions/canonical.ts
 const LETTACODE_TOOL_TO_CATEGORY: Record<string, string> = {
-  ...Object.fromEntries(
-    Object.entries(CATEGORY_TO_LETTACODE_TOOL).map(([category, tool]) => [tool, category]),
-  ),
+  ...invertRecord(CATEGORY_TO_LETTACODE_TOOL),
   shell: "bash",
   Shell: "bash",
   shell_command: "bash",
@@ -89,29 +88,8 @@ const LIST_TO_ACTION: Record<string, PermissionAction> = {
   deny: "deny",
 };
 
-const ACTION_RANK: Record<PermissionAction, number> = { allow: 0, ask: 1, deny: 2 };
-
-function toStringList(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
-}
-
-/**
- * Split a rule the way Letta Code's matcher does: `Tool(payload)` or a bare
- * `Tool`. A rule that opens a parenthesis without closing it is returned with
- * an `undefined` payload and a `null` tool so it stays unmodeled.
- */
-function splitLettacodeRule(rule: string): { tool: string | null; payload: string | undefined } {
-  const match = rule.match(/^([^(]+)\(([\s\S]*)\)$/);
-  if (match) {
-    return { tool: match[1] ?? null, payload: match[2] };
-  }
-  return { tool: rule.includes("(") ? null : rule, payload: undefined };
-}
-
 function categoryOfRule(rule: string): string | undefined {
-  const { tool } = splitLettacodeRule(rule);
+  const { tool } = splitToolRule(rule);
   if (tool === null || !Object.hasOwn(LETTACODE_TOOL_TO_CATEGORY, tool)) {
     return undefined;
   }
@@ -183,7 +161,7 @@ function toLettacodeRule({
   action: PermissionAction;
   logger?: Logger;
 }): string | null {
-  const tool = CATEGORY_TO_LETTACODE_TOOL[category];
+  const tool = lookupOwn({ record: CATEGORY_TO_LETTACODE_TOOL, key: category });
   if (tool === undefined) {
     return null;
   }
@@ -207,7 +185,7 @@ function fromLettacodeRule(rule: string): { category: string; pattern: string } 
   if (category === undefined) {
     return null;
   }
-  const { payload } = splitLettacodeRule(rule);
+  const { payload } = splitToolRule(rule);
   if (payload === undefined) {
     return { category, pattern: CATCH_ALL_PATTERN };
   }
@@ -239,13 +217,20 @@ function buildLettacodeRuleLists({
   existingPermissions: Record<string, unknown>;
   logger?: Logger;
 }): Record<string, string[]> {
-  const permission = honorAllToolsOnBash(config.permission);
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Letta Code",
+    logger,
+    // The default for an input with no rule may auto-approve it (reads), so a
+    // `*` path or URL restriction is also written as a rule of each category.
+    restateAs: restatesAsCategoryRule(),
+  });
   const ranked = new Map<string, PermissionAction>();
   const managedCategories = new Set<string>();
   for (const [category, rules] of Object.entries(permission)) {
     if (!Object.hasOwn(CATEGORY_TO_LETTACODE_TOOL, category)) {
       // The all-tools `*` category's restrictions already reached `bash`
-      // through `honorAllToolsOnBash` when that category exists.
+      // through `honorAllToolsRestrictions` when that category exists.
       logger?.warn(
         `Letta Code permissions: skipping the '${category}' category — Letta Code has no permission rule for it.`,
       );
@@ -261,7 +246,7 @@ function buildLettacodeRuleLists({
         continue;
       }
       const existing = ranked.get(rule);
-      if (existing === undefined || ACTION_RANK[action] > ACTION_RANK[existing]) {
+      if (isStricterAction({ action, existing })) {
         ranked.set(rule, action);
       }
     }
@@ -269,7 +254,7 @@ function buildLettacodeRuleLists({
 
   const lists: Record<string, string[]> = {};
   for (const key of Object.keys(LIST_TO_ACTION)) {
-    lists[key] = toStringList(existingPermissions[key]).filter((rule) => {
+    lists[key] = toStringArray(existingPermissions[key]).filter((rule) => {
       const category = categoryOfRule(rule);
       return category === undefined || !managedCategories.has(category);
     });
@@ -303,10 +288,6 @@ export class LettacodePermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "{}",
     });
-  }
-
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
@@ -396,42 +377,26 @@ export class LettacodePermissions extends ToolPermissions {
 
     const permission: Record<string, Record<string, PermissionAction>> = {};
     for (const [key, action] of Object.entries(LIST_TO_ACTION)) {
-      for (const rule of toStringList(permissions[key])) {
+      for (const rule of toStringArray(permissions[key])) {
         const parsed = fromLettacodeRule(rule);
         if (parsed === null || isPrototypePollutionKey(parsed.pattern)) {
           continue;
         }
-        const rules = (permission[parsed.category] ??= {});
-        const existing = rules[parsed.pattern];
+        const rules = getOrCreateOwn({
+          record: permission,
+          key: parsed.category,
+          create: () => ({}),
+        });
+        const existing = lookupOwn({ record: rules, key: parsed.pattern });
         // Letta Code checks `deny` before every other list, so the stricter
         // action wins when a rule appears in more than one list.
-        if (existing === undefined || ACTION_RANK[action] > ACTION_RANK[existing]) {
+        if (isStricterAction({ action, existing })) {
           rules[parsed.pattern] = action;
         }
       }
     }
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify({ permission }, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): LettacodePermissions {
-    return new LettacodePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
-      global,
     });
   }
 }

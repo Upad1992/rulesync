@@ -14,9 +14,14 @@ import {
 } from "../../utils/deepagents.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -154,14 +159,13 @@ export class DeepagentsSubagent extends ToolSubagent {
       ...deepagentsSection,
     };
 
-    const result = DeepagentsSubagentFrontmatterSchema.safeParse(rawFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid deepagents subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
+    const deepagentsFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: DeepagentsSubagentFrontmatterSchema,
+      frontmatter: rawFrontmatter,
+      toolTarget: "deepagents",
+      rulesyncSubagent,
+    });
 
-    const deepagentsFrontmatter = result.data;
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, deepagentsFrontmatter);
 
@@ -191,17 +195,12 @@ export class DeepagentsSubagent extends ToolSubagent {
       return { success: true, error: null };
     }
 
-    const result = DeepagentsSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: DeepagentsSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_MCP_RELATIVE_FILE_PATH,
@@ -7,6 +7,9 @@ import {
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { RulesyncSourceNotFoundError } from "../../utils/rulesync-source-path.js";
+import { AntigravityCliMcp } from "./antigravity-cli-mcp.js";
+import { AntigravityIdeMcp } from "./antigravity-ide-mcp.js";
+import { AntigravityPluginMcp } from "./antigravity-plugin-mcp.js";
 import { ClaudecodeMcp } from "./claudecode-mcp.js";
 import { ClineMcp } from "./cline-mcp.js";
 import { CodexcliMcp } from "./codexcli-mcp.js";
@@ -976,6 +979,36 @@ describe("McpProcessor", () => {
       ]);
     });
 
+    it.each([
+      ["antigravity-cli", AntigravityCliMcp],
+      ["antigravity-ide", AntigravityIdeMcp],
+      ["antigravity-plugin", AntigravityPluginMcp],
+    ] as const)(
+      "should not strip enabledTools and disabledTools for %s",
+      async (toolTarget, mcpClass) => {
+        // Antigravity documents both a per-server `enabledTools` allowlist and a
+        // `disabledTools` denylist under the canonical names.
+        const rulesyncMcp = new RulesyncMcp({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: ".mcp.json",
+          fileContent: JSON.stringify({ mcpServers: {} }),
+        });
+
+        vi.spyOn(mcpClass, "fromRulesyncMcp").mockResolvedValue({} as any);
+
+        const processor = new McpProcessor({
+          logger: createMockLogger(),
+          outputRoot: testDir,
+          toolTarget,
+        });
+
+        await processor.convertRulesyncFilesToToolFiles([rulesyncMcp]);
+
+        expect(rulesyncMcp.stripMcpServerFields).toHaveBeenCalledWith([]);
+      },
+    );
+
     it("should not strip enabledTools and disabledTools for codexcli", async () => {
       const rulesyncMcp = new RulesyncMcp({
         outputRoot: testDir,
@@ -1018,6 +1051,29 @@ describe("McpProcessor", () => {
       await processor.convertRulesyncFilesToToolFiles([rulesyncMcp]);
 
       expect(rulesyncMcp.stripMcpServerFields).toHaveBeenCalledWith([]);
+    });
+
+    it("should pass the feature options to the tool class", async () => {
+      const rulesyncMcp = new RulesyncMcp({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: ".mcp.json",
+        fileContent: JSON.stringify({ mcpServers: {} }),
+      });
+      vi.mocked(OpencodeMcp.fromRulesyncMcp).mockResolvedValue({} as any);
+
+      const processor = new McpProcessor({
+        logger: createMockLogger(),
+        outputRoot: testDir,
+        toolTarget: "opencode",
+        featureOptions: { configShape: "v2" },
+      });
+
+      await processor.convertRulesyncFilesToToolFiles([rulesyncMcp]);
+
+      expect(OpencodeMcp.fromRulesyncMcp).toHaveBeenCalledWith(
+        expect.objectContaining({ featureOptions: { configShape: "v2" } }),
+      );
     });
 
     it("should not strip enabledTools and disabledTools for kilo", async () => {
@@ -1197,27 +1253,34 @@ describe("McpProcessor", () => {
       expect(logger.warn).not.toHaveBeenCalled();
     });
 
-    it("should preserve disabledTools but strip enabledTools for Factory Droid", async () => {
-      // Droid documents a per-server `disabledTools` exclusion list and no
-      // allowlist, so only `enabledTools` may be stripped.
+    it("should not strip enabledTools and disabledTools for Factory Droid", async () => {
+      // Droid documents both a per-server `enabledTools` allowlist and a
+      // `disabledTools` exclusion list (https://docs.factory.com/harness/mcp).
       const rulesyncMcp = new RulesyncMcp({
         outputRoot: testDir,
         relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
         relativeFilePath: ".mcp.json",
         fileContent: JSON.stringify({ mcpServers: {} }),
       });
+      vi.mocked(rulesyncMcp.getJson).mockReturnValue({
+        mcpServers: {
+          filtered: { command: "server", enabledTools: ["read"], disabledTools: ["write"] },
+        },
+      } as any);
 
       vi.spyOn(FactorydroidMcp, "fromRulesyncMcp").mockResolvedValue({} as FactorydroidMcp);
 
+      const logger = createMockLogger();
       const processor = new McpProcessor({
-        logger: createMockLogger(),
+        logger,
         outputRoot: testDir,
         toolTarget: "factorydroid",
       });
 
       await processor.convertRulesyncFilesToToolFiles([rulesyncMcp]);
 
-      expect(rulesyncMcp.stripMcpServerFields).toHaveBeenCalledWith(["enabledTools"]);
+      expect(rulesyncMcp.stripMcpServerFields).toHaveBeenCalledWith([]);
+      expect(logger.warn).not.toHaveBeenCalled();
     });
   });
 
@@ -1258,6 +1321,7 @@ describe("McpProcessor", () => {
       expect(targets).toContain("bob");
       expect(targets).toContain("tabnine");
       expect(targets).toContain("codebuff"); // .agents/mcp.json
+      expect(targets).toContain("codearts-ide"); // .codeartsdoer/mcp/mcp_settings.json
     });
 
     it("should include kilo in global tool targets", () => {
@@ -1274,6 +1338,8 @@ describe("McpProcessor", () => {
       expect(globalTargets).toContain("bob"); // ~/.bob/settings/mcp.json
       expect(globalTargets).toContain("tabnine"); // ~/.tabnine/agent/settings.json
       expect(globalTargets).toContain("codebuff"); // ~/.agents/mcp.json
+      // The IDE documents only the project-scoped MCP file.
+      expect(globalTargets).not.toContain("codearts-ide");
     });
   });
 

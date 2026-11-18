@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import { GITLABDUO_DIR, GITLABDUO_MCP_FILE_NAME } from "../../constants/gitlabduo-paths.js";
-import { ValidationResult } from "../../types/ai-file.js";
 import type { McpServers } from "../../types/mcp.js";
 import { readFileContent } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
@@ -150,9 +149,24 @@ function toGitlabduoServer({
   return { type: mapped, url, ...rest };
 }
 
+/**
+ * GitLab Duo CLI reserves the MCP server name `duo` for its first-party server
+ * (gitlab-lsp v9.33.0+): a workspace, user or plugin entry named exactly `duo`
+ * (case-sensitive) is dropped with only a log line, so it would never load.
+ *
+ * @see https://gitlab.com/gitlab-org/editor-extensions/gitlab-lsp/-/commit/0572967c915465c1ac94ca38ef57676eb44e16d6
+ */
+const GITLABDUO_RESERVED_MCP_SERVER_NAME = "duo";
+
 function toGitlabduoServers(servers: McpServers, logger?: Logger): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [serverName, serverConfig] of Object.entries(servers)) {
+    if (serverName === GITLABDUO_RESERVED_MCP_SERVER_NAME) {
+      logger?.warn(
+        `GitLab Duo CLI MCP: skipping "${serverName}" because GitLab Duo CLI 9.33.0+ reserves that name for its first-party server and never loads a config entry with it. Rename the server to use it with GitLab Duo CLI.`,
+      );
+      continue;
+    }
     const converted = toGitlabduoServer({ serverName, serverConfig, logger });
     if (converted) {
       result[serverName] = converted;
@@ -245,10 +259,6 @@ export class GitlabduoMcp extends ToolMcp {
     return this.toRulesyncMcpDefault({
       fileContent: JSON.stringify({ ...others, mcpServers: servers }),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

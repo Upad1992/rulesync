@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -58,16 +58,6 @@ describe("CommandcodePermissions", () => {
       const paths = CommandcodePermissions.getSettablePaths({ global: true });
       expect(paths.relativeDirPath).toBe(SETTINGS_DIR);
       expect(paths.relativeFilePath).toBe(SETTINGS_FILE);
-    });
-  });
-
-  describe("isDeletable", () => {
-    it("is not deletable (shared settings file)", () => {
-      const permissions = CommandcodePermissions.forDeletion({
-        relativeDirPath: SETTINGS_DIR,
-        relativeFilePath: SETTINGS_FILE,
-      });
-      expect(permissions.isDeletable()).toBe(false);
     });
   });
 
@@ -1221,14 +1211,19 @@ describe("CommandcodePermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("creates an instance with empty content that is not deletable", () => {
-      const permissions = CommandcodePermissions.forDeletion({
-        relativeDirPath: SETTINGS_DIR,
-        relativeFilePath: SETTINGS_FILE,
+  describe("names that match Object.prototype members on import", () => {
+    it("imports a pattern named like a prototype member into its own entry", async () => {
+      await writeSettings({
+        testDir,
+        settings: { permissions: { allow: ["Bash(toString)"] } },
       });
-      expect(permissions.getFileContent()).toBe("{}");
-      expect(permissions.isDeletable()).toBe(false);
+
+      const permissions = await CommandcodePermissions.fromFile({ outputRoot: testDir });
+      expect(permissions.toRulesyncPermissions().getJson().permission).toEqual({
+        bash: { toString: "allow" },
+      });
+      expect(Object.hasOwn(Object.prototype.toString, "*")).toBe(false);
+      expect(Object.hasOwn(Object.prototype.toString, "toString")).toBe(false);
     });
   });
 });

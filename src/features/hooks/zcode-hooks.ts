@@ -7,7 +7,7 @@ import {
   ZCODE_HOOKS_CONFIG_KEY,
   ZCODE_HOOKS_EVENTS_KEY,
 } from "../../constants/zcode-paths.js";
-import { type AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import {
   CANONICAL_TO_ZCODE_EVENT_NAMES,
   ZCODE_HOOK_EVENTS,
@@ -18,7 +18,7 @@ import type { Logger } from "../../utils/logger.js";
 import { isRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
-  parseSharedConfig,
+  parseSharedConfigFile,
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncHooks } from "./rulesync-hooks.js";
@@ -35,20 +35,6 @@ import {
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
-
-/**
- * Single spelling of the config.json codec/policy, matching the one in
- * ZcodeMcp: fail closed on an unparseable root rather than replacing the
- * user's primary ZCode config with generated output.
- */
-function parseZcodeConfig(fileContent: string, filePath?: string): Record<string, unknown> {
-  return parseSharedConfig({
-    format: "json",
-    fileContent,
-    filePath,
-    invalidRootPolicy: "error",
-  });
-}
 
 /**
  * Drop ZCode's native `process` hooks from an `events` map before the shared
@@ -127,6 +113,22 @@ export const ZCODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
     { canonical: "statusMessage", tool: "statusMessage" },
     { canonical: "shell", tool: "shell", commandOnly: true },
   ],
+  // ZCode 3.17.1+ spells the canonical `failClosed` as a per-hook
+  // `onError: "allow" | "deny"`. Only `"deny"` changes behavior: a failed
+  // (not cancelled) PreToolUse hook then blocks the tool call. `"allow"` is the
+  // default, so `false` is omitted; on any other event, and on a background
+  // `async` hook, ZCode never consults the field, so a `true` there is dropped
+  // with a warning.
+  keywordPassthroughFields: [
+    {
+      canonical: "failClosed",
+      tool: "onError",
+      trueValue: "deny",
+      falseValue: "allow",
+      events: new Set(["preToolUse"]),
+      ignoredWhenFlags: ["async"],
+    },
+  ],
   // A `*` matcher is an explicit match-all in ZCode, equivalent to an omitted
   // matcher, so a canonical `*` exports as no matcher.
   wildcardMatcherMeansAll: true,
@@ -150,10 +152,11 @@ export class ZcodeHooks extends ToolHooks {
 
   constructor(params: AiFileParams) {
     super(params);
-    this.json = parseZcodeConfig(
-      this.fileContent ?? "{}",
-      join(this.relativeDirPath, this.relativeFilePath),
-    );
+    this.json = parseSharedConfigFile({
+      fileKey: sharedConfigFileKey(ZcodeHooks.getSettablePaths({ global: this.global })),
+      fileContent: this.fileContent ?? "{}",
+      filePath: join(this.relativeDirPath, this.relativeFilePath),
+    });
   }
 
   override isDeletable(): boolean {
@@ -203,7 +206,11 @@ export class ZcodeHooks extends ToolHooks {
     const paths = this.getSettablePaths({ global });
     const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
     const existingContent = (await readFileContentOrNull(filePath)) ?? "{}";
-    const existing = parseZcodeConfig(existingContent, filePath);
+    const existing = parseSharedConfigFile({
+      fileKey: sharedConfigFileKey(paths),
+      fileContent: existingContent,
+      filePath,
+    });
 
     const config = rulesyncHooks.getJson();
     const events = canonicalToToolHooks({
@@ -267,10 +274,6 @@ export class ZcodeHooks extends ToolHooks {
         2,
       ),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

@@ -5,7 +5,7 @@ import {
   DEEPAGENTS_GLOBAL_DIR,
   DEEPAGENTS_RULE_FILE_NAME,
 } from "../../constants/deepagents-paths.js";
-import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import { ValidationResult } from "../../types/ai-file.js";
 import { getDeepagentsRelativeDirPath } from "../../utils/deepagents.js";
 import { readFileContent } from "../../utils/file.js";
 import { RulesyncRule } from "./rulesync-rule.js";
@@ -14,12 +14,8 @@ import {
   ToolRuleForDeletionParams,
   ToolRuleFromFileParams,
   ToolRuleFromRulesyncRuleParams,
-  ToolRuleSettablePaths,
+  ToolRuleRootOnlySettablePaths,
 } from "./tool-rule.js";
-
-export type DeepagentsRuleParams = AiFileParams & {
-  root?: boolean;
-};
 
 /**
  * deepagents (dcode) loads project context only from the fixed
@@ -32,29 +28,12 @@ export type DeepagentsRuleParams = AiFileParams & {
  * @see https://github.com/langchain-ai/deepagents/blob/main/libs/code/deepagents_code/project_utils.py
  * @see https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/middleware/memory.py
  */
-export type DeepagentsRuleSettablePaths = Pick<ToolRuleSettablePaths, "root"> & {
-  root: {
-    relativeDirPath: string;
-    relativeFilePath: string;
-  };
-  nonRoot?: undefined;
-};
-
 export class DeepagentsRule extends ToolRule {
-  constructor({ fileContent, root, ...rest }: DeepagentsRuleParams) {
-    super({
-      ...rest,
-      fileContent,
-      root: root ?? false,
-    });
-  }
-
   static getSettablePaths({
     global = false,
   }: {
     global?: boolean;
-    excludeToolDir?: boolean;
-  } = {}): DeepagentsRuleSettablePaths {
+  } = {}): ToolRuleRootOnlySettablePaths {
     // dcode reads user-level context from `~/.deepagents/<agent_name>/AGENTS.md`
     // (default agent_name `agent`); the home directory is resolved by the
     // processor through outputRoot in global mode, and `DEEPAGENTS_HOME`
@@ -153,10 +132,5 @@ export class DeepagentsRule extends ToolRule {
     return { success: true, error: null };
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "deepagents",
-    });
-  }
+  protected static override readonly toolTarget = "deepagents";
 }

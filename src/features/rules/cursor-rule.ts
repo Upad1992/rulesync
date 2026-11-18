@@ -9,7 +9,11 @@ import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import type { RulesyncTargets } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { findFrontmatterBlockBounds, parseFrontmatter } from "../../utils/frontmatter.js";
+import {
+  findFrontmatterBlockBounds,
+  parseFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncRule, RulesyncRuleFrontmatter } from "./rulesync-rule.js";
 import {
   ToolRule,
@@ -17,7 +21,6 @@ import {
   ToolRuleFromFileParams,
   ToolRuleFromRulesyncRuleParams,
   ToolRuleSettablePaths,
-  buildToolPath,
 } from "./tool-rule.js";
 
 const CursorRuleFrontmatterSchema = z.object({
@@ -53,12 +56,11 @@ export class CursorRule extends ToolRule {
   static getSettablePaths(
     _options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): CursorRuleSettablePaths {
     return {
       nonRoot: {
-        relativeDirPath: buildToolPath(CURSOR_DIR, "rules", _options.excludeToolDir),
+        relativeDirPath: join(CURSOR_DIR, "rules"),
       },
     };
   }
@@ -161,9 +163,10 @@ export class CursorRule extends ToolRule {
 
   /**
    * Custom parse function for Cursor MDC files
-   * MDC files don't support quotes in YAML, so we need to handle patterns like *.ts specially
+   * MDC files don't support quotes in YAML, so we need to handle patterns like *.ts specially.
+   * Also used by Firebender, whose `.firebender/rules/*.mdc` files carry the same frontmatter.
    */
-  private static parseCursorFrontmatter(
+  static parseCursorFrontmatter(
     fileContent: string,
     filePath?: string,
   ): {
@@ -382,17 +385,12 @@ export class CursorRule extends ToolRule {
       return { success: true, error: null };
     }
 
-    const result = CursorRuleFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: CursorRuleFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   getFrontmatter(): CursorRuleFrontmatter {
@@ -403,10 +401,5 @@ export class CursorRule extends ToolRule {
     return this.body;
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "cursor",
-    });
-  }
+  protected static override readonly toolTarget = "cursor";
 }

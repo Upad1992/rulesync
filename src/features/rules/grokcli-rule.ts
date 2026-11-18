@@ -5,7 +5,7 @@ import {
   GROKCLI_RULE_FILE_NAME,
   GROKCLI_RULES_DIR_PATH,
 } from "../../constants/grokcli-paths.js";
-import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import { ValidationResult } from "../../types/ai-file.js";
 import { readFileContent } from "../../utils/file.js";
 import { RulesyncRule } from "./rulesync-rule.js";
 import {
@@ -15,10 +15,6 @@ import {
   ToolRuleFromRulesyncRuleParams,
   ToolRuleSettablePaths,
 } from "./tool-rule.js";
-
-export type GrokcliRuleParams = AiFileParams & {
-  root?: boolean;
-};
 
 /**
  * Rule generator for xAI Grok Build CLI.
@@ -48,19 +44,10 @@ export type GrokcliRuleSettablePaths = Pick<ToolRuleSettablePaths, "root"> & {
 };
 
 export class GrokcliRule extends ToolRule {
-  constructor({ fileContent, root, ...rest }: GrokcliRuleParams) {
-    super({
-      ...rest,
-      fileContent,
-      root: root ?? false,
-    });
-  }
-
   static getSettablePaths({
     global = false,
   }: {
     global?: boolean;
-    excludeToolDir?: boolean;
   } = {}): GrokcliRuleSettablePaths {
     // Project instructions live in the repository-root `AGENTS.md`; user-level
     // instructions live in `~/.grok/AGENTS.md` (the home directory is resolved
@@ -156,10 +143,5 @@ export class GrokcliRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "grokcli",
-    });
-  }
+  protected static override readonly toolTarget = "grokcli";
 }

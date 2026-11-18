@@ -1,12 +1,11 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { CommandsProcessor } from "./commands-processor.js";
 import { RulesyncCommand } from "./rulesync-command.js";
 import { TraeCommand } from "./trae-command.js";
@@ -41,7 +40,6 @@ describe("TraeCommand", () => {
       relativeFilePath,
       frontmatter: fullFrontmatter,
       body: "Review the diff.",
-      fileContent: stringifyFrontmatter("Review the diff.", fullFrontmatter),
     });
   };
 

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -77,6 +77,51 @@ describe("AntigravityIdePermissions", () => {
       );
       expect(json.permissions.deny).toContain("command(rm)");
       expect(json.permissions.ask).toContain("command");
+    });
+
+    it("keeps a ~/ path target as written and warns, since the file is shared", async () => {
+      const warn = vi.spyOn(fallbackLogger, "warn").mockImplementation(() => {});
+      const perms = await AntigravityIdePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({ read: { "~/x.txt": "deny" } }),
+      });
+
+      const json = JSON.parse(perms.getFileContent());
+      expect(json.permissions.deny).toEqual(["read_file(~/x.txt)"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("this deny may block nothing"));
+    });
+
+    it("writes canonical MCP tool categories as mcp(server/tool) targets", async () => {
+      const warn = vi.spyOn(fallbackLogger, "warn").mockImplementation(() => {});
+      const perms = await AntigravityIdePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          mcp__linter__lint: { "*": "allow" },
+          mcp__sql: { "*": "ask" },
+          mcp__github__get_issue: { "owner:foo": "allow" },
+          mcp__github__delete_repo: { "owner:foo": "deny" },
+          mcp__fs__write_: { "*": "allow" },
+          "mcp__fs__write_*": { "*": "deny" },
+          "mcp__*": { "*": "ask" },
+          "mcp__git*": { "*": "allow" },
+        }),
+        logger: fallbackLogger,
+      });
+      const json = JSON.parse(perms.getFileContent());
+      expect(json.permissions.allow).toEqual(["mcp(fs/write_)", "mcp(linter/lint)"]);
+      expect(json.permissions.ask).toEqual(["mcp", "mcp(sql/*)"]);
+      // A deny Antigravity cannot spell is widened to the tool or the server,
+      // never dropped; an allow is skipped rather than widened.
+      expect(json.permissions.deny).toEqual(["mcp(fs/*)", "mcp(github/delete_repo)"]);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('skipping mcp__github__get_issue: { "owner:foo": "allow" }'),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'widening mcp__github__delete_repo: { "owner:foo": "deny" } to mcp(github/delete_repo)',
+        ),
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("skipping mcp__git*"));
     });
 
     it("writes globs Antigravity can match: literal words or a per-word regex", async () => {
@@ -196,6 +241,28 @@ describe("AntigravityIdePermissions", () => {
       expect(json.permissions.allow).toContain("command(git)");
       expect(json.permissions.deny).toContain("unsandboxed");
     });
+
+    it("replaces stale mcp(...) and legacy mcp__ entries once an MCP category is configured", async () => {
+      const dir = join(testDir, ".antigravity");
+      await ensureDir(dir);
+      await writeFileContent(
+        join(dir, "settings.json"),
+        JSON.stringify({
+          permissions: {
+            allow: ["mcp(github/*)", "mcp__github__list", "execute_url(localhost)"],
+          },
+        }),
+      );
+
+      const perms = await AntigravityIdePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({ mcp__github__delete: { "*": "ask" } }),
+      });
+      const json = JSON.parse(perms.getFileContent());
+
+      expect(json.permissions.allow).toEqual(["execute_url(localhost)"]);
+      expect(json.permissions.ask).toEqual(["mcp(github/delete)"]);
+    });
   });
 
   describe("toRulesyncPermissions round-trip", () => {
@@ -292,6 +359,38 @@ describe("AntigravityIdePermissions", () => {
       const config = JSON.parse(perms.toRulesyncPermissions().getFileContent());
       expect(config.permission.unsandboxed).toEqual({ "npm run *": "allow" });
       expect(config.permission.execute_url).toEqual({ "example.com": "allow" });
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("generates a category named like a prototype member verbatim", async () => {
+      const perms = await AntigravityIdePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          toString: { "*": "allow", x: "deny" },
+          valueOf: { "*": "ask" },
+        }),
+        logger: fallbackLogger,
+      });
+
+      const parsed = JSON.parse(perms.getFileContent());
+      expect(parsed.permissions.allow).toEqual(["toString"]);
+      expect(parsed.permissions.ask).toEqual(["valueOf"]);
+      expect(parsed.permissions.deny).toEqual(["toString(x)"]);
+    });
+
+    it("imports a native action named like a prototype member as its own category", () => {
+      const perms = new AntigravityIdePermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".antigravity",
+        relativeFilePath: "settings.json",
+        fileContent: JSON.stringify({ permissions: { allow: ["toString", "valueOf(x)"] } }),
+      });
+
+      expect(perms.toRulesyncPermissions().getJson().permission).toEqual({
+        toString: { "*": "allow" },
+        valueOf: { x: "allow" },
+      });
     });
   });
 });

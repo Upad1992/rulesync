@@ -3,20 +3,12 @@ import { basename, dirname, join, posix, relative, sep } from "node:path";
 import { encode } from "@toon-format/toon";
 import { z } from "zod/mini";
 
-import { CODEBUDDY_LOCAL_RULE_FILE_NAME } from "../../constants/codebuddy-paths.js";
-import { CODEXCLI_PROJECT_DOC_MAX_BYTES } from "../../constants/codexcli-paths.js";
-import { CRUSH_LOCAL_RULE_FILE_NAME } from "../../constants/crush-paths.js";
 import { SKILL_FILE_NAME } from "../../constants/general.js";
-import { KIMI_CODE_PLUGIN_SYSTEM_PROMPT_MAX_BYTES } from "../../constants/plugin-paths.js";
-import { QODER_LOCAL_RULE_FILE_NAME } from "../../constants/qoder-paths.js";
-import { QWENCODE_DIR, QWENCODE_LOCAL_RULE_FILE_NAME } from "../../constants/qwencode-paths.js";
-import { REASONIX_LOCAL_RULE_FILE_NAME } from "../../constants/reasonix-paths.js";
 import {
   CURATED_RULES_FEATURE_SUBDIR,
   RULES_FEATURE_SUBDIR,
   RULESYNC_RULES_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
-import { WARP_LEGACY_RULE_FILE_NAME } from "../../constants/warp-paths.js";
 import {
   caseFoldIdentity,
   FeatureProcessor,
@@ -27,9 +19,7 @@ import {
 import type { FeatureOptions } from "../../types/features.js";
 import { Language, appendLanguageBlock, stripLanguageBlock } from "../../types/language.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
-import { TOOL_DISPLAY } from "../../types/tool-display.js";
 import { ToolFile } from "../../types/tool-file.js";
-import { rulesProcessorToolTargetTuple } from "../../types/tool-target-tuples.js";
 import { ToolTarget } from "../../types/tool-targets.js";
 import { stripControlCharacters } from "../../utils/control-characters.js";
 import { formatError } from "../../utils/error.js";
@@ -45,119 +35,95 @@ import {
   toPosixPath,
 } from "../../utils/file.js";
 import { type Logger, warnOnceWithFallback } from "../../utils/logger.js";
-import { AgentsmdCommand } from "../commands/agentsmd-command.js";
 import { CommandsProcessor } from "../commands/commands-processor.js";
-import { KiloMcp } from "../mcp/kilo-mcp.js";
-import { MimocodeMcp } from "../mcp/mimocode-mcp.js";
-import { OpencodeMcp } from "../mcp/opencode-mcp.js";
-import { AgentsmdSkill } from "../skills/agentsmd-skill.js";
-import { RovodevSkill } from "../skills/rovodev-skill.js";
 import { RulesyncSkill } from "../skills/rulesync-skill.js";
 import { SkillsProcessor } from "../skills/skills-processor.js";
-import { AgentsmdSubagent } from "../subagents/agentsmd-subagent.js";
-import { QwencodeSubagent } from "../subagents/qwencode-subagent.js";
-import { RovodevSubagent } from "../subagents/rovodev-subagent.js";
 import { SubagentsProcessor } from "../subagents/subagents-processor.js";
-import { AgentsMdRule } from "./agentsmd-rule.js";
-import { AiassistantRule } from "./aiassistant-rule.js";
-import { AmpRule } from "./amp-rule.js";
-import { AntigravityCliRule } from "./antigravity-cli-rule.js";
-import { AntigravityIdeRule } from "./antigravity-ide-rule.js";
-import { AntigravityPluginRule } from "./antigravity-plugin-rule.js";
-import { AugmentcodeLegacyRule } from "./augmentcode-legacy-rule.js";
-import { AugmentcodePluginRule } from "./augmentcode-plugin-rule.js";
-import { AugmentcodeRule } from "./augmentcode-rule.js";
-import { BobRule } from "./bob-rule.js";
 import { ClaudecodeLanguageSettings } from "./claudecode-language-settings.js";
-import { ClaudecodeLegacyRule } from "./claudecode-legacy-rule.js";
-import { ClaudecodeRule } from "./claudecode-rule.js";
-import { ClineRule } from "./cline-rule.js";
-import { CodeartsCliRule } from "./codearts-cli-rule.js";
-import { CodebuddyRule } from "./codebuddy-rule.js";
-import { CodebuffRule } from "./codebuff-rule.js";
-import { CodewhaleRule } from "./codewhale-rule.js";
-import { CodexcliRule, readCodexcliProjectDocMaxBytes } from "./codexcli-rule.js";
-import { CommandcodeRule } from "./commandcode-rule.js";
-import { ContinueRule } from "./continue-rule.js";
-import { CopilotRule } from "./copilot-rule.js";
-import { CopilotcliRule } from "./copilotcli-rule.js";
-import { CortexcodeRule } from "./cortexcode-rule.js";
-import { CrushRule } from "./crush-rule.js";
-import { CursorRule } from "./cursor-rule.js";
-import { DeepagentsRule } from "./deepagents-rule.js";
-import { DevinPluginRule } from "./devin-plugin-rule.js";
-import { DevinRule } from "./devin-rule.js";
-import { DshRule } from "./dsh-rule.js";
-import { FactorydroidRule } from "./factorydroid-rule.js";
-import { GitlabduoRule } from "./gitlabduo-rule.js";
-import { GooseRule } from "./goose-rule.js";
-import { GrokcliRule } from "./grokcli-rule.js";
-import { HermesagentRule } from "./hermesagent-rule.js";
-import { JunieRule } from "./junie-rule.js";
-import { KiloRule } from "./kilo-rule.js";
-import { KimiCodePluginRule } from "./kimi-code-plugin-rule.js";
-import { KimiCodeRule } from "./kimi-code-rule.js";
-import { KiroCliRule } from "./kiro-cli-rule.js";
-import { KiroIdeRule } from "./kiro-ide-rule.js";
-import { KiroRule } from "./kiro-rule.js";
-import { MimocodeRule } from "./mimocode-rule.js";
-import { MusecodeRule } from "./musecode-rule.js";
-import { OmpRule } from "./omp-rule.js";
-import { OpenclawRule } from "./openclaw-rule.js";
-import { OpenCodeRule } from "./opencode-rule.js";
-import { PiRule } from "./pi-rule.js";
-import { PoolRule } from "./pool-rule.js";
-import { QoderRule } from "./qoder-rule.js";
-import { QwencodeRule } from "./qwencode-rule.js";
-import { ReasonixRule } from "./reasonix-rule.js";
-import { ReplitRule } from "./replit-rule.js";
-import { RooRule } from "./roo-rule.js";
-import { RovodevRule } from "./rovodev-rule.js";
-import { RulesyncRule } from "./rulesync-rule.js";
-import { TabnineRule } from "./tabnine-rule.js";
-import { TaktRule } from "./takt-rule.js";
 import {
-  ToolRule,
-  ToolRuleExtraFixedFile,
-  ToolRuleForDeletionParams,
-  ToolRuleFromFileParams,
-  ToolRuleFromRulesyncRuleParams,
-  ToolRuleNestedFilePatterns,
-  ToolRuleSettablePaths,
-  ToolRuleSettablePathsGlobal,
-} from "./tool-rule.js";
-import { TraeRule } from "./trae-rule.js";
-import { VibeRule } from "./vibe-rule.js";
-import { WarpRule } from "./warp-rule.js";
-import { ZcodeRule } from "./zcode-rule.js";
-import { ZedRule } from "./zed-rule.js";
-import { ZoocodeRule } from "./zoocode-rule.js";
-
-export type RulesProcessorToolTarget = (typeof rulesProcessorToolTargetTuple)[number];
-export const RulesProcessorToolTargetSchema = z.enum(rulesProcessorToolTargetTuple);
-
-/**
- * Normalizes a relative directory path for comparison: POSIX separators, no
- * `./` segments and no trailing slash, with the current directory as `"."`
- * (so `"./"`, `"a/"` and `"a"` compare the way `join()` groups them).
- */
-const normalizeRelativeDir = (dir: string): string =>
-  posix.normalize(toPosixPath(dir)).replace(/\/+$/, "") || ".";
+  normalizeRelativeDir,
+  toInstructionBudgetFile,
+  findProjectInstructionBudgetFindings,
+} from "./instruction-budget.js";
+import { RulesyncRule, formatRulePaths } from "./rulesync-rule.js";
+import {
+  RulesProcessorToolTarget,
+  RulesProcessorToolTargetSchema,
+  RuleDiscoveryMode,
+  RuleCollisionPolicy,
+  ToolRuleFactory,
+  toolRuleFactories,
+} from "./tool-rule-factories.js";
+import { ToolRule, ToolRuleExtraFixedFile } from "./tool-rule.js";
 
 /** A tool rule's output path relative to its output root, for comparison. */
 const toolOutputPath = (toolRule: ToolRule): string =>
   posix.join(normalizeRelativeDir(toolRule.getRelativeDirPath()), toolRule.getRelativeFilePath());
 
-const formatRulePaths = (rules: RulesyncRule[]): string =>
-  rules.map((r) => join(r.getRelativeDirPath(), r.getRelativeFilePath())).join(", ");
+/**
+ * The leading `---` frontmatter block (with its closing delimiter line) that
+ * every one of `contents` starts with, or `undefined` when one lacks it or the
+ * blocks differ.
+ */
+const findSharedLeadingFrontmatter = (contents: string[]): string | undefined => {
+  const blocks = contents.map(
+    (content) => /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(content)?.[0],
+  );
+  const first = blocks[0];
+  return first !== undefined && blocks.every((block) => block === first) ? first : undefined;
+};
 
 /**
- * Rule discovery mode for determining how non-root rules are referenced.
- * - `auto`: Tool auto-discovers rules in a directory, no reference section needed
- * - `toon`: Tool requires explicit references using TOON format
- * - `claudecode-legacy`: Uses Claude Code specific reference format (legacy mode only)
+ * Whether a group of rules colliding on one output path is composed into one
+ * file, and the frontmatter block the composed file keeps, if any.
  */
-type RuleDiscoveryMode = "auto" | "toon" | "claudecode-legacy";
+const decideRuleComposition = ({
+  group,
+  collisionPolicy,
+}: {
+  group: RuleConversion[];
+  collisionPolicy: RuleCollisionPolicy;
+}): { shouldCompose: boolean; sharedRootFrontmatter: string | undefined } => {
+  const contents = group.map(({ toolRule }) => toolRule.getFileContent());
+  const allGeneratedRulesAreRoots = group.every(({ toolRule }) => toolRule.isRoot());
+  // Composition is only structure-preserving when every fragment is plain
+  // Markdown. An adapter may prepend a frontmatter block to some outputs
+  // (Amp gates non-root files on a leading `globs:` block); concatenating
+  // such a fragment would bury its block mid-body where the tool no longer
+  // reads it, so those groups fall through to preserve-or-reject instead.
+  const allFragmentsArePlain = contents.every((content) => !/^---\r?\n/.test(content));
+  // A root file that an adapter always writes with the same fixed
+  // frontmatter (Antigravity's plugin `rules/AGENTS.md`) composes too: the
+  // block is kept once at the top and only the bodies are concatenated.
+  const sharedRootFrontmatter = allGeneratedRulesAreRoots
+    ? findSharedLeadingFrontmatter(contents)
+    : undefined;
+  const shouldCompose =
+    ((collisionPolicy === "fold" || collisionPolicy === "compose" || allGeneratedRulesAreRoots) &&
+      allFragmentsArePlain) ||
+    sharedRootFrontmatter !== undefined;
+  return { shouldCompose, sharedRootFrontmatter };
+};
+
+/**
+ * Concatenate colliding rule fragments. With `sharedFrontmatter` (the block
+ * every fragment starts with), the block is stripped from each fragment and
+ * written once at the top.
+ */
+const composeRuleFragments = ({
+  contents,
+  sharedFrontmatter,
+}: {
+  contents: string[];
+  sharedFrontmatter: string | undefined;
+}): string => {
+  const merged = contents
+    .map((content) => content.slice(sharedFrontmatter?.length ?? 0).trim())
+    .filter((content) => content.length > 0)
+    .join("\n\n");
+  return sharedFrontmatter === undefined ? merged : `${sharedFrontmatter}${merged}\n`;
+};
+
 const RulesFeatureOptionsSchema = z.looseObject({
   ruleDiscoveryMode: z.optional(z.enum(["none", "explicit"])),
   includeLocalRoot: z.optional(z.boolean()),
@@ -188,1306 +154,31 @@ const resolveRuleDiscoveryMode = ({
   return parsed.data.ruleDiscoveryMode === "none" ? "auto" : "toon";
 };
 
-const IncludeLocalRootSchema = z.looseObject({
-  includeLocalRoot: z.optional(z.boolean()),
-});
+type BooleanRulesOptionKey = "includeLocalRoot" | "includeRoot";
 
-const resolveIncludeLocalRoot = (options?: FeatureOptions): boolean => {
+/** Resolve a boolean rules feature option that defaults to `true`. */
+const resolveBooleanRulesOption = ({
+  options,
+  key,
+}: {
+  options?: FeatureOptions;
+  key: BooleanRulesOptionKey;
+}): boolean => {
   if (!options) return true;
-  const parsed = IncludeLocalRootSchema.safeParse(options);
+  const parsed = z.looseObject({ [key]: z.optional(z.boolean()) }).safeParse(options);
   if (!parsed.success) {
     throw new Error(
       `Invalid options for rules feature: ${parsed.error.message}. ` +
-        "`includeLocalRoot` must be a boolean.",
+        `\`${key}\` must be a boolean.`,
     );
   }
-  return parsed.data.includeLocalRoot ?? true;
+  return parsed.data[key] ?? true;
 };
 
-const IncludeRootSchema = z.looseObject({
-  includeRoot: z.optional(z.boolean()),
-});
-
-const resolveIncludeRoot = (options?: FeatureOptions): boolean => {
-  if (!options) return true;
-  const parsed = IncludeRootSchema.safeParse(options);
-  if (!parsed.success) {
-    throw new Error(
-      `Invalid options for rules feature: ${parsed.error.message}. ` +
-        "`includeRoot` must be a boolean.",
-    );
-  }
-  return parsed.data.includeRoot ?? true;
-};
-
-/**
- * Type for command class that provides settable paths.
- */
-type CommandClassType = {
-  getSettablePaths: (options?: { global?: boolean }) => {
-    relativeDirPath: string;
-  };
-};
-
-/**
- * Type for subagent class that provides settable paths.
- */
-type SubagentClassType = {
-  getSettablePaths: (options?: { global?: boolean }) => {
-    relativeDirPath: string;
-  };
-};
-
-/**
- * Type for skill class that can be used to build skill list.
- */
-type SkillClassType = {
-  isTargetedByRulesyncSkill: (rulesyncSkill: RulesyncSkill) => boolean;
-  getSettablePaths: (options?: { global?: boolean }) => {
-    relativeDirPath: string;
-  };
-};
-
-/**
- * Configuration for additional convention paths embedded in the root rule (e.g. AGENTS.md).
- * Used for simulated features and for native subagents/skills when `ruleDiscoveryMode` is `toon`.
- */
-type AdditionalConventionsConfig = {
-  /** Command feature configuration */
-  commands?: {
-    commandClass: CommandClassType;
-  };
-  /** Subagent feature configuration */
-  subagents?: {
-    subagentClass: SubagentClassType;
-  };
-  /** Skill feature configuration */
-  skills?: {
-    skillClass: SkillClassType;
-    /** Whether skills are only supported in global mode */
-    globalOnly?: boolean;
-  };
-};
-
-/**
- * Integration contract that lets the rules feature register non-root rule paths
- * into an MCP-owned shared config without knowing its file format. The MCP feature
- * (kilo.jsonc, opencode.json) implements `fromInstructions`.
- */
-type McpInstructionsRegistrar = {
-  fromInstructions(params: {
-    outputRoot?: string;
-    instructions: string[];
-    validate?: boolean;
-    global?: boolean;
-    logger?: Logger;
-  }): Promise<ToolFile | null>;
-};
-
-/**
- * Whether `candidate` is `base` itself or a class that extends it.
- *
- * Class-identity dispatch (`factory.class === Base`) is subclass-blind: a target
- * whose adapter merely narrows another one — `ZoocodeRule extends RooRule` — fails
- * a strict `===` and silently falls through. That is how `zoocode` ended up
- * declaring `localRootMode: "separate-local-file"` while never emitting
- * `AGENTS.local.md`, in both directions and without a warning.
- */
-function isClassOrSubclassOf({ candidate, base }: { candidate: object; base: object }): boolean {
-  return candidate === base || Object.prototype.isPrototypeOf.call(base, candidate);
-}
-
-type LocalRootMode = "separate-local-file" | "append-to-root";
-type RuleCollisionPolicy = "compose" | "fold" | "preserve";
 type RuleConversion = {
   toolRule: ToolRule;
   rulesyncRule: RulesyncRule;
 };
-
-/**
- * Factory entry for each tool rule class.
- * Stores the class reference and metadata for a tool.
- */
-type ToolRuleFactory = {
-  class: {
-    isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean;
-    fromRulesyncRule(params: ToolRuleFromRulesyncRuleParams): ToolRule;
-    fromFile(params: ToolRuleFromFileParams): Promise<ToolRule>;
-    forDeletion(params: ToolRuleForDeletionParams): ToolRule;
-    getSettablePaths(options?: {
-      global?: boolean;
-    }): ToolRuleSettablePaths | ToolRuleSettablePathsGlobal;
-    /**
-     * When present, this tool mirrors its generated root rule to a project-root
-     * `AGENTS.md` (project scope only). Presence of this single method — not a
-     * separate `meta` flag — is the source of truth for "this tool mirrors": it
-     * returns one contract that bundles the mirror's generation and deletion so
-     * the two cannot drift out of symmetry (a tool cannot define one without the
-     * other). See {@link RovodevRule.getRootMirror}.
-     */
-    getRootMirror?(): {
-      getMirrorFiles(params: {
-        outputRoot: string;
-        rootRule: ToolRule;
-        content: string;
-      }): ToolRule[];
-      /** Both globs relative to the project root, which the processor passes as `cwd`. */
-      getMirrorDeletionGlobs(): {
-        primaryGlob: string;
-        mirrorGlob: string;
-      };
-    };
-    /**
-     * Override where the `separate-local-file` glob points when the tool writes
-     * its local file outside its root dir. Used for both import and deletion.
-     * Relative to the project root, which the processor passes as `cwd`.
-     * See {@link RovodevRule.getLocalRootFileGlob}.
-     */
-    getLocalRootFileGlob?(params: { fileName: string }): string;
-    /**
-     * Extra fixed-path files this tool manages beyond the root and non-root
-     * rules (e.g. Pi's `APPEND_SYSTEM.md` system-prompt file). The RulesProcessor
-     * enumerates these on import and deletion so they round-trip and stale files
-     * are cleaned up when no rule targets them. See {@link PiRule.getExtraFixedFiles}.
-     */
-    getExtraFixedFiles?(params: { global?: boolean }): ToolRuleExtraFixedFile[];
-    /**
-     * Non-root rules a tool emits in global mode even though it has no global
-     * non-root path, because the rule opts into a surface of its own that has
-     * a home-directory scope. See {@link FactorydroidRule.isEmittedAsGlobalNonRootRule}.
-     */
-    isEmittedAsGlobalNonRootRule?(rulesyncRule: RulesyncRule): boolean;
-    /**
-     * Patterns for rule files this tool discovers by glob rather than at a fixed
-     * path, used when the tool's scoping mechanism is the same file name repeated
-     * in subdirectories (the AGENTS.md standard's nested files). Import-only:
-     * the matches are hand-authored files outside any rulesync-owned directory,
-     * so enumerating them for `--delete` would sweep away work rulesync never
-     * wrote. See {@link AgentsMdRule.getNestedFilePatterns}.
-     */
-    getNestedFilePatterns?(): ToolRuleNestedFilePatterns;
-  };
-  meta: {
-    /** File extension for the rule file */
-    extension: "md" | "mdc";
-    /**
-     * Whether this tool supports project mode. Defaults to `true`; set it to
-     * `false` for a global-only target whose project files another target
-     * already writes (e.g. Codebuff reads the `agentsmd` target's `AGENTS.md`).
-     */
-    supportsProject?: boolean;
-    /** Whether this tool supports global (user scope) mode */
-    supportsGlobal: boolean;
-    /** How non-root rules are discovered or referenced */
-    ruleDiscoveryMode: RuleDiscoveryMode;
-    /**
-     * Default discovery mode in global mode, when it differs from
-     * `ruleDiscoveryMode` (e.g. the global non-root directory is auto-loaded
-     * while the project one is referenced from the root file).
-     */
-    ruleDiscoveryModeGlobal?: RuleDiscoveryMode;
-    /**
-     * The global non-root directory is shared with files rulesync did not
-     * write and is read only at its top level by the tool (e.g. Antigravity's
-     * `~/.gemini/config/rules/`). Global import then scans only top-level
-     * files and skips an unreadable one with a warning instead of failing.
-     */
-    sharedGlobalNonRootDir?: boolean;
-    /**
-     * Glob (relative to the non-root directory) that import scans instead of
-     * `**\/*.<extension>`, for a tool that reads its rules directory only at
-     * the top level or also accepts another extension (e.g. oh-my-pi's
-     * `.omp/rules/*.{md,mdc}`). Deletion keeps the default glob, so files
-     * rulesync never writes (another extension) are left alone and nested
-     * files from earlier generations are still cleaned up.
-     */
-    nonRootImportGlob?: string;
-    /** Configuration for additional convention paths in the root rule */
-    additionalConventions?: AdditionalConventionsConfig;
-    /** Whether to create a separate rule file for additional conventions instead of prepending to root */
-    createsSeparateConventionsRule?: boolean;
-    /** How rules that resolve to the same output path are handled. */
-    collisionPolicy?: RuleCollisionPolicy;
-    /**
-     * MCP feature that registers non-root rule paths into its shared config's
-     * `instructions` key (project scope only); set when the tool does not
-     * auto-load non-root rules. The root rule is auto-loaded and never registered.
-     */
-    mcpInstructionsRegistrar?: McpInstructionsRegistrar;
-    /**
-     * Whether the registrar also runs in global mode (the tool reads
-     * `instructions` from its global config too, e.g. OpenCode's
-     * `~/.config/opencode/opencode.json`). Off by default: some tools
-     * auto-discover their global non-root directory (Kilo) and registering
-     * there would be wrong.
-     */
-    mcpInstructionsRegistrarGlobal?: boolean;
-    /** How a `localRoot: true` rule is materialized. Defaults to `append-to-root`. */
-    localRootMode?: LocalRootMode;
-    /** File name for the `separate-local-file` local-root file. */
-    localRootFileName?: string;
-    /**
-     * Default byte budget the tool reads across the project instruction files
-     * on one root-to-cwd chain before silently dropping the rest (Codex CLI's
-     * `project_doc_max_bytes`, or the size past which Kimi Code ignores a
-     * plugin's `SYSTEM.md`). Project scope only; generation warns when a
-     * generated chain exceeds `bytes`, appending the tool-specific `remedy`.
-     * When the tool lets a project raise the budget in its own config,
-     * `readConfiguredBytes` returns that value (or `undefined` when unset), and
-     * it replaces `bytes`; `configuredSource` names where it came from.
-     * `defaultLimitHint` is appended only when the default budget was used,
-     * e.g. to point out a budget set somewhere rulesync does not read.
-     */
-    projectInstructionBudget?: {
-      bytes: number;
-      remedy: string;
-      readConfiguredBytes?: (outputRoot: string) => Promise<number | undefined>;
-      configuredSource?: string;
-      defaultLimitHint?: string;
-    };
-  };
-};
-
-/**
- * Factory Map mapping tool targets to their rule factories.
- * Using Map to preserve insertion order for consistent iteration.
- */
-export const toolRuleFactories = new Map<RulesProcessorToolTarget, ToolRuleFactory>([
-  [
-    "agentsmd",
-    {
-      class: AgentsMdRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "toon",
-        collisionPolicy: "compose",
-        additionalConventions: {
-          commands: { commandClass: AgentsmdCommand },
-          subagents: { subagentClass: AgentsmdSubagent },
-          skills: { skillClass: AgentsmdSkill },
-        },
-      },
-    },
-  ],
-  [
-    "aiassistant",
-    {
-      class: AiassistantRule,
-      meta: {
-        extension: "md",
-        // JetBrains AI Assistant auto-discovers every `.md` in `.aiassistant/rules/`,
-        // so no reference section is injected into a root file (there is no root).
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "amp",
-    {
-      class: AmpRule,
-      meta: {
-        // Amp reads a root `AGENTS.md` (project root or `~/.config/amp/AGENTS.md`
-        // global) and `.agents/memories/*.md` non-root files referenced via TOON.
-        // Subtree AGENTS.md files support `globs:` frontmatter and `@`-imports.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        collisionPolicy: "compose",
-      },
-    },
-  ],
-  [
-    "antigravity-cli",
-    {
-      class: AntigravityCliRule,
-      meta: {
-        // The Antigravity CLI loads non-root rules by itself — trigger-tagged
-        // files under `.agents/rules/` (project) and `~/.gemini/config/rules/`
-        // (global) — so the root context file (project `AGENTS.md`, global
-        // `~/.gemini/GEMINI.md`) carries no reference block, matching
-        // `antigravity-ide`, which writes the same project files. A
-        // directory-scoped rule (`agentsmd.subprojectPath`) goes to
-        // `<dir>/.agents/rules/` (imported back via `getNestedFilePatterns`).
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        sharedGlobalNonRootDir: true,
-      },
-    },
-  ],
-  [
-    "antigravity-ide",
-    {
-      class: AntigravityIdeRule,
-      meta: {
-        // The Antigravity IDE auto-discovers rule files under `.agents/rules/`
-        // (project) and `~/.gemini/config/rules/` (global, shared with
-        // `antigravity-cli`), so no reference section is needed in the root rule.
-        // A directory-scoped rule (`agentsmd.subprojectPath`) goes to
-        // `<dir>/.agents/rules/` (imported back via `getNestedFilePatterns`).
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        sharedGlobalNonRootDir: true,
-      },
-    },
-  ],
-  [
-    "antigravity-plugin",
-    {
-      class: AntigravityPluginRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "augmentcode",
-    {
-      class: AugmentcodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "augmentcode-legacy",
-    {
-      class: AugmentcodeLegacyRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "toon",
-      },
-    },
-  ],
-  [
-    "augmentcode-plugin",
-    {
-      // Auggie plugin bundles ship rules in `<plugin>/rules/`, read with the
-      // same parser as `.augment/rules/`. https://docs.augmentcode.com/cli/plugins
-      class: AugmentcodePluginRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "bob",
-    {
-      class: BobRule,
-      meta: {
-        // IBM Bob reads a root `AGENTS.md` (project) / `~/.bob/AGENTS.md`
-        // (global) plus non-root `.bob/rules/*.md` files that are loaded
-        // automatically (recursively, in alphabetical order) as plain
-        // Markdown without frontmatter, so no reference section is needed.
-        // https://bob.ibm.com/docs/ide/configuration/rules
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "claudecode",
-    {
-      class: ClaudecodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        localRootMode: "separate-local-file",
-        localRootFileName: "CLAUDE.local.md",
-      },
-    },
-  ],
-  [
-    "claudecode-legacy",
-    {
-      class: ClaudecodeLegacyRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "claudecode-legacy",
-        localRootMode: "separate-local-file",
-        localRootFileName: "CLAUDE.local.md",
-      },
-    },
-  ],
-  [
-    "cline",
-    {
-      class: ClineRule,
-      meta: {
-        // Project scope writes `.clinerules/*.md`; global scope writes the
-        // cross-tool `~/.agents/AGENTS.md` root (Cline CLI v3.0.15+) plus
-        // non-root modular rules under `~/Documents/Cline/Rules/`.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "codearts-cli",
-    {
-      class: CodeartsCliRule,
-      meta: {
-        // CodeArts CLI walks up from the working directory and stops at the
-        // first of `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md`, so the project
-        // root file is the only project instruction surface. Its user-level
-        // file is `~/.codeartsdoer/AGENTS.md`. There is no modular rules
-        // directory on the CLI side (`.codeartsdoer/rule/*.mdc` belongs to the
-        // IDE's cloud rule center), so topic rules fold into the root file.
-        // https://support.huaweicloud.com/usermanual-cli/codeartsagent_cli_0001.html
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "codebuddy",
-    {
-      class: CodebuddyRule,
-      meta: {
-        // CodeBuddy Code's configuration surface mirrors Claude Code closely:
-        // a root `CODEBUDDY.md` (project) / `~/.codebuddy/CODEBUDDY.md`
-        // (global) plus non-root `.codebuddy/rules/*.md` files auto-loaded
-        // without needing a reference section. Non-root frontmatter also
-        // supports `description` and `alwaysApply`, closer to the Cursor rule
-        // model than Claude Code's `paths`-only schema.
-        // https://www.codebuddy.ai/docs/cli/memory
-        // https://www.codebuddy.ai/docs/cli/codebuddy-dir
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        localRootMode: "separate-local-file",
-        localRootFileName: CODEBUDDY_LOCAL_RULE_FILE_NAME,
-      },
-    },
-  ],
-  [
-    "codebuff",
-    {
-      class: CodebuffRule,
-      meta: {
-        // Codebuff (Freebuff) reads the project-root AGENTS.md, which the
-        // `agentsmd` target already writes, so this target is global-only: it
-        // writes the home-directory `~/.AGENTS.md`, the highest-priority name
-        // the SDK's `loadUserKnowledgeFiles` looks for. There is no user-level
-        // rules directory, so non-root rules fold into that single file.
-        // https://github.com/CodebuffAI/freebuff/blob/main/sdk/src/run-state.ts
-        extension: "md",
-        supportsProject: false,
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "codewhale",
-    {
-      class: CodewhaleRule,
-      meta: {
-        // Codewhale auto-loads the workspace-root AGENTS.md followed by every
-        // `.codewhale/rules/*.md` file. The user-scoped `~/.codewhale/AGENTS.md`
-        // has no companion rules directory, so global non-root rules fold into
-        // that single file.
-        // https://github.com/Hmbown/Codewhale/blob/main/docs/CONFIGURATION.md
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "codexcli",
-    {
-      class: CodexcliRule,
-      meta: {
-        // Codex CLI reads the global `~/.codex/AGENTS.md` plus one `AGENTS.md`
-        // per directory from the project root down to the cwd, so a
-        // directory-scoped rule is emitted as a nested `<subprojectPath>/AGENTS.md`
-        // while plain topic rules fold into the root file (mirrors pool/vibe).
-        // The project files on one chain share `project_doc_max_bytes`
-        // (32 KiB by default, `codex-rs/config/defaults.toml`); Codex drops
-        // everything past it without a warning, so generation warns instead.
-        // https://learn.chatgpt.com/docs/agent-configuration/agents-md
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-        projectInstructionBudget: {
-          bytes: CODEXCLI_PROJECT_DOC_MAX_BYTES,
-          remedy:
-            "Codex CLI stops reading project `AGENTS.md` files once their combined size on the root-to-working-directory chain reaches `project_doc_max_bytes` (32 KiB by default) and silently drops the rest. " +
-            "Move directory-scoped rules into nested `AGENTS.md` files with `agentsmd.subprojectPath` (or `deriveSubprojectPathFromGlobs: true` in rulesync.jsonc), trim the rules, or raise `project_doc_max_bytes` in `.codex/config.toml` (Codex reads that file only if the project is trusted).",
-          readConfiguredBytes: readCodexcliProjectDocMaxBytes,
-          configuredSource:
-            "`project_doc_max_bytes` in `.codex/config.toml` (honored only if the project is trusted)",
-          defaultLimitHint:
-            "Rulesync does not read `~/.codex/config.toml`; ignore this warning if you already raised `project_doc_max_bytes` there.",
-        },
-      },
-    },
-  ],
-  [
-    "commandcode",
-    {
-      class: CommandcodeRule,
-      meta: {
-        // Command Code reads the project-root AGENTS.md and the user
-        // ~/.commandcode/AGENTS.md; nested AGENTS.md files are only pulled in
-        // lazily, so topic rules fold into the root file (mirrors codexcli).
-        // https://commandcode.ai/docs/memory
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "continue",
-    {
-      class: ContinueRule,
-      meta: {
-        // Continue reads the workspace-root `AGENTS.md` plus `.continue/rules/*.md`
-        // files (frontmatter `globs` / `regex` / `alwaysApply`), and the same
-        // rules directory under `~/.continue/` in global scope. It has no
-        // user-level `AGENTS.md`, so the global root rule is written to
-        // `~/.continue/rules/AGENTS.md` (mirrors the roo entry below).
-        // https://docs.continue.dev/customize/deep-dives/rules
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "copilot",
-    {
-      class: CopilotRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "copilotcli",
-    {
-      class: CopilotcliRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "cortexcode",
-    {
-      class: CortexcodeRule,
-      meta: {
-        // Cortex Code CLI documents only the project-root AGENTS.md; it has
-        // no modular rules directory and no user-scoped rule file, so topic
-        // rules fold into the root file (mirrors codexcli) and the target is
-        // project-only.
-        // https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "crush",
-    {
-      class: CrushRule,
-      meta: {
-        // Crush reads project context from the root CRUSH.md and a global
-        // rules file from ~/.config/crush/CRUSH.md. It has no modular
-        // non-root instructions directory, so topic rules fold into the root
-        // file (mirrors zcode/codexcli).
-        //
-        // `defaultContextPaths` also lists `CRUSH.local.md` (and its lower- and
-        // title-cased spellings) next to the shared file, so a localRoot rule
-        // gets its own file instead of being folded in — folding a personal
-        // rule into the committed `CRUSH.md` is what the separate file exists
-        // to avoid.
-        // https://github.com/charmbracelet/crush/blob/main/internal/config/config.go
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-        localRootMode: "separate-local-file",
-        localRootFileName: CRUSH_LOCAL_RULE_FILE_NAME,
-      },
-    },
-  ],
-  [
-    "cursor",
-    {
-      class: CursorRule,
-      meta: {
-        extension: "mdc",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "deepagents",
-    {
-      class: DeepagentsRule,
-      meta: {
-        extension: "md",
-        // dcode reads user-level context from `~/.deepagents/<agent_name>/AGENTS.md`.
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "factorydroid",
-    {
-      class: FactorydroidRule,
-      meta: {
-        // Factory Droid commands, subagents (custom droids), and skills are all
-        // native now, so no simulated additionalConventions are needed (mirrors
-        // how native tools like claudecode are wired). Non-root rules are still
-        // referenced via TOON.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        collisionPolicy: "compose",
-      },
-    },
-  ],
-  [
-    "goose",
-    {
-      // Goose reads the `.goosehints` / `AGENTS.md` instruction-file family
-      // natively (working dir up to the repo root plus nested directories it
-      // touches) but never the `.goose/memories/` tree, which belongs to the
-      // separate Memory extension and is not auto-loaded as session context.
-      // Non-root rules are therefore folded into the single root `.goosehints`
-      // below (same handling as warp / deepagents).
-      class: GooseRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "hermesagent",
-    {
-      class: HermesagentRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "gitlabduo",
-    {
-      // GitLab Duo CLI reads one custom rules file, `.gitlab/duo/chat-rules.md`
-      // in the project and `~/.gitlab/duo/chat-rules.md` for the user, with no
-      // rules directory, so topic rules fold into it.
-      // https://docs.gitlab.com/user/duo_agent_platform/customize/custom_rules/
-      class: GitlabduoRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "grokcli",
-    {
-      // Grok Build reads the AGENTS.md instruction-file family natively
-      // (root/subdir AGENTS.md + global ~/.grok/AGENTS.md) and scans a rules
-      // directory beside it — `.grok/rules/` per project directory and
-      // `~/.grok/rules/` in the home scope — so a topic rule keeps its own file
-      // rather than being folded into the root one.
-      class: GrokcliRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "junie",
-    {
-      // Junie CLI resolves project guidelines first-match-wins:
-      // `.junie/AGENTS.md` → root `AGENTS.md` combined with `.junie/playbook.md`
-      // and every `.junie/rules/*.md` → legacy guidelines. The multi-file
-      // branch is unreachable while `.junie/AGENTS.md` exists, because that
-      // file is used exclusively and nothing is combined with it. Junie also
-      // reads no `.junie/memories/` directory and documents no `@`-reference
-      // mechanism, so non-root rules are folded into the single root
-      // `.junie/AGENTS.md` (same handling as warp / deepagents). See the
-      // JunieRule class doc for the full rationale.
-      class: JunieRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "kilo",
-    {
-      class: KiloRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        mcpInstructionsRegistrar: KiloMcp,
-        collisionPolicy: "compose",
-      },
-    },
-  ],
-  [
-    "kimi-code",
-    {
-      class: KimiCodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "kimi-code-plugin",
-    {
-      // A Kimi Code plugin contributes one instructions file, `<plugin>/SYSTEM.md`
-      // (referenced by `systemPromptPath`), so topic rules fold into it. Kimi
-      // ignores the whole file once it exceeds 32 KiB, so generation warns.
-      // https://github.com/MoonshotAI/kimi-code/blob/%40moonshot-ai/kimi-code%402.1.1/docs/en/customization/plugins.md
-      class: KimiCodePluginRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-        projectInstructionBudget: {
-          bytes: KIMI_CODE_PLUGIN_SYSTEM_PROMPT_MAX_BYTES,
-          remedy:
-            "Kimi Code ignores a plugin's `systemPromptPath` file larger than 32 KiB entirely, reporting it only in the plugin diagnostics, so none of these rules would reach the model. " +
-            "Trim the rules or exclude some from the `kimi-code-plugin` target.",
-        },
-      },
-    },
-  ],
-  [
-    "kiro",
-    {
-      class: KiroRule,
-      meta: {
-        extension: "md",
-        // Global steering lives under `~/.kiro/steering/` (root rule as
-        // `product.md`), per the `KIRO_HOME` layout.
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-      },
-    },
-  ],
-  [
-    "kiro-cli",
-    {
-      class: KiroCliRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-      },
-    },
-  ],
-  [
-    "kiro-ide",
-    {
-      class: KiroIdeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-      },
-    },
-  ],
-  [
-    "mimocode",
-    {
-      class: MimocodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        mcpInstructionsRegistrar: MimocodeMcp,
-        // MiMo Code (an OpenCode fork) reads `instructions` from the global
-        // `~/.config/mimocode/mimocode.jsonc` too, so global non-root rules
-        // are registered there (as `~/`-rooted paths).
-        mcpInstructionsRegistrarGlobal: true,
-        collisionPolicy: "compose",
-      },
-    },
-  ],
-  [
-    "musecode",
-    {
-      class: MusecodeRule,
-      meta: {
-        // Muse Code reads the shared project-root `AGENTS.md` (preferred over
-        // `CLAUDE.md`) and has no modular non-root instruction directory, so
-        // topic rules fold into the root file (mirrors codexcli). The global
-        // rules path is undocumented, so global scope is not supported.
-        // https://dev.meta.ai/docs/muse-code/configuration.md
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "omp",
-    {
-      class: OmpRule,
-      meta: {
-        // oh-my-pi loads `.omp/AGENTS.md` plus `.omp/rules/*.{md,mdc}`
-        // natively, and `~/.omp/agent/AGENTS.md` plus
-        // `~/.omp/agent/rules/*.{md,mdc}` globally.
-        // https://github.com/can1357/oh-my-pi/blob/main/docs/context-files.md
-        extension: "md",
-        // The rules directory is read non-recursively, as `*.md` and `*.mdc`
-        // (`loadRules` in `packages/coding-agent/src/discovery/builtin.ts`).
-        nonRootImportGlob: "*.{md,mdc}",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "opencode",
-    {
-      class: OpenCodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        mcpInstructionsRegistrar: OpencodeMcp,
-        // OpenCode reads `instructions` from the global
-        // `~/.config/opencode/opencode.json` too, so global non-root rules are
-        // generated and registered instead of being dropped.
-        mcpInstructionsRegistrarGlobal: true,
-        collisionPolicy: "compose",
-      },
-    },
-  ],
-  [
-    "openclaw",
-    {
-      class: OpenclawRule,
-      meta: {
-        // OpenClaw injects the agent workspace's `AGENTS.md`
-        // (`~/.openclaw/workspace/AGENTS.md`) into every session and appends
-        // the execution folder's `AGENTS.md` as project context. It documents
-        // no per-directory walk, so topic rules fold into the root file
-        // (mirrors zcode). Over-long files are truncated with a notice in the
-        // prompt (`bootstrapMaxChars`, 20,000 characters per file by default;
-        // `bootstrapTotalMaxChars`, 60,000 in total) rather than dropped
-        // silently, so no instruction budget warning is emitted.
-        // https://docs.openclaw.ai/concepts/system-prompt
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "pi",
-    {
-      class: PiRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "pool",
-    {
-      class: PoolRule,
-      meta: {
-        // Pool (Poolside's coding agent) reads personal, project, and nested
-        // per-directory `AGENTS.md` files — the project root plus every
-        // `AGENTS.md` from the repository root down through the working
-        // directory — so a directory-scoped rule is emitted as a nested
-        // `<subprojectPath>/AGENTS.md` while plain topic rules fold into the
-        // root file (mirrors vibe).
-        // https://docs.poolside.ai/agent-instructions
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "qoder",
-    {
-      class: QoderRule,
-      meta: {
-        // Qoder reads the project-root `AGENTS.md` (plus the per-machine
-        // `AGENTS.local.md` overlay) and auto-loads `.qoder/rules/**/*.md` by
-        // their `trigger` frontmatter; the user scope mirrors it under
-        // `~/.qoder/`. Commands, subagents and skills are native, so no
-        // simulated additionalConventions are needed.
-        // https://docs.qoder.com/en/cli/04-extending-qoder-cli/memory
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        localRootMode: "separate-local-file",
-        localRootFileName: QODER_LOCAL_RULE_FILE_NAME,
-      },
-    },
-  ],
-  [
-    "qwencode",
-    {
-      class: QwencodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        // Qwen Code natively auto-discovers Markdown rule files under
-        // `.qwen/rules/` (project) and `~/.qwen/rules/` (global) and injects
-        // them by path, so the root `QWEN.md` must not carry a reference block
-        // to the non-root rules (mirrors how cursor/antigravity are wired).
-        ruleDiscoveryMode: "auto",
-        // Qwen Code v0.16.2 loads the personal `.qwen/QWEN.local.md` after the
-        // shared QWEN.md, so a localRoot rule gets its own file there.
-        localRootMode: "separate-local-file",
-        localRootFileName: QWENCODE_LOCAL_RULE_FILE_NAME,
-        // Qwen Code subagents are native (Markdown + YAML frontmatter under
-        // `.qwen/agents/`), so this mirrors how claudecode is wired.
-        additionalConventions: {
-          subagents: { subagentClass: QwencodeSubagent },
-        },
-      },
-    },
-  ],
-  [
-    "reasonix",
-    {
-      class: ReasonixRule,
-      meta: {
-        // Reasonix reads the root `REASONIX.md` (project root or
-        // `~/.reasonix/REASONIX.md` global) and has no modular non-root
-        // instruction directory, so topic rules fold into the root file
-        // (mirrors codexcli) — except directory-scoped rules
-        // (`agentsmd.subprojectPath`), which Context Engine v2 (v1.18.0) loads
-        // per-directory and are emitted as nested `<dir>/REASONIX.md` files
-        // (imported back via `getNestedFilePatterns`). A `localRoot` rule goes
-        // to the uncommitted `REASONIX.local.md` Reasonix loads beside it.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-        localRootMode: "separate-local-file",
-        localRootFileName: REASONIX_LOCAL_RULE_FILE_NAME,
-      },
-    },
-  ],
-  [
-    "replit",
-    {
-      class: ReplitRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "roo",
-    {
-      // Roo subagents are native now (aggregated into `.roomodes`), so no
-      // simulated `additionalConventions.subagents` block is needed — mirrors
-      // how native subagent tools like claudecode are wired.
-      //
-      // Roo also reads user-scope rules from `~/.roo/rules/` (loaded before
-      // workspace `.roo/rules/`), so global mode emits the same non-root
-      // directory under the home directory.
-      // @see https://roocodeinc.github.io/Roo-Code/features/custom-instructions
-      class: RooRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        // Roo loads `AGENTS.local.md` from the workspace root for personal,
-        // gitignored overrides (v3.47.0; verified at the final v3.54.0 tag),
-        // so a localRoot rule gets its own file instead of being folded into
-        // the checked-in AGENTS.md — mirrors the rovodev entry below.
-        localRootMode: "separate-local-file",
-        localRootFileName: "AGENTS.local.md",
-      },
-    },
-  ],
-  [
-    "rovodev",
-    {
-      class: RovodevRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-        additionalConventions: {
-          subagents: { subagentClass: RovodevSubagent },
-          skills: { skillClass: RovodevSkill },
-        },
-        localRootMode: "separate-local-file",
-        localRootFileName: "AGENTS.local.md",
-      },
-    },
-  ],
-  [
-    "zoocode",
-    {
-      // Zoo Code (community continuation of Roo Code) keeps Roo's `.roo/`
-      // layout and rule semantics, including the AGENTS.local.md local-root
-      // file — see the roo entry above.
-      class: ZoocodeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        localRootMode: "separate-local-file",
-        localRootFileName: "AGENTS.local.md",
-      },
-    },
-  ],
-  [
-    "tabnine",
-    {
-      class: TabnineRule,
-      meta: {
-        // Tabnine CLI loads a root `TABNINE.md` (project) and, for the user
-        // scope, `~/.tabnine/agent/TABNINE.md`. Non-root rules become
-        // guideline files under `.tabnine/guidelines/` (read by the Tabnine
-        // IDE agent, not auto-loaded by the CLI), so the root file lists them
-        // in a TOON reference table.
-        // https://docs.tabnine.com/main/getting-started/tabnine-cli/features/settings
-        // https://docs.tabnine.com/main/getting-started/tabnine-agent/guidelines
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "toon",
-      },
-    },
-  ],
-  [
-    "takt",
-    {
-      class: TaktRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        // No `additionalConventions` here: TAKT does not synthesize a root
-        // overview rule (TaktRule.fromRulesyncRule always emits non-root files),
-        // so the conventions block would never be rendered anywhere.
-      },
-    },
-  ],
-  [
-    "trae",
-    {
-      // Trae auto-loads every `.trae/rules/*.md` file by its Cursor-style
-      // `alwaysApply` / `description` / `globs` frontmatter and has no root
-      // rule file, so every rule lands there (mirrors cursor) — except
-      // directory-scoped rules (`agentsmd.subprojectPath`), which go to
-      // `<dir>/.trae/rules/` (imported back via `getNestedFilePatterns`). Commands,
-      // subagents and skills need no simulation: Trae has native skills and
-      // no file-based commands or subagents. Global rules (`~/.trae/user_rules`)
-      // are not written because their on-disk format is undocumented.
-      // https://docs.trae.ai/ide/rules?_lang=en
-      class: TraeRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "vibe",
-    {
-      class: VibeRule,
-      meta: {
-        // Vibe loads project AGENTS.md from the trusted working tree and
-        // user-level AGENTS.md from ~/.vibe/AGENTS.md. It has no modular
-        // non-root instruction directory, so topic rules fold into the root
-        // file (mirrors reasonix/codexcli) — except directory-scoped rules
-        // (`agentsmd.subprojectPath`), which Vibe's harness manager loads by
-        // walking the directories above the file being read, and which are
-        // emitted as nested `<dir>/AGENTS.md` files (imported back via
-        // `getNestedFilePatterns`).
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "warp",
-    {
-      class: WarpRule,
-      meta: {
-        // Warp reads project rules from the root AGENTS.md and a global rules
-        // file from ~/.agents/AGENTS.md (also used from remote hosts in SSH
-        // sessions). It has no modular non-root instruction directory, so topic
-        // rules fold into the root file — except directory-scoped rules
-        // (`agentsmd.subprojectPath`), which Warp applies while working in that
-        // subdirectory and which are emitted as nested `<dir>/AGENTS.md` files
-        // (imported back via `getNestedFilePatterns`; mirrors pool/vibe).
-        // https://docs.warp.dev/agents/capabilities/rules/
-        // https://docs.warp.dev/terminal/settings/file-locations/
-        // `auto`: the nested files are loaded by Warp itself, so the root file
-        // carries no reference list pointing at them.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "devin",
-    {
-      class: DevinRule,
-      meta: {
-        extension: "md",
-        // The root rule goes to the project-root `AGENTS.md` (the file Devin
-        // CLI/Local reads); non-root rules live under `.devin/rules/*.md`
-        // (Devin Desktop Cascade). Global scope mirrors that: a plain
-        // `~/.config/devin/AGENTS.md` root plus per-rule `~/.devin/rules/*.md`.
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        // No additionalConventions.skills needed: Devin auto-discovers skills
-        // from .devin/skills/ (project) and ~/.config/devin/skills/ (global).
-        //
-        // Personal instructions go to `AGENTS.local.md` beside the root
-        // `AGENTS.md`, which Devin loads "alongside AGENTS.md with the same
-        // always-on behavior" and documents as gitignored. Without this they
-        // were concatenated into the committed `AGENTS.md` by the
-        // `append-to-root` default, i.e. shared with collaborators — the
-        // opposite of what upstream documents.
-        // @see https://docs.devin.ai/cli/extensibility/rules
-        localRootMode: "separate-local-file",
-        localRootFileName: "AGENTS.local.md",
-      },
-    },
-  ],
-  [
-    "devin-plugin",
-    {
-      // Devin plugin bundles ship the root rule as an always-on
-      // `<plugin>/AGENTS.md` and triggered rules in `<plugin>/rules/`, read
-      // with the same `trigger` frontmatter as `.devin/rules/`.
-      // https://docs.devin.ai/cli/extensibility/plugins/overview
-      class: DevinPluginRule,
-      meta: {
-        extension: "md",
-        supportsGlobal: false,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "zcode",
-    {
-      class: ZcodeRule,
-      meta: {
-        // ZCode reads exactly two instruction files, the workspace `AGENTS.md`
-        // at the project root and the user `~/.zcode/AGENTS.md`. It documents
-        // that it does not merge `AGENTS.md` across directory levels and does
-        // not scan child directories, so there is no modular non-root surface
-        // and topic rules fold into the root file (mirrors musecode).
-        // https://zcode.z.ai/en/docs/agents
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-  [
-    "zed",
-    {
-      class: ZedRule,
-      meta: {
-        // Zed reads a single project rules file (`.rules`) and a single global
-        // file (`~/.config/zed/AGENTS.md`). It is root-only with auto discovery,
-        // so there is no non-root location to render a conventions block into.
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-      },
-    },
-  ],
-  [
-    "dsh",
-    {
-      class: DshRule,
-      meta: {
-        // DeepSeek Harness loads the user-global `~/.dsh/AGENTS.md` and the
-        // project chain of `AGENTS.md` files from the `.git` root down through
-        // the session cwd, so a directory-scoped rule is emitted as a nested
-        // `<subprojectPath>/AGENTS.md` while plain topic rules fold into the
-        // root file (mirrors pool).
-        // https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/context/agent-instructions/README.md
-        extension: "md",
-        supportsGlobal: true,
-        ruleDiscoveryMode: "auto",
-        collisionPolicy: "fold",
-      },
-    },
-  ],
-]);
 
 const allToolTargetKeys = [...toolRuleFactories.keys()];
 
@@ -1521,6 +212,17 @@ const defaultGetFactory: GetFactory = (target) => {
  * dozens of files.
  */
 const MAX_LISTED_SKIPPED_IMPORT_ONLY_PATHS = 10;
+
+/** What every `loadToolFiles` scan shares. */
+type ToolFileLoadContext = {
+  factory: ToolRuleFactory;
+  settablePaths: ReturnType<ToolRuleFactory["class"]["getSettablePaths"]>;
+  forDeletion: boolean;
+  /** Whether `includeRoot: false` leaves the root files out. */
+  omitsRootFiles: boolean;
+  /** The tool's own root file paths; see `loadToolFiles`. */
+  primaryRootFilePaths: string[];
+};
 
 /**
  * Fall back to a tool's legacy roots when its primary root file is absent.
@@ -1569,6 +271,10 @@ export class RulesProcessor extends FeatureProcessor {
   private readonly language: Language | undefined;
   private readonly deriveSubprojectPathFromGlobs: boolean;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
   private readonly getFactory: GetFactory;
   private readonly skills?: RulesyncSkill[];
   private readonly featureOptions?: FeatureOptions;
@@ -1649,11 +355,13 @@ export class RulesProcessor extends FeatureProcessor {
       (file): file is RulesyncRule => file instanceof RulesyncRule,
     );
 
-    const alignedRules = this.alignPiContextFile(rulesyncRules);
+    const alignedRules = this.alignRulesyncRules(rulesyncRules);
     const factory = this.getFactory(this.toolTarget);
     const { meta } = factory;
     this.warnForIncludeRootOption(meta);
-    this.warnForOutputStyleRuleOptions({ rules: alignedRules, factory });
+    for (const warning of factory.class.getRuleOptionWarnings?.(alignedRules) ?? []) {
+      this.logger.warn(warning);
+    }
     const emittedRules = this.omitsRootFiles()
       ? await this.dropRootRules(alignedRules)
       : alignedRules;
@@ -1685,8 +393,6 @@ export class RulesProcessor extends FeatureProcessor {
 
     this.applyLocalRootRules({ toolRules, localRootRules, factory });
 
-    this.appendSeparateConventionsRule({ toolRules, factory });
-
     const extraFiles = await this.buildMcpInstructionFiles({ toolRules, meta });
 
     this.applyRootRuleSections({ toolRules, factory, convertedRules });
@@ -1696,32 +402,36 @@ export class RulesProcessor extends FeatureProcessor {
     const outputFiles = [...toolRules, ...extraFiles];
     this.warnForOutputPathCollisions({ outputFiles, convertedRules });
     await this.warnForDeactivatedImportOnlyRoots({ toolRules, factory });
-    await this.warnForWarpLegacyRootFile(toolRules);
+    await this.warnForToolGenerationWarnings({ toolRules, factory });
     await this.warnForInstructionBudget({ toolRules, meta });
     return outputFiles;
   }
 
+  /** Print the tool's own generate warnings (`getGenerationWarnings`). */
+  private async warnForToolGenerationWarnings({
+    toolRules,
+    factory,
+  }: {
+    toolRules: ToolRule[];
+    factory: ToolRuleFactory;
+  }): Promise<void> {
+    const warnings =
+      (await factory.class.getGenerationWarnings?.({
+        toolRules,
+        outputRoot: this.outputRoot,
+        global: this.global,
+      })) ?? [];
+    for (const warning of warnings) {
+      this.logger.warn(warning);
+    }
+  }
+
   /**
    * Warn when a generated project instruction chain exceeds the tool's byte
-   * budget (`meta.projectInstructionBudget`).
-   *
-   * Codex CLI concatenates the project `AGENTS.md` files from the project root
-   * down to the cwd and stops once their combined size reaches
-   * `project_doc_max_bytes`, truncating the file that crosses it — silently, so
-   * without this warning the rules past the limit simply never reach the model.
-   * Each generated file is measured together with the generated files in its
-   * ancestor directories, since that is the chain Codex loads while working
-   * there. When the root file alone is over the budget every chain is, so only
-   * the root is reported; likewise each over-budget nested chain is reported
-   * once, at its shallowest directory. With several output roots the warning
-   * names the root it refers to. An output root below the git root is measured
-   * without the parent directories' files Codex would also load, so the
-   * estimate can come out low there. The budget checked is the value set in the
-   * output root's tool config when the tool supports one (Codex's
-   * `project_doc_max_bytes` in `.codex/config.toml`), else the tool's default;
-   * the warning names which one it used. Global scope is not
-   * checked because Codex loads the personal `~/.codex/AGENTS.md` outside the
-   * project budget.
+   * budget (`meta.projectInstructionBudget`); see
+   * {@link findProjectInstructionBudgetFindings} for what is measured. Global
+   * scope is not checked because Codex loads the personal `~/.codex/AGENTS.md`
+   * outside the project budget.
    */
   private async warnForInstructionBudget({
     toolRules,
@@ -1734,59 +444,17 @@ export class RulesProcessor extends FeatureProcessor {
     if (budget === undefined || this.global) {
       return;
     }
-    const configuredBytes = await budget.readConfiguredBytes?.(this.outputRoot);
-    const limitBytes = configuredBytes ?? budget.bytes;
-    // Name the source of the budget only when the tool's config can change it.
-    const limitLabel =
-      budget.readConfiguredBytes === undefined
-        ? `${limitBytes}-byte limit`
-        : configuredBytes === undefined
-          ? `${limitBytes}-byte default limit`
-          : `${limitBytes}-byte limit set by ${budget.configuredSource ?? "the tool config"}`;
-    const remedy =
-      configuredBytes === undefined && budget.defaultLimitHint !== undefined
-        ? `${budget.remedy} ${budget.defaultLimitHint}`
-        : budget.remedy;
-
-    const files = toolRules.map((rule) => ({
-      // Drop a trailing slash (an explicit `subprojectPath: "a/"`) so the
-      // ancestor test below compares plain directory paths.
-      dir: normalizeRelativeDir(rule.getRelativeDirPath()),
-      path: toPosixPath(join(rule.getRelativeDirPath(), rule.getRelativeFilePath())),
+    const findings = await findProjectInstructionBudgetFindings({
+      toolTarget: this.toolTarget,
+      budget,
+      outputRoot: this.outputRoot,
       // Measure what is written: the writer normalizes the trailing newline.
-      bytes: Buffer.byteLength(addTrailingNewline(rule.getFileContent()), "utf8"),
-    }));
-    const isAncestorOrSelf = (ancestor: string, dir: string): boolean =>
-      ancestor === "." || ancestor === dir || dir.startsWith(`${ancestor}/`);
-    const location = this.outputRoot === process.cwd() ? "" : ` under '${this.outputRoot}'`;
-
-    const rootFiles = files.filter(({ dir }) => dir === ".");
-    const rootBytes = rootFiles.reduce((sum, { bytes }) => sum + bytes, 0);
-    if (rootBytes > limitBytes) {
-      this.logger.warn(
-        `The generated ${this.toolTarget} root instruction file${location} (${rootFiles.map(({ path }) => path).join(", ")}) is ${rootBytes} bytes, over the ${limitLabel}. ${remedy}`,
-      );
-      return;
-    }
-
-    // Report each over-budget chain once, at its shallowest nested file: every
-    // deeper file below it is over budget too, so listing them adds nothing.
-    const reportedDirs: string[] = [];
-    const nestedFiles = files
-      .filter(({ dir }) => dir !== ".")
-      .toSorted((a, b) => a.dir.split("/").length - b.dir.split("/").length);
-    for (const file of nestedFiles) {
-      if (reportedDirs.some((dir) => isAncestorOrSelf(dir, file.dir))) {
-        continue;
-      }
-      const chain = files.filter(({ dir }) => isAncestorOrSelf(dir, file.dir));
-      const chainBytes = chain.reduce((sum, { bytes }) => sum + bytes, 0);
-      if (chainBytes > limitBytes) {
-        reportedDirs.push(file.dir);
-        this.logger.warn(
-          `The generated ${this.toolTarget} instruction files${location} loaded while working in '${file.dir}' (${chain.map(({ path }) => path).join(", ")}) total ${chainBytes} bytes, over the ${limitLabel} (as is every directory below it). ${remedy}`,
-        );
-      }
+      files: toolRules.map((rule) =>
+        toInstructionBudgetFile(rule, addTrailingNewline(rule.getFileContent())),
+      ),
+    });
+    for (const { message, remedy } of findings) {
+      this.logger.warn(remedy === undefined ? message : `${message} ${remedy}`);
     }
   }
 
@@ -1803,7 +471,10 @@ export class RulesProcessor extends FeatureProcessor {
     localRootRules: RulesyncRule[];
     factory: ToolRuleFactory;
   }): void {
-    const includeLocalRoot = resolveIncludeLocalRoot(this.featureOptions);
+    const includeLocalRoot = resolveBooleanRulesOption({
+      options: this.featureOptions,
+      key: "includeLocalRoot",
+    });
     if (localRootRules.length === 0 || this.global || !includeLocalRoot) {
       return;
     }
@@ -1811,49 +482,6 @@ export class RulesProcessor extends FeatureProcessor {
     if (localRootRule && factory.class.isTargetedByRulesyncRule(localRootRule)) {
       this.handleLocalRootRule(toolRules, localRootRule, factory);
     }
-  }
-
-  /**
-   * For tools that create a separate conventions rule file (e.g., cursor, roo),
-   * push that rule onto `toolRules`. Mutates `toolRules` in place.
-   */
-  private appendSeparateConventionsRule({
-    toolRules,
-    factory,
-  }: {
-    toolRules: ToolRule[];
-    factory: ToolRuleFactory;
-  }): void {
-    const { meta } = factory;
-    const isSimulated = this.simulateCommands || this.simulateSubagents || this.simulateSkills;
-    if (!isSimulated || !meta.createsSeparateConventionsRule || !meta.additionalConventions) {
-      return;
-    }
-
-    const conventionsContent = this.generateAdditionalConventionsSectionFromMeta(meta);
-    const settablePaths = factory.class.getSettablePaths();
-    const nonRootPath = "nonRoot" in settablePaths ? settablePaths.nonRoot : null;
-    if (!nonRootPath) {
-      return;
-    }
-    // Use .md extension - CursorRule.fromRulesyncRule will convert to .mdc
-    toolRules.push(
-      factory.class.fromRulesyncRule({
-        outputRoot: this.outputRoot,
-        rulesyncRule: new RulesyncRule({
-          outputRoot: this.outputRoot,
-          relativeDirPath: nonRootPath.relativeDirPath,
-          relativeFilePath: "additional-conventions.md",
-          frontmatter: {
-            root: false,
-            targets: [this.toolTarget],
-          },
-          body: conventionsContent,
-        }),
-        validate: true,
-        global: this.global,
-      }),
-    );
   }
 
   /**
@@ -1890,9 +518,8 @@ export class RulesProcessor extends FeatureProcessor {
   }
 
   /**
-   * For tools that don't create a separate conventions rule, prepend the
-   * reference and conventions sections to the root rule content. Mutates the
-   * root rule in place.
+   * Prepend the reference and conventions sections to the root rule content.
+   * Mutates the root rule in place.
    */
   private applyRootRuleSections({
     toolRules,
@@ -1915,10 +542,9 @@ export class RulesProcessor extends FeatureProcessor {
 
     const referenceSection = this.generateReferenceSectionFromMeta(meta, toolRules);
 
-    const conventionsSection =
-      !meta.createsSeparateConventionsRule && meta.additionalConventions
-        ? this.generateAdditionalConventionsSectionFromMeta(meta)
-        : "";
+    const conventionsSection = meta.additionalConventions
+      ? this.generateAdditionalConventionsSectionFromMeta(meta)
+      : "";
 
     const assembledContent = referenceSection + conventionsSection + rootRule.getFileContent();
     // Appended last so the block closes the file (and its root mirrors) after
@@ -1969,7 +595,9 @@ export class RulesProcessor extends FeatureProcessor {
    */
   private omitsRootFiles(): boolean {
     return (
-      this.toolTarget === "claudecode" && !this.global && !resolveIncludeRoot(this.featureOptions)
+      this.toolTarget === "claudecode" &&
+      !this.global &&
+      !resolveBooleanRulesOption({ options: this.featureOptions, key: "includeRoot" })
     );
   }
 
@@ -1978,7 +606,7 @@ export class RulesProcessor extends FeatureProcessor {
    * silently disables another option that writes into the root file.
    */
   private warnForIncludeRootOption(meta: ToolRuleFactory["meta"]): void {
-    if (resolveIncludeRoot(this.featureOptions)) {
+    if (resolveBooleanRulesOption({ options: this.featureOptions, key: "includeRoot" })) {
       return;
     }
     if (this.toolTarget !== "claudecode") {
@@ -2001,48 +629,6 @@ export class RulesProcessor extends FeatureProcessor {
       this.logger.warn(
         "The rules option `ruleDiscoveryMode` has no effect with `includeRoot: false` on claudecode: the rule references it adds are written into CLAUDE.md, which is not generated.",
       );
-    }
-  }
-
-  /**
-   * Warn about `factorydroid` / `qoder` frontmatter that does not do what it
-   * looks like it does: an `output-style` rule that also targets other tools
-   * reaches them as an ordinary rule (so presentation instructions end up in
-   * their project rules), and `<tool>.name` is read only with
-   * `channel: output-style`. Checked while generating for that tool only, so
-   * each warning prints once.
-   */
-  private warnForOutputStyleRuleOptions({
-    rules,
-    factory,
-  }: {
-    rules: RulesyncRule[];
-    factory: ToolRuleFactory;
-  }): void {
-    const toolTarget = this.toolTarget;
-    if (toolTarget !== "factorydroid" && toolTarget !== "qoder") {
-      return;
-    }
-    const toolLabel = TOOL_DISPLAY.find((entry) => entry.key === toolTarget)?.label ?? toolTarget;
-    for (const rule of rules) {
-      const frontmatter = rule.getFrontmatter();
-      const section = frontmatter[toolTarget];
-      if (frontmatter.root || !section || !factory.class.isTargetedByRulesyncRule(rule)) {
-        continue;
-      }
-      const { channel, name } = section;
-      const fileName = stripControlCharacters(rule.getRelativeFilePath());
-      const targets = frontmatter.targets ?? ["*"];
-      if (channel === "output-style" && targets.some((target) => target !== toolTarget)) {
-        this.logger.warn(
-          `${fileName} sets ${toolTarget}.channel: output-style but also targets other tools, which receive it as an ordinary rule. Set \`targets: ["${toolTarget}"]\` to keep the output style to ${toolLabel}.`,
-        );
-      }
-      if (channel !== "output-style" && name !== undefined) {
-        this.logger.warn(
-          `${fileName} sets ${toolTarget}.name, which is read only with ${toolTarget}.channel: output-style; ignoring it.`,
-        );
-      }
     }
   }
 
@@ -2276,23 +862,13 @@ export class RulesProcessor extends FeatureProcessor {
       }
 
       const rootConversion = group.find(({ toolRule }) => toolRule.isRoot());
-      const allGeneratedRulesAreRoots = group.every(({ toolRule }) => toolRule.isRoot());
       const hasSourceRoot = group.some(
         ({ rulesyncRule }) => rulesyncRule.getFrontmatter().root === true,
       );
-      // Composition is only structure-preserving when every fragment is plain
-      // Markdown. An adapter may prepend a frontmatter block to some outputs
-      // (Amp gates non-root files on a leading `globs:` block); concatenating
-      // such a fragment would bury its block mid-body where the tool no longer
-      // reads it, so those groups fall through to preserve-or-reject instead.
-      const allFragmentsArePlain = group.every(
-        ({ toolRule }) => !/^---\r?\n/.test(toolRule.getFileContent()),
-      );
-      const shouldCompose =
-        (collisionPolicy === "fold" ||
-          collisionPolicy === "compose" ||
-          allGeneratedRulesAreRoots) &&
-        allFragmentsArePlain;
+      const { shouldCompose, sharedRootFrontmatter } = decideRuleComposition({
+        group,
+        collisionPolicy,
+      });
 
       if (!shouldCompose && hasSourceRoot) {
         throw new Error(
@@ -2312,11 +888,12 @@ export class RulesProcessor extends FeatureProcessor {
         continue;
       }
       const ordered = [target, ...group.filter((rule) => rule !== target)];
-      const mergedContent = ordered
-        .map(({ toolRule }) => toolRule.getFileContent().trim())
-        .filter((content) => content.length > 0)
-        .join("\n\n");
-      target.toolRule.setFileContent(mergedContent);
+      target.toolRule.setFileContent(
+        composeRuleFragments({
+          contents: ordered.map(({ toolRule }) => toolRule.getFileContent()),
+          sharedFrontmatter: sharedRootFrontmatter,
+        }),
+      );
       survivors.add(target);
     }
 
@@ -2429,41 +1006,9 @@ export class RulesProcessor extends FeatureProcessor {
   }
 
   /**
-   * Warp still reads a legacy `WARP.md`, and when both `WARP.md` and
-   * `AGENTS.md` sit in the same directory, `WARP.md` takes priority — so an
-   * `AGENTS.md` this run writes next to one would never be read. That holds for
-   * the root file and for every nested `<subprojectPath>/AGENTS.md` alike.
-   * Rulesync neither writes nor deletes `WARP.md` (it is hand-authored), so the
-   * only thing it can do is say so. Project scope only: the documented
-   * precedence is about project rules, and Warp's global rule source is
-   * `~/.agents/AGENTS.md`.
-   * @see https://docs.warp.dev/agents/capabilities/rules/
-   */
-  private async warnForWarpLegacyRootFile(toolRules: ToolRule[]): Promise<void> {
-    if (this.toolTarget !== "warp" || this.global) {
-      return;
-    }
-    const rulePathsByDir = new Map(
-      toolRules.map((rule) => [
-        rule.getRelativeDirPath(),
-        join(rule.getRelativeDirPath(), rule.getRelativeFilePath()),
-      ]),
-    );
-    for (const [ruleDirPath, rulesRelativePath] of rulePathsByDir) {
-      const legacyRelativePath = join(ruleDirPath, WARP_LEGACY_RULE_FILE_NAME);
-      if (!(await fileExists(join(this.outputRoot, legacyRelativePath)))) {
-        continue;
-      }
-      this.logger.warn(
-        `${stripControlCharacters(legacyRelativePath)} exists next to ${stripControlCharacters(rulesRelativePath)}, and Warp reads WARP.md instead of AGENTS.md when both are present, so the generated ${stripControlCharacters(rulesRelativePath)} is ignored by Warp. Move any content you still need into ${RULESYNC_RULES_RELATIVE_DIR_PATH}, then delete or rename ${stripControlCharacters(legacyRelativePath)}.`,
-      );
-    }
-  }
-
-  /**
    * Handle localRoot rule generation based on tool target.
    * - `separate-local-file`: writes a dedicated `*.local.md` root file
-   *   (claudecode/legacy: `./CLAUDE.local.md`, rovodev: `./AGENTS.local.md`)
+   *   (claudecode/legacy: `./CLAUDE.local.md`, rovodev/dsh: `./AGENTS.local.md`)
    * - `append-to-root` (default): appends the body to the root file
    */
   private handleLocalRootRule(
@@ -2507,128 +1052,16 @@ export class RulesProcessor extends FeatureProcessor {
     /** True when importing an existing local file back to a rulesync rule. */
     localRoot?: boolean;
   }): ToolRule | null {
-    if (isClassOrSubclassOf({ candidate: factory.class, base: ClaudecodeRule })) {
-      const paths = ClaudecodeRule.getSettablePaths({ global: this.global });
-      return new ClaudecodeRule({
+    return (
+      factory.class.buildLocalRootFile?.({
         outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? paths.root.relativeDirPath,
-        relativeFilePath: fileName,
-        frontmatter: {},
+        global: this.global,
+        fileName,
         body,
-        validate: true,
-        root: true,
+        relativeDirPath,
         localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: ClaudecodeLegacyRule })) {
-      const paths = ClaudecodeLegacyRule.getSettablePaths({ global: this.global });
-      return new ClaudecodeLegacyRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? paths.root.relativeDirPath,
-        relativeFilePath: fileName,
-        fileContent: body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: RovodevRule })) {
-      return new RovodevRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? ".",
-        relativeFilePath: fileName,
-        fileContent: body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: RooRule })) {
-      return new RooRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? ".",
-        relativeFilePath: fileName,
-        fileContent: body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: DevinRule })) {
-      // `AGENTS.local.md` sits next to the project-root `AGENTS.md` Devin reads,
-      // not under `.devin/`, and is plain markdown with no trigger frontmatter.
-      return new DevinRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? ".",
-        relativeFilePath: fileName,
-        frontmatter: {},
-        body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: QoderRule })) {
-      // `AGENTS.local.md` sits next to the project-root `AGENTS.md` Qoder reads,
-      // not under `.qoder/`, and is plain markdown with no trigger frontmatter.
-      return new QoderRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? ".",
-        relativeFilePath: fileName,
-        frontmatter: {},
-        body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: CodebuddyRule })) {
-      // `CODEBUDDY.local.md` sits next to the project-root `CODEBUDDY.md` — the
-      // primary root, not the `.codebuddy/` alternative one — and is a plain
-      // memory file with no rule frontmatter.
-      const paths = CodebuddyRule.getSettablePaths({ global: this.global });
-      return new CodebuddyRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? paths.root.relativeDirPath,
-        relativeFilePath: fileName,
-        frontmatter: {},
-        body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    // Crush and Reasonix both read their `.local` file from the working
-    // directory root, next to the shared root file (`CRUSH.md` / `REASONIX.md`);
-    // neither has a tool directory to put it in.
-    const workingRootClass = [CrushRule, ReasonixRule].find((base) =>
-      isClassOrSubclassOf({ candidate: factory.class, base }),
+      }) ?? null
     );
-    if (workingRootClass) {
-      return new workingRootClass({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? ".",
-        relativeFilePath: fileName,
-        fileContent: body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    if (isClassOrSubclassOf({ candidate: factory.class, base: QwencodeRule })) {
-      // Qwen Code reads the personal local context file from `.qwen/`, not the
-      // project root (project scope only; global handling never reaches here).
-      return new QwencodeRule({
-        outputRoot: this.outputRoot,
-        relativeDirPath: relativeDirPath ?? QWENCODE_DIR,
-        relativeFilePath: fileName,
-        fileContent: body,
-        validate: true,
-        root: true,
-        localRoot,
-      });
-    }
-    return null;
   }
 
   /**
@@ -2694,8 +1127,7 @@ As this project's AI coding tool, you must follow the additional conventions bel
     if (
       skillsConfig &&
       this.simulateSkills &&
-      SkillsProcessor.getToolTargetsSimulated().includes(this.toolTarget) &&
-      (!skillsConfig.globalOnly || this.global)
+      SkillsProcessor.getToolTargetsSimulated().includes(this.toolTarget)
     ) {
       sections.push(
         SkillsProcessor.getSimulatedConventionSection({
@@ -3025,64 +1457,21 @@ As this project's AI coding tool, you must follow the additional conventions bel
   }
 
   /**
-   * Pi reads `AGENTS.override.md` *instead of* `AGENTS.md` from a directory, and
-   * non-root Pi rules are folded into whichever file the root emits. A mix of
-   * opted-in and opted-out rules would therefore split the output across both
-   * files and let Pi silently ignore everything in `AGENTS.md`, so the root rule
-   * decides for all of them: its `pi.contextFile` is copied onto the non-root
-   * rules, and the flag set only on a non-root rule is dropped with a warning.
+   * Align the rules with each other through the tool's `alignRulesyncRules`
+   * hook, printing its warnings unless `warn` is off.
    */
-  private alignPiContextFile(
+  private alignRulesyncRules(
     rules: RulesyncRule[],
     { warn = true }: { warn?: boolean } = {},
   ): RulesyncRule[] {
-    if (this.toolTarget !== "pi") return rules;
-
-    const factory = this.getFactory(this.toolTarget);
-    const targeted = rules.filter((rule) => factory.class.isTargetedByRulesyncRule(rule));
-    // Any root rule opting in decides for the whole output: with several root
-    // rules, honoring only one of them would leave the others in the file Pi
-    // stops reading.
-    const rootContextFile = targeted.some(
-      (rule) =>
-        rule.getFrontmatter().root === true && rule.getFrontmatter().pi?.contextFile === "override",
-    )
-      ? ("override" as const)
-      : undefined;
-    const mismatched = targeted.filter(
-      (rule) => rule.getFrontmatter().pi?.contextFile !== rootContextFile,
-    );
-    if (mismatched.length === 0) return rules;
-
-    if (warn && rootContextFile === undefined) {
-      this.logger.warn(
-        `pi.contextFile is set on ${mismatched.length} non-root rule(s) but not on the root rule, ` +
-          `so it is ignored: Pi folds every rule body into the root context file, and emitting ` +
-          `AGENTS.override.md for some of them would hide the rest. Set it on the root rule ` +
-          `instead: ${formatRulePaths(mismatched)}`,
-      );
+    const aligned = this.getFactory(this.toolTarget).class.alignRulesyncRules?.(rules);
+    if (!aligned) return rules;
+    if (warn) {
+      for (const warning of aligned.warnings) {
+        this.logger.warn(warning);
+      }
     }
-
-    const mismatchedSet = new Set(mismatched);
-    return rules.map((rule) => {
-      if (!mismatchedSet.has(rule)) return rule;
-      const frontmatter = rule.getFrontmatter();
-      const { contextFile: _dropped, ...pi } = frontmatter.pi ?? {};
-      const nextPi = { ...pi, ...(rootContextFile ? { contextFile: rootContextFile } : {}) };
-      return new RulesyncRule({
-        outputRoot: rule.getOutputRoot(),
-        relativeDirPath: rule.getRelativeDirPath(),
-        relativeFilePath: rule.getRelativeFilePath(),
-        frontmatter: {
-          ...frontmatter,
-          ...(Object.keys(nextPi).length > 0 ? { pi: nextPi } : { pi: undefined }),
-        },
-        body: rule.getBody(),
-        // The source rule was already parsed under its own validate setting;
-        // only the pi block changes here.
-        validate: false,
-      });
-    });
+    return aligned.rules;
   }
 
   /**
@@ -3132,7 +1521,7 @@ As this project's AI coding tool, you must follow the additional conventions bel
     // Resolve placement the way generate does: Pi's non-root rules follow the
     // root rule's `pi.contextFile` (aligned silently here, since the mismatch
     // warning belongs to generate).
-    const mergedRules = this.alignPiContextFile(await this.loadMergedRulesyncRules(), {
+    const mergedRules = this.alignRulesyncRules(await this.loadMergedRulesyncRules(), {
       warn: false,
     });
     const targetedRules = mergedRules.filter((rule) =>
@@ -3142,7 +1531,10 @@ As this project's AI coding tool, you must follow the additional conventions bel
     // not abort the import, so fall back to the default here.
     let includeLocalRoot = !this.global;
     try {
-      includeLocalRoot &&= resolveIncludeLocalRoot(this.featureOptions);
+      includeLocalRoot &&= resolveBooleanRulesOption({
+        options: this.featureOptions,
+        key: "includeLocalRoot",
+      });
     } catch {
       // Keep the default.
     }
@@ -3256,69 +1648,6 @@ As this project's AI coding tool, you must follow the additional conventions bel
         global: this.global,
       });
 
-      const resolveRelativeDirPath = (filePath: string): string => {
-        const dirName = dirname(relative(this.outputRoot, filePath));
-        return dirName === "" ? "." : dirName;
-      };
-
-      /**
-       * Build deletion rules from discovered file paths: resolve dir, check traversal, create forDeletion, filter isDeletable.
-       *
-       * Two modes:
-       * - Root mode (no opts): `relativeFilePath` = `basename(filePath)`, traversal checks `relativeDirPath` against `this.outputRoot`.
-       * - Non-root mode (with `outputRootOverride` + `relativeDirPathOverride`): `relativeFilePath` = `relative(outputRootOverride, filePath)`,
-       *   traversal checks `relativeFilePath` against `outputRootOverride`.
-       */
-      const buildDeletionRulesFromPaths = (
-        filePaths: string[],
-        opts?: { outputRootOverride: string; relativeDirPathOverride: string },
-      ): ToolRule[] => {
-        const isNonRoot = opts !== undefined;
-        const effectiveOutputRoot = isNonRoot ? opts.outputRootOverride : this.outputRoot;
-        return filePaths
-          .map((filePath) => {
-            const relativeDirPath = isNonRoot
-              ? opts.relativeDirPathOverride
-              : resolveRelativeDirPath(filePath);
-            const relativeFilePath = isNonRoot
-              ? relative(effectiveOutputRoot, filePath)
-              : basename(filePath);
-            checkPathTraversal({
-              relativePath: isNonRoot ? relativeFilePath : relativeDirPath,
-              intendedRootDir: effectiveOutputRoot,
-            });
-            return factory.class.forDeletion({
-              outputRoot: this.outputRoot,
-              relativeDirPath,
-              relativeFilePath,
-              global: this.global,
-            });
-          })
-          .filter((rule) => rule.isDeletable());
-      };
-
-      /**
-       * Import counterpart of {@link buildDeletionRulesFromPaths} for the
-       * root-shaped scans (root, legacy roots, and read-only roots), whose
-       * paths all sit at a directory Rulesync resolves from the file itself.
-       */
-      const buildImportRulesFromPaths = (filePaths: string[]): Promise<ToolRule[]> =>
-        Promise.all(
-          filePaths.map((filePath) => {
-            const relativeDirPath = resolveRelativeDirPath(filePath);
-            checkPathTraversal({
-              relativePath: relativeDirPath,
-              intendedRootDir: this.outputRoot,
-            });
-            return factory.class.fromFile({
-              outputRoot: this.outputRoot,
-              relativeDirPath,
-              relativeFilePath: basename(filePath),
-              global: this.global,
-            });
-          }),
-        );
-
       /**
        * The tool's own root file, as opposed to whichever root
        * `rootToolRules` ends up resolving. A legacy root reached through
@@ -3342,393 +1671,26 @@ As this project's AI coding tool, you must follow the additional conventions bel
           )
         : [];
 
-      const rootToolRules = await (async () => {
-        if (!settablePaths.root) {
-          return [];
-        }
+      const context: ToolFileLoadContext = {
+        factory,
+        settablePaths,
+        forDeletion,
+        omitsRootFiles,
+        primaryRootFilePaths,
+      };
 
-        if (forDeletion && omitsRootFiles) {
-          // Only sweep the file Rulesync writes: a `.claude/CLAUDE.md` is
-          // hand-authored, so it is reported instead of deleted.
-          await this.warnForShadowingRootFiles({ includePrimaryRoots: false });
-          return buildDeletionRulesFromPaths(primaryRootFilePaths);
-        }
-
-        const uniqueRootFilePaths = await findFilesWithFallback(
-          primaryRootFilePaths,
-          settablePaths.alternativeRoots,
-          (alt) => rootRelativeGlob(alt.relativeDirPath, alt.relativeFilePath),
-          this.outputRoot,
-        );
-
-        if (forDeletion) {
-          return buildDeletionRulesFromPaths(uniqueRootFilePaths);
-        }
-
-        return await buildImportRulesFromPaths(uniqueRootFilePaths);
-      })();
+      const rootToolRules = await this.loadRootToolRules(context);
       this.logger.debug(`Found ${rootToolRules.length} root tool rule files`);
-
-      // Load the separate `*.local.md` file (import and deletion) when the
-      // tool uses one, so a personal local-root file round-trips back to a
-      // canonical `localRoot: true` rulesync rule instead of being emit-only.
-      const localRootToolRules = await (async () => {
-        if (
-          this.global ||
-          factory.meta.localRootMode !== "separate-local-file" ||
-          !factory.meta.localRootFileName
-        ) {
-          return [];
-        }
-        const fileName = factory.meta.localRootFileName;
-
-        const filePaths = await (async () => {
-          if (factory.class.getLocalRootFileGlob) {
-            return await findFilesByGlobs(factory.class.getLocalRootFileGlob({ fileName }), {
-              cwd: this.outputRoot,
-            });
-          }
-          if (!settablePaths.root) {
-            return [];
-          }
-          const primaryLocalFilePaths = await findFilesByGlobs(
-            rootRelativeGlob(settablePaths.root.relativeDirPath ?? ".", fileName),
-            { cwd: this.outputRoot },
-          );
-          if (forDeletion && omitsRootFiles) {
-            return primaryLocalFilePaths;
-          }
-          return await findFilesWithFallback(
-            primaryLocalFilePaths,
-            settablePaths.alternativeRoots,
-            (alt) => rootRelativeGlob(alt.relativeDirPath, fileName),
-            this.outputRoot,
-          );
-        })();
-
-        if (forDeletion) {
-          return buildDeletionRulesFromPaths(filePaths);
-        }
-
-        const importedRules = await Promise.all(
-          filePaths.map(async (filePath) => {
-            const relativeDirPath = resolveRelativeDirPath(filePath);
-            checkPathTraversal({
-              relativePath: relativeDirPath,
-              intendedRootDir: this.outputRoot,
-            });
-            const body = await readFileContent(filePath);
-            return this.buildLocalRootFile({
-              factory,
-              fileName: basename(filePath),
-              body,
-              relativeDirPath,
-              localRoot: true,
-            });
-          }),
-        );
-        return importedRules.filter((rule): rule is ToolRule => rule !== null);
-      })();
+      const localRootToolRules = await this.loadLocalRootToolRules(context);
       this.logger.debug(`Found ${localRootToolRules.length} local root tool rule files`);
-
-      const rootMirrorDeletionRules = await (async () => {
-        const rootMirror = factory.class.getRootMirror?.();
-        if (!forDeletion || this.global || !rootMirror) {
-          return [];
-        }
-        const { primaryGlob, mirrorGlob } = rootMirror.getMirrorDeletionGlobs();
-        const primaryPaths = await findFilesByGlobs(primaryGlob, { cwd: this.outputRoot });
-        if (primaryPaths.length === 0) {
-          return [];
-        }
-        const mirrorPaths = await findFilesByGlobs(mirrorGlob, { cwd: this.outputRoot });
-        return buildDeletionRulesFromPaths(mirrorPaths);
-      })();
-
-      // Extra fixed-path files (e.g. Pi's APPEND_SYSTEM.md) enumerated for both
-      // import and deletion so they round-trip and stale files are cleaned up —
-      // except `importOnly` entries, which are enumerated on import only.
-      const extraFixedToolRules = await (async () => {
-        const extraFiles = factory.class
-          .getExtraFixedFiles?.({ global: this.global })
-          .filter((file) => !(forDeletion && file.importOnly));
-        if (!extraFiles || extraFiles.length === 0) {
-          return [];
-        }
-
-        // Files only: a glob entry such as `*.md` would otherwise match a
-        // directory named `x.md`, which cannot be read as a rule.
-        const findExtraFiles = async (files: ToolRuleExtraFixedFile[]) =>
-          files.length === 0
-            ? []
-            : await findFilesByGlobs(
-                files.map((file) => rootRelativeGlob(file.relativeDirPath, file.relativeFilePath)),
-                { cwd: this.outputRoot, type: "file" },
-              );
-        const managedFilePaths = await findExtraFiles(
-          extraFiles.filter((file) => !file.importOnly),
-        );
-        if (forDeletion) {
-          return managedFilePaths.length === 0 ? [] : buildDeletionRulesFromPaths(managedFilePaths);
-        }
-
-        // An `importOnly` directory is shared with hand-written files, so a
-        // symlink there (the file or a directory above it) may point anywhere;
-        // skip it rather than copy its target into `.rulesync/rules/`, where
-        // it may be committed. A link is detected as a file whose real path,
-        // taken against the real output root, differs from its spelled one.
-        const importOnlyFilePaths: string[] = [];
-        for (const filePath of await findExtraFiles(extraFiles.filter((file) => file.importOnly))) {
-          const spelledPath = toPosixPath(relative(this.outputRoot, filePath));
-          const realPath = await resolvedRelativePath({
-            rootPath: this.outputRoot,
-            targetPath: filePath,
-          });
-          if (realPath !== spelledPath) {
-            this.logger.warn(
-              `Skipping symbolic link ${stripControlCharacters(spelledPath)} on import: ${this.toolTarget} files reached through a link are not copied into ${RULESYNC_RULES_RELATIVE_DIR_PATH}.`,
-            );
-            continue;
-          }
-          importOnlyFilePaths.push(filePath);
-        }
-        const filePaths = [...managedFilePaths, ...importOnlyFilePaths];
-        if (filePaths.length === 0) {
-          return [];
-        }
-
-        return await Promise.all(
-          filePaths.map((filePath) => {
-            const relativeDirPath = resolveRelativeDirPath(filePath);
-            checkPathTraversal({
-              relativePath: relativeDirPath,
-              intendedRootDir: this.outputRoot,
-            });
-            return factory.class.fromFile({
-              outputRoot: this.outputRoot,
-              relativeDirPath,
-              relativeFilePath: basename(filePath),
-              global: this.global,
-            });
-          }),
-        );
-      })();
+      const rootMirrorDeletionRules = await this.loadRootMirrorDeletionRules(context);
+      const extraFixedToolRules = await this.loadExtraFixedToolRules(context);
       this.logger.debug(`Found ${extraFixedToolRules.length} extra fixed tool rule files`);
-
-      // Pattern-discovered rule files (the AGENTS.md standard's nested
-      // subproject files). Import only — see `getNestedFileGlobs`.
-      const nestedToolRules = await (async () => {
-        // Never in global mode: the output root is the home directory there, and
-        // walking all of it looking for subprojects is both wrong and expensive.
-        const patterns = this.global ? undefined : factory.class.getNestedFilePatterns?.();
-        if (forDeletion || !patterns || patterns.include.length === 0) {
-          return [];
-        }
-
-        // Symlinks are not followed. Unlike the fixed-path scans, this one walks
-        // the whole project tree, so a symlink committed to a repository could
-        // otherwise pull a file from outside the project (a key, a dotfile) into
-        // version-controlled `.rulesync/rules/`. Not following them also keeps a
-        // pair of directory symlinks from exploding the traversal.
-        const matchedPaths = await findFilesByGlobs(patterns.include, {
-          cwd: this.outputRoot,
-          type: "file",
-          followSymbolicLinks: false,
-          ignore: patterns.ignore,
-        });
-
-        // The project's own statement of what is not its source. Without it a
-        // vendored dependency's rule file — third-party content the user
-        // deliberately kept untracked — would be copied into version-controlled
-        // `.rulesync/rules/`, and targets that concatenate non-root rules into
-        // one file would then load it unconditionally.
-        const filePaths = filterOutPathsInGitIgnoredDirectories({
-          rootDir: this.outputRoot,
-          filePaths: matchedPaths,
-          ownedDirPath: patterns.ownedDirPath,
-        });
-
-        return await Promise.all(
-          filePaths.map((filePath) => {
-            const relativeDirPath = resolveRelativeDirPath(filePath);
-            checkPathTraversal({
-              relativePath: relativeDirPath,
-              intendedRootDir: this.outputRoot,
-            });
-            return factory.class.fromFile({
-              outputRoot: this.outputRoot,
-              relativeDirPath,
-              relativeFilePath: basename(filePath),
-              global: this.global,
-            });
-          }),
-        );
-      })();
+      const nestedToolRules = await this.loadNestedToolRules(context);
       this.logger.debug(`Found ${nestedToolRules.length} nested tool rule files`);
-
-      // Read-only rule roots a tool documents but Rulesync never writes to
-      // (Junie's `.junie/rules/*.md` and `.junie/playbook.md`). Import only:
-      // since generation never produces them, treating them as deletion
-      // candidates would delete hand-authored files rulesync does not own.
-      //
-      // These are fixed, tool-owned directories, so this scan mirrors the
-      // `nonRoot` one below rather than the nested one above: symlinks are
-      // followed, because a shared rules tree linked into `.junie/rules` is a
-      // supported layout (see `docs/guide/separate-input-root.md` on symlinks
-      // and trust). It runs in project scope only — see `importOnlyRoots`.
-      const importOnlyToolRules = await (async () => {
-        // Project scope only — `ToolRuleSettablePathsGlobal` has no
-        // `importOnlyRoots`, so in global mode this narrows away rather than
-        // globbing relative directories under the user's home.
-        const importOnlyRoots =
-          "importOnlyRoots" in settablePaths ? settablePaths.importOnlyRoots : undefined;
-        if (forDeletion || !importOnlyRoots || importOnlyRoots.length === 0) {
-          return [];
-        }
-
-        // A root file that exists has already absorbed these rules on a previous
-        // generate (Junie folds non-root rules into `.junie/AGENTS.md`), so
-        // re-importing them beside it would duplicate the same content once per
-        // import/generate cycle. See `onlyWhenRootAbsent`. Only the tool's own
-        // root counts — see `primaryRootFilePaths`.
-        const rootFilePath = primaryRootFilePaths[0];
-
-        const scannedPaths: string[] = [];
-        const skippedPaths: string[] = [];
-        const skippedOutrankingPaths: string[] = [];
-        for (const importOnlyRoot of importOnlyRoots) {
-          const matchedPaths = await findFilesByGlobs(
-            rootRelativeGlob(
-              importOnlyRoot.relativeDirPath,
-              importOnlyRoot.relativeFilePath ?? `*.${factory.meta.extension}`,
-            ),
-            { cwd: this.outputRoot, type: "file" },
-          );
-          if (importOnlyRoot.onlyWhenRootAbsent === true && rootFilePath !== undefined) {
-            (importOnlyRoot.outranksRoot === true ? skippedOutrankingPaths : skippedPaths).push(
-              ...matchedPaths,
-            );
-            continue;
-          }
-          scannedPaths.push(...matchedPaths);
-        }
-
-        // Left unreported these look imported but silently are not, and the
-        // tool no longer reads them either — a state worth acting on. The
-        // names come off the filesystem, so they are stripped of control
-        // characters before reaching a terminal, and the list is capped so a
-        // large rules directory cannot turn one warning into a wall of text.
-        if (skippedPaths.length > 0 && rootFilePath !== undefined) {
-          const skippedNames = skippedPaths.map((filePath) =>
-            stripControlCharacters(relative(this.outputRoot, filePath)),
-          );
-          const listedNames = skippedNames.slice(0, MAX_LISTED_SKIPPED_IMPORT_ONLY_PATHS);
-          const remainingCount = skippedNames.length - listedNames.length;
-          this.logger.warn(
-            `Not importing ${listedNames.join(", ")}${remainingCount > 0 ? ` and ${remainingCount} more` : ""} for ${this.toolTarget}: ${stripControlCharacters(relative(this.outputRoot, rootFilePath))} exists, and the tool reads that file exclusively. Delete them once you have checked that content is in the root file, or move it into ${RULESYNC_RULES_RELATIVE_DIR_PATH} if it is not.`,
-          );
-        }
-
-        // The tool reads these instead of the root file, so the root file just
-        // imported is the one it ignores.
-        if (skippedOutrankingPaths.length > 0 && rootFilePath !== undefined) {
-          const rootName = stripControlCharacters(relative(this.outputRoot, rootFilePath));
-          const skippedNames = skippedOutrankingPaths.map((filePath) =>
-            stripControlCharacters(relative(this.outputRoot, filePath)),
-          );
-          const listedNames = skippedNames.slice(0, MAX_LISTED_SKIPPED_IMPORT_ONLY_PATHS);
-          const remainingCount = skippedNames.length - listedNames.length;
-          this.logger.warn(
-            `Not importing ${listedNames.join(", ")}${remainingCount > 0 ? ` and ${remainingCount} more` : ""} for ${this.toolTarget}: ${rootName} is imported instead, but ${this.toolTarget} reads ${listedNames.length === 1 ? "that file" : "those files"} in place of ${rootName} when both exist. Move any content only it has into ${RULESYNC_RULES_RELATIVE_DIR_PATH} and delete it, so the generated ${rootName} takes effect.`,
-          );
-        }
-
-        return await buildImportRulesFromPaths(scannedPaths);
-      })();
+      const importOnlyToolRules = await this.loadImportOnlyToolRules(context);
       this.logger.debug(`Found ${importOnlyToolRules.length} import-only tool rule files`);
-
-      const nonRootToolRules = await (async () => {
-        if (!settablePaths.nonRoot) {
-          return [];
-        }
-
-        const nonRootOutputRoot = join(this.outputRoot, settablePaths.nonRoot.relativeDirPath);
-        const isSharedGlobalNonRootDir =
-          this.global && factory.meta.sharedGlobalNonRootDir === true;
-        const nonRootFilePaths = await findFilesByGlobs(
-          !forDeletion && factory.meta.nonRootImportGlob !== undefined
-            ? factory.meta.nonRootImportGlob
-            : `${isSharedGlobalNonRootDir ? "" : "**/"}*.${factory.meta.extension}`,
-          { cwd: nonRootOutputRoot, followSymbolicLinks: !forDeletion },
-        );
-
-        if (forDeletion) {
-          return buildDeletionRulesFromPaths(nonRootFilePaths, {
-            outputRootOverride: nonRootOutputRoot,
-            relativeDirPathOverride: settablePaths.nonRoot.relativeDirPath,
-          });
-        }
-
-        const modularRootRelative = settablePaths.nonRoot.relativeDirPath;
-
-        // When the root file lives in the same directory as the non-root files
-        // (e.g. Kiro's global steering, where the root is `~/.kiro/steering/
-        // product.md` alongside the non-root `~/.kiro/steering/*.md`), the
-        // non-root glob also matches the root file. Exclude it here so the root
-        // rule is not imported a second time as a non-root rule.
-        const rootFileNameInSameDir =
-          settablePaths.root?.relativeDirPath === settablePaths.nonRoot.relativeDirPath
-            ? settablePaths.root?.relativeFilePath
-            : undefined;
-
-        const nonRootPathsForImport = (
-          factory.class === RovodevRule
-            ? nonRootFilePaths.filter((filePath) => {
-                const relativeFilePath = relative(nonRootOutputRoot, filePath);
-                const ok = RovodevRule.isAllowedModularRulesRelativePath(relativeFilePath);
-                if (!ok) {
-                  this.logger.warn(
-                    `Skipping reserved Rovodev path under modular-rules (import): ${join(modularRootRelative, relativeFilePath)}`,
-                  );
-                }
-                return ok;
-              })
-            : nonRootFilePaths
-        ).filter(
-          (filePath) =>
-            rootFileNameInSameDir === undefined ||
-            relative(nonRootOutputRoot, filePath) !== rootFileNameInSameDir,
-        );
-
-        const loadedNonRootRules = await Promise.all(
-          nonRootPathsForImport.map(async (filePath) => {
-            const relativeFilePath = relative(nonRootOutputRoot, filePath);
-            checkPathTraversal({
-              relativePath: relativeFilePath,
-              intendedRootDir: nonRootOutputRoot,
-            });
-            try {
-              return await factory.class.fromFile({
-                outputRoot: this.outputRoot,
-                relativeDirPath: modularRootRelative,
-                relativeFilePath,
-                global: this.global,
-              });
-            } catch (error) {
-              // A shared directory holds files other writers own, so one of
-              // them being unreadable must not abort the whole import.
-              if (!isSharedGlobalNonRootDir) {
-                throw error;
-              }
-              this.logger.warn(
-                `Skipping ${stripControlCharacters(join(modularRootRelative, relativeFilePath))} for ${this.toolTarget}: ${formatError(error)}`,
-              );
-              return undefined;
-            }
-          }),
-        );
-        return loadedNonRootRules.filter((rule): rule is ToolRule => rule !== undefined);
-      })();
+      const nonRootToolRules = await this.loadNonRootToolRules(context);
       this.logger.debug(`Found ${nonRootToolRules.length} non-root tool rule files`);
 
       return [
@@ -3753,6 +1715,502 @@ As this project's AI coding tool, you must follow the additional conventions bel
       this.logger.error(`Failed to load tool files for ${this.toolTarget}: ${formatError(error)}`);
       return [];
     }
+  }
+
+  /** A discovered file's directory relative to the output root (`.` at the root). */
+  private resolveRelativeDirPath(filePath: string): string {
+    const dirName = dirname(relative(this.outputRoot, filePath));
+    return dirName === "" ? "." : dirName;
+  }
+
+  /**
+   * Deletion rules for root-shaped paths: the directory is resolved from the
+   * file itself and checked against the output root, and only deletable rules
+   * are kept.
+   */
+  private buildRootDeletionRules({
+    factory,
+    filePaths,
+  }: {
+    factory: ToolRuleFactory;
+    filePaths: string[];
+  }): ToolRule[] {
+    return filePaths
+      .map((filePath) => {
+        const relativeDirPath = this.resolveRelativeDirPath(filePath);
+        checkPathTraversal({
+          relativePath: relativeDirPath,
+          intendedRootDir: this.outputRoot,
+        });
+        return factory.class.forDeletion({
+          outputRoot: this.outputRoot,
+          relativeDirPath,
+          relativeFilePath: basename(filePath),
+          global: this.global,
+        });
+      })
+      .filter((rule) => rule.isDeletable());
+  }
+
+  /**
+   * Deletion rules for paths under the non-root directory: the file path is
+   * taken relative to that directory and checked against it, and only
+   * deletable rules are kept.
+   */
+  private buildNonRootDeletionRules({
+    factory,
+    filePaths,
+    nonRootOutputRoot,
+    relativeDirPath,
+  }: {
+    factory: ToolRuleFactory;
+    filePaths: string[];
+    nonRootOutputRoot: string;
+    relativeDirPath: string;
+  }): ToolRule[] {
+    return filePaths
+      .map((filePath) => {
+        const relativeFilePath = relative(nonRootOutputRoot, filePath);
+        checkPathTraversal({
+          relativePath: relativeFilePath,
+          intendedRootDir: nonRootOutputRoot,
+        });
+        return factory.class.forDeletion({
+          outputRoot: this.outputRoot,
+          relativeDirPath,
+          relativeFilePath,
+          global: this.global,
+        });
+      })
+      .filter((rule) => rule.isDeletable());
+  }
+
+  /**
+   * Import counterpart of {@link buildRootDeletionRules} for the root-shaped
+   * scans (root, legacy roots, read-only roots, extra fixed files and nested
+   * files), whose paths all sit at a directory Rulesync resolves from the file
+   * itself.
+   */
+  private buildImportRules({
+    factory,
+    filePaths,
+  }: {
+    factory: ToolRuleFactory;
+    filePaths: string[];
+  }): Promise<ToolRule[]> {
+    return Promise.all(
+      filePaths.map((filePath) => {
+        const relativeDirPath = this.resolveRelativeDirPath(filePath);
+        checkPathTraversal({
+          relativePath: relativeDirPath,
+          intendedRootDir: this.outputRoot,
+        });
+        return factory.class.fromFile({
+          outputRoot: this.outputRoot,
+          relativeDirPath,
+          relativeFilePath: basename(filePath),
+          global: this.global,
+        });
+      }),
+    );
+  }
+
+  /**
+   * Paths relative to the output root, stripped of control characters (they
+   * come off the filesystem) and capped at
+   * {@link MAX_LISTED_SKIPPED_IMPORT_ONLY_PATHS} with an `and N more` suffix.
+   */
+  private formatCappedPathList(filePaths: string[]): string {
+    const names = filePaths.map((filePath) =>
+      stripControlCharacters(relative(this.outputRoot, filePath)),
+    );
+    const listedNames = names.slice(0, MAX_LISTED_SKIPPED_IMPORT_ONLY_PATHS);
+    const remainingCount = names.length - listedNames.length;
+    return `${listedNames.join(", ")}${remainingCount > 0 ? ` and ${remainingCount} more` : ""}`;
+  }
+
+  /** The root rules (with legacy `alternativeRoots` as fallback), for import or deletion. */
+  private async loadRootToolRules({
+    factory,
+    settablePaths,
+    forDeletion,
+    omitsRootFiles,
+    primaryRootFilePaths,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    if (!settablePaths.root) {
+      return [];
+    }
+
+    if (forDeletion && omitsRootFiles) {
+      // Only sweep the file Rulesync writes: a `.claude/CLAUDE.md` is
+      // hand-authored, so it is reported instead of deleted.
+      await this.warnForShadowingRootFiles({ includePrimaryRoots: false });
+      return this.buildRootDeletionRules({ factory, filePaths: primaryRootFilePaths });
+    }
+
+    const uniqueRootFilePaths = await findFilesWithFallback(
+      primaryRootFilePaths,
+      settablePaths.alternativeRoots,
+      (alt) => rootRelativeGlob(alt.relativeDirPath, alt.relativeFilePath),
+      this.outputRoot,
+    );
+
+    if (forDeletion) {
+      return this.buildRootDeletionRules({ factory, filePaths: uniqueRootFilePaths });
+    }
+
+    return await this.buildImportRules({ factory, filePaths: uniqueRootFilePaths });
+  }
+
+  /**
+   * Load the separate `*.local.md` file (import and deletion) when the
+   * tool uses one, so a personal local-root file round-trips back to a
+   * canonical `localRoot: true` rulesync rule instead of being emit-only.
+   */
+  private async loadLocalRootToolRules({
+    factory,
+    settablePaths,
+    forDeletion,
+    omitsRootFiles,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    if (
+      this.global ||
+      factory.meta.localRootMode !== "separate-local-file" ||
+      !factory.meta.localRootFileName
+    ) {
+      return [];
+    }
+    const fileName = factory.meta.localRootFileName;
+
+    const filePaths = await (async () => {
+      if (factory.class.getLocalRootFileGlob) {
+        return await findFilesByGlobs(factory.class.getLocalRootFileGlob({ fileName }), {
+          cwd: this.outputRoot,
+        });
+      }
+      if (!settablePaths.root) {
+        return [];
+      }
+      const primaryLocalFilePaths = await findFilesByGlobs(
+        rootRelativeGlob(settablePaths.root.relativeDirPath ?? ".", fileName),
+        { cwd: this.outputRoot },
+      );
+      if (forDeletion && omitsRootFiles) {
+        return primaryLocalFilePaths;
+      }
+      return await findFilesWithFallback(
+        primaryLocalFilePaths,
+        settablePaths.alternativeRoots,
+        (alt) => rootRelativeGlob(alt.relativeDirPath, fileName),
+        this.outputRoot,
+      );
+    })();
+
+    if (forDeletion) {
+      return this.buildRootDeletionRules({ factory, filePaths: filePaths });
+    }
+
+    const importedRules = await Promise.all(
+      filePaths.map(async (filePath) => {
+        const relativeDirPath = this.resolveRelativeDirPath(filePath);
+        checkPathTraversal({
+          relativePath: relativeDirPath,
+          intendedRootDir: this.outputRoot,
+        });
+        const body = await readFileContent(filePath);
+        return this.buildLocalRootFile({
+          factory,
+          fileName: basename(filePath),
+          body,
+          relativeDirPath,
+          localRoot: true,
+        });
+      }),
+    );
+    return importedRules.filter((rule): rule is ToolRule => rule !== null);
+  }
+
+  /** The root mirror files to delete, only while the primary root file exists. */
+  private async loadRootMirrorDeletionRules({
+    factory,
+    forDeletion,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    const rootMirror = factory.class.getRootMirror?.();
+    if (!forDeletion || this.global || !rootMirror) {
+      return [];
+    }
+    const { primaryGlob, mirrorGlob } = rootMirror.getMirrorDeletionGlobs();
+    const primaryPaths = await findFilesByGlobs(primaryGlob, { cwd: this.outputRoot });
+    if (primaryPaths.length === 0) {
+      return [];
+    }
+    const mirrorPaths = await findFilesByGlobs(mirrorGlob, { cwd: this.outputRoot });
+    return this.buildRootDeletionRules({ factory, filePaths: mirrorPaths });
+  }
+
+  /**
+   * Extra fixed-path files (e.g. Pi's APPEND_SYSTEM.md) enumerated for both
+   * import and deletion so they round-trip and stale files are cleaned up —
+   * except `importOnly` entries, which are enumerated on import only.
+   */
+  private async loadExtraFixedToolRules({
+    factory,
+    forDeletion,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    const extraFiles = factory.class
+      .getExtraFixedFiles?.({ global: this.global })
+      .filter((file) => !(forDeletion && file.importOnly));
+    if (!extraFiles || extraFiles.length === 0) {
+      return [];
+    }
+
+    // Files only: a glob entry such as `*.md` would otherwise match a
+    // directory named `x.md`, which cannot be read as a rule.
+    const findExtraFiles = async (files: ToolRuleExtraFixedFile[]) =>
+      files.length === 0
+        ? []
+        : await findFilesByGlobs(
+            files.map((file) => rootRelativeGlob(file.relativeDirPath, file.relativeFilePath)),
+            { cwd: this.outputRoot, type: "file" },
+          );
+    const managedFilePaths = await findExtraFiles(extraFiles.filter((file) => !file.importOnly));
+    if (forDeletion) {
+      return managedFilePaths.length === 0
+        ? []
+        : this.buildRootDeletionRules({ factory, filePaths: managedFilePaths });
+    }
+
+    // An `importOnly` directory is shared with hand-written files, so a
+    // symlink there (the file or a directory above it) may point anywhere;
+    // skip it rather than copy its target into `.rulesync/rules/`, where
+    // it may be committed. A link is detected as a file whose real path,
+    // taken against the real output root, differs from its spelled one.
+    const importOnlyFilePaths: string[] = [];
+    for (const filePath of await findExtraFiles(extraFiles.filter((file) => file.importOnly))) {
+      const spelledPath = toPosixPath(relative(this.outputRoot, filePath));
+      const realPath = await resolvedRelativePath({
+        rootPath: this.outputRoot,
+        targetPath: filePath,
+      });
+      if (realPath !== spelledPath) {
+        this.logger.warn(
+          `Skipping symbolic link ${stripControlCharacters(spelledPath)} on import: ${this.toolTarget} files reached through a link are not copied into ${RULESYNC_RULES_RELATIVE_DIR_PATH}.`,
+        );
+        continue;
+      }
+      importOnlyFilePaths.push(filePath);
+    }
+    const filePaths = [...managedFilePaths, ...importOnlyFilePaths];
+    if (filePaths.length === 0) {
+      return [];
+    }
+
+    return await this.buildImportRules({ factory, filePaths: filePaths });
+  }
+
+  /**
+   * Pattern-discovered rule files (the AGENTS.md standard's nested
+   * subproject files). Import only — see `getNestedFileGlobs`.
+   */
+  private async loadNestedToolRules({
+    factory,
+    forDeletion,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    // Never in global mode: the output root is the home directory there, and
+    // walking all of it looking for subprojects is both wrong and expensive.
+    const patterns = this.global ? undefined : factory.class.getNestedFilePatterns?.();
+    if (forDeletion || !patterns || patterns.include.length === 0) {
+      return [];
+    }
+
+    // Symlinks are not followed. Unlike the fixed-path scans, this one walks
+    // the whole project tree, so a symlink committed to a repository could
+    // otherwise pull a file from outside the project (a key, a dotfile) into
+    // version-controlled `.rulesync/rules/`. Not following them also keeps a
+    // pair of directory symlinks from exploding the traversal.
+    const matchedPaths = await findFilesByGlobs(patterns.include, {
+      cwd: this.outputRoot,
+      type: "file",
+      followSymbolicLinks: false,
+      ignore: patterns.ignore,
+    });
+
+    // The project's own statement of what is not its source. Without it a
+    // vendored dependency's rule file — third-party content the user
+    // deliberately kept untracked — would be copied into version-controlled
+    // `.rulesync/rules/`, and targets that concatenate non-root rules into
+    // one file would then load it unconditionally.
+    const filePaths = filterOutPathsInGitIgnoredDirectories({
+      rootDir: this.outputRoot,
+      filePaths: matchedPaths,
+      ownedDirPath: patterns.ownedDirPath,
+    });
+
+    return await this.buildImportRules({ factory, filePaths: filePaths });
+  }
+
+  /**
+   * Read-only rule roots a tool documents but Rulesync never writes to
+   * (Junie's `.junie/rules/*.md` and `.junie/playbook.md`). Import only:
+   * since generation never produces them, treating them as deletion
+   * candidates would delete hand-authored files rulesync does not own.
+   *
+   * These are fixed, tool-owned directories, so this scan mirrors the
+   * `nonRoot` one below rather than the nested one above: symlinks are
+   * followed, because a shared rules tree linked into `.junie/rules` is a
+   * supported layout (see `docs/guide/separate-input-root.md` on symlinks
+   * and trust). It runs in project scope only — see `importOnlyRoots`.
+   */
+  private async loadImportOnlyToolRules({
+    factory,
+    settablePaths,
+    forDeletion,
+    primaryRootFilePaths,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    // Project scope only — `ToolRuleSettablePathsGlobal` has no
+    // `importOnlyRoots`, so in global mode this narrows away rather than
+    // globbing relative directories under the user's home.
+    const importOnlyRoots =
+      "importOnlyRoots" in settablePaths ? settablePaths.importOnlyRoots : undefined;
+    if (forDeletion || !importOnlyRoots || importOnlyRoots.length === 0) {
+      return [];
+    }
+
+    // A root file that exists has already absorbed these rules on a previous
+    // generate (Junie folds non-root rules into `.junie/AGENTS.md`), so
+    // re-importing them beside it would duplicate the same content once per
+    // import/generate cycle. See `onlyWhenRootAbsent`. Only the tool's own
+    // root counts — see `primaryRootFilePaths`.
+    const rootFilePath = primaryRootFilePaths[0];
+
+    const scannedPaths: string[] = [];
+    const skippedPaths: string[] = [];
+    const skippedOutrankingPaths: string[] = [];
+    for (const importOnlyRoot of importOnlyRoots) {
+      const matchedPaths = await findFilesByGlobs(
+        rootRelativeGlob(
+          importOnlyRoot.relativeDirPath,
+          importOnlyRoot.relativeFilePath ?? `*.${factory.meta.extension}`,
+        ),
+        { cwd: this.outputRoot, type: "file" },
+      );
+      if (importOnlyRoot.onlyWhenRootAbsent === true && rootFilePath !== undefined) {
+        (importOnlyRoot.outranksRoot === true ? skippedOutrankingPaths : skippedPaths).push(
+          ...matchedPaths,
+        );
+        continue;
+      }
+      scannedPaths.push(...matchedPaths);
+    }
+
+    // Left unreported these look imported but silently are not, and the
+    // tool no longer reads them either — a state worth acting on. The
+    // names come off the filesystem, so they are stripped of control
+    // characters before reaching a terminal, and the list is capped so a
+    // large rules directory cannot turn one warning into a wall of text.
+    if (skippedPaths.length > 0 && rootFilePath !== undefined) {
+      this.logger.warn(
+        `Not importing ${this.formatCappedPathList(skippedPaths)} for ${this.toolTarget}: ${stripControlCharacters(relative(this.outputRoot, rootFilePath))} exists, and the tool reads that file exclusively. Delete them once you have checked that content is in the root file, or move it into ${RULESYNC_RULES_RELATIVE_DIR_PATH} if it is not.`,
+      );
+    }
+
+    // The tool reads these instead of the root file, so the root file just
+    // imported is the one it ignores.
+    if (skippedOutrankingPaths.length > 0 && rootFilePath !== undefined) {
+      const rootName = stripControlCharacters(relative(this.outputRoot, rootFilePath));
+      this.logger.warn(
+        `Not importing ${this.formatCappedPathList(skippedOutrankingPaths)} for ${this.toolTarget}: ${rootName} is imported instead, but ${this.toolTarget} reads ${skippedOutrankingPaths.length === 1 ? "that file" : "those files"} in place of ${rootName} when both exist. Move any content only it has into ${RULESYNC_RULES_RELATIVE_DIR_PATH} and delete it, so the generated ${rootName} takes effect.`,
+      );
+    }
+
+    return await this.buildImportRules({ factory, filePaths: scannedPaths });
+  }
+
+  /** The non-root rules under the tool's non-root directory, for import or deletion. */
+  private async loadNonRootToolRules({
+    factory,
+    settablePaths,
+    forDeletion,
+  }: ToolFileLoadContext): Promise<ToolRule[]> {
+    if (!settablePaths.nonRoot) {
+      return [];
+    }
+
+    const nonRootOutputRoot = join(this.outputRoot, settablePaths.nonRoot.relativeDirPath);
+    const isSharedGlobalNonRootDir = this.global && factory.meta.sharedGlobalNonRootDir === true;
+    const nonRootFilePaths = await findFilesByGlobs(
+      !forDeletion && factory.meta.nonRootImportGlob !== undefined
+        ? factory.meta.nonRootImportGlob
+        : `${isSharedGlobalNonRootDir ? "" : "**/"}*.${factory.meta.extension}`,
+      { cwd: nonRootOutputRoot, followSymbolicLinks: !forDeletion },
+    );
+
+    if (forDeletion) {
+      return this.buildNonRootDeletionRules({
+        factory,
+        filePaths: nonRootFilePaths,
+        nonRootOutputRoot,
+        relativeDirPath: settablePaths.nonRoot.relativeDirPath,
+      });
+    }
+
+    const modularRootRelative = settablePaths.nonRoot.relativeDirPath;
+
+    // When the root file lives in the same directory as the non-root files
+    // (e.g. Kiro's global steering, where the root is `~/.kiro/steering/
+    // product.md` alongside the non-root `~/.kiro/steering/*.md`), the
+    // non-root glob also matches the root file. Exclude it here so the root
+    // rule is not imported a second time as a non-root rule.
+    const rootFileNameInSameDir =
+      settablePaths.root?.relativeDirPath === settablePaths.nonRoot.relativeDirPath
+        ? settablePaths.root?.relativeFilePath
+        : undefined;
+
+    const nonRootPathsForImport = nonRootFilePaths
+      .filter((filePath) => {
+        const warning = factory.class.getNonRootImportSkipWarning?.({
+          relativeFilePath: relative(nonRootOutputRoot, filePath),
+          nonRootRelativeDirPath: modularRootRelative,
+        });
+        if (warning !== undefined) {
+          this.logger.warn(warning);
+        }
+        return warning === undefined;
+      })
+      .filter(
+        (filePath) =>
+          rootFileNameInSameDir === undefined ||
+          relative(nonRootOutputRoot, filePath) !== rootFileNameInSameDir,
+      );
+
+    const loadedNonRootRules = await Promise.all(
+      nonRootPathsForImport.map(async (filePath) => {
+        const relativeFilePath = relative(nonRootOutputRoot, filePath);
+        checkPathTraversal({
+          relativePath: relativeFilePath,
+          intendedRootDir: nonRootOutputRoot,
+        });
+        try {
+          return await factory.class.fromFile({
+            outputRoot: this.outputRoot,
+            relativeDirPath: modularRootRelative,
+            relativeFilePath,
+            global: this.global,
+          });
+        } catch (error) {
+          // A shared directory holds files other writers own, so one of
+          // them being unreadable must not abort the whole import.
+          if (!isSharedGlobalNonRootDir) {
+            throw error;
+          }
+          this.logger.warn(
+            `Skipping ${stripControlCharacters(join(modularRootRelative, relativeFilePath))} for ${this.toolTarget}: ${formatError(error)}`,
+          );
+          return undefined;
+        }
+      }),
+    );
+    return loadedNonRootRules.filter((rule): rule is ToolRule => rule !== undefined);
   }
 
   /**

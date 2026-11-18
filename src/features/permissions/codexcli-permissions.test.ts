@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import * as smolToml from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -2500,6 +2500,72 @@ command = "node"
     expect(content).toContain('decision = "forbidden"');
   });
 
+  describe("codexcli.bash_canonical_matching", () => {
+    const bash = {
+      "git status": "allow",
+      "gh pr view": "ask",
+      "rm -rf /": "deny",
+    } as const;
+
+    it("should not write canonical_matching by default", () => {
+      const content = createCodexcliBashRulesFile({
+        outputRoot: testDir,
+        config: { permission: { bash } },
+      }).getFileContent();
+
+      expect(content).not.toContain("canonical_matching");
+    });
+
+    it("should not write canonical_matching when explicitly false", () => {
+      const content = createCodexcliBashRulesFile({
+        outputRoot: testDir,
+        config: { permission: { bash }, codexcli: { bash_canonical_matching: false } },
+      }).getFileContent();
+
+      expect(content).not.toContain("canonical_matching");
+    });
+
+    it("should write canonical_matching on forbidden and prompt rules only when true", () => {
+      const content = createCodexcliBashRulesFile({
+        outputRoot: testDir,
+        config: { permission: { bash }, codexcli: { bash_canonical_matching: true } },
+      }).getFileContent();
+
+      expect(content).toMatch(
+        /pattern = \["rm", "-rf", "\/"\],\s*decision = "forbidden",\s*justification = [^\n]*,\n {4}canonical_matching = True,\n\)/,
+      );
+      expect(content).toMatch(
+        /pattern = \["gh", "pr", "view"\],\s*decision = "prompt",\s*justification = [^\n]*,\n {4}canonical_matching = True,\n\)/,
+      );
+      expect(content).toMatch(
+        /pattern = \["git", "status"\],\s*decision = "allow",\s*justification = [^\n]*,\n\)/,
+      );
+      expect(content.match(/canonical_matching = True/g)).toHaveLength(2);
+    });
+
+    it("should not write bash_canonical_matching into config.toml", async () => {
+      const logger = createMockLogger();
+      const permissions = await CodexcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        logger,
+        rulesyncPermissions: new RulesyncPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".rulesync",
+          relativeFilePath: "permissions.json",
+          fileContent: JSON.stringify({
+            permission: { bash },
+            codexcli: { bash_canonical_matching: true },
+          }),
+        }),
+      });
+
+      expect(permissions.getFileContent()).not.toContain("canonical_matching");
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("bash_canonical_matching"),
+      );
+    });
+  });
+
   it("should not auto-approve a bash allow that an all-tools deny covers", () => {
     const rulesFile = createCodexcliBashRulesFile({
       outputRoot: testDir,
@@ -2781,6 +2847,128 @@ command = "node"
       });
       expect(reimported.toRulesyncPermissions().getJson().codexcli?.tui).toEqual({
         vim_mode_default: true,
+      });
+    });
+
+    it("authors and round-trips the [tools] table (update_plan.enabled)", async () => {
+      const logger = createMockLogger();
+      const rulesyncPermissions = new RulesyncPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "permissions.json",
+        fileContent: JSON.stringify({
+          permission: { read: { "src/**": "allow" } },
+          codexcli: { tools: { update_plan: { enabled: true } } },
+        }),
+      });
+
+      const codexPermissions = await CodexcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions,
+        logger,
+      });
+
+      const parsed = smolToml.parse(codexPermissions.getFileContent()) as Record<string, unknown>;
+      expect(parsed.tools).toEqual({ update_plan: { enabled: true } });
+      expect(logger.warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain(
+        '"tools" is not managed',
+      );
+
+      const reimported = new CodexcliPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".codex",
+        relativeFilePath: "config.toml",
+        fileContent: codexPermissions.getFileContent(),
+      });
+      expect(reimported.toRulesyncPermissions().getJson().codexcli?.tools).toEqual({
+        update_plan: { enabled: true },
+      });
+    });
+
+    it("shallow-merges an authored [tools] table with existing keys and imports it", async () => {
+      const codexDir = join(testDir, ".codex");
+      await ensureDir(codexDir);
+      await writeFileContent(
+        join(codexDir, "config.toml"),
+        ["[tools.web_search]", 'context_size = "low"'].join("\n"),
+      );
+      const rulesyncPermissions = new RulesyncPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "permissions.json",
+        fileContent: JSON.stringify({
+          permission: { bash: { "git status": "allow" } },
+          codexcli: { tools: { update_plan: { enabled: true } } },
+        }),
+      });
+
+      const codexPermissions = await CodexcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions,
+      });
+
+      const parsed = smolToml.parse(codexPermissions.getFileContent()) as Record<string, unknown>;
+      expect(parsed.tools).toEqual({
+        web_search: { context_size: "low" },
+        update_plan: { enabled: true },
+      });
+
+      const imported = new CodexcliPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".codex",
+        relativeFilePath: "config.toml",
+        fileContent: ["[tools.web_search]", 'context_size = "low"'].join("\n"),
+      });
+      expect(imported.toRulesyncPermissions().getJson().codexcli?.tools).toEqual({
+        web_search: { context_size: "low" },
+      });
+    });
+
+    it("authors and round-trips the [auto_review] table, shallow-merged with existing keys", async () => {
+      const codexDir = join(testDir, ".codex");
+      await ensureDir(codexDir);
+      await writeFileContent(
+        join(codexDir, "config.toml"),
+        ["[auto_review]", 'extra_policy = "Keep this."', "timeout_ms = 1000"].join("\n"),
+      );
+      const logger = createMockLogger();
+      const rulesyncPermissions = new RulesyncPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "permissions.json",
+        fileContent: JSON.stringify({
+          permission: { bash: { "git status": "allow" } },
+          codexcli: { auto_review: { policy: "Deny network calls.", timeout_ms: 0 } },
+        }),
+      });
+
+      const codexPermissions = await CodexcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions,
+        logger,
+      });
+
+      const parsed = smolToml.parse(codexPermissions.getFileContent()) as Record<string, unknown>;
+      expect(parsed.approvals_reviewer).toBe("auto_review");
+      expect(parsed.auto_review).toEqual({
+        extra_policy: "Keep this.",
+        policy: "Deny network calls.",
+        timeout_ms: 0,
+      });
+      expect(logger.warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain(
+        '"auto_review" is not managed',
+      );
+
+      const reimported = new CodexcliPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".codex",
+        relativeFilePath: "config.toml",
+        fileContent: codexPermissions.getFileContent(),
+      });
+      expect(reimported.toRulesyncPermissions().getJson().codexcli?.auto_review).toEqual({
+        extra_policy: "Keep this.",
+        policy: "Deny network calls.",
+        timeout_ms: 0,
       });
     });
 

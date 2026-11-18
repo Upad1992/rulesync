@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -706,15 +706,30 @@ describe("PoolPermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("should return a well-formed, non-deletable instance", () => {
-      const permissions = PoolPermissions.forDeletion({
+  describe("names that match Object.prototype members on import", () => {
+    it("imports allowed patterns and paths named like a prototype member as allow rules", () => {
+      const permissions = new PoolPermissions({
         outputRoot: testDir,
         relativeDirPath: ".poolside",
         relativeFilePath: "settings.yaml",
+        fileContent: [
+          "tools:",
+          "  shell:",
+          "    allow: ['toString']",
+          "paths:",
+          "  allow:",
+          "    - path: valueOf",
+          "      write: true",
+          "",
+        ].join("\n"),
       });
-      expect(permissions.getSettings()).toEqual({});
-      expect(permissions.isDeletable()).toBe(false);
+
+      expect(permissions.toRulesyncPermissions().getJson().permission).toEqual({
+        bash: { toString: "allow" },
+        read: { valueOf: "allow" },
+        edit: { valueOf: "allow" },
+        write: { valueOf: "allow" },
+      });
     });
   });
 });

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
@@ -42,6 +42,52 @@ describe("DevinPluginHooks", () => {
     expect(JSON.parse(hooks.getFileContent())).not.toHaveProperty("hooks");
   });
 
+  it("writes the canonical failClosed as fail_closed", async () => {
+    const rulesyncHooks = new RulesyncHooks({
+      outputRoot: testDir,
+      relativeDirPath: ".rulesync",
+      relativeFilePath: "hooks.json",
+      fileContent: JSON.stringify({
+        version: 1,
+        hooks: { preToolUse: [{ matcher: "exec", command: "./guard.sh", failClosed: true }] },
+      }),
+    });
+
+    const hooks = await DevinPluginHooks.fromRulesyncHooks({ outputRoot: testDir, rulesyncHooks });
+
+    expect(JSON.parse(hooks.getFileContent())).toEqual({
+      PreToolUse: [
+        {
+          matcher: "exec",
+          hooks: [{ type: "command", command: "./guard.sh", fail_closed: true }],
+        },
+      ],
+    });
+  });
+
+  it("keeps the trigger matcher of a preCompact hook under PreCompact", async () => {
+    const rulesyncHooks = new RulesyncHooks({
+      outputRoot: testDir,
+      relativeDirPath: ".rulesync",
+      relativeFilePath: "hooks.json",
+      fileContent: JSON.stringify({
+        version: 1,
+        hooks: { preCompact: [{ matcher: "manual", command: "./scripts/pre-compact.sh" }] },
+      }),
+    });
+
+    const hooks = await DevinPluginHooks.fromRulesyncHooks({ outputRoot: testDir, rulesyncHooks });
+
+    expect(JSON.parse(hooks.getFileContent())).toEqual({
+      PreCompact: [
+        {
+          matcher: "manual",
+          hooks: [{ type: "command", command: "./scripts/pre-compact.sh" }],
+        },
+      ],
+    });
+  });
+
   it("imports hooks.json back into canonical hooks", async () => {
     await writeFileContent(
       join(testDir, "hooks.json"),
@@ -57,6 +103,30 @@ describe("DevinPluginHooks", () => {
     expect(hooks).toBeInstanceOf(DevinPluginHooks);
     expect(hooks.toRulesyncHooks().getJson().hooks.preToolUse).toEqual([
       expect.objectContaining({ matcher: "exec", command: "./scripts/check.sh" }),
+    ]);
+  });
+
+  it("imports fail_closed from hooks.json as the canonical failClosed", async () => {
+    await writeFileContent(
+      join(testDir, "hooks.json"),
+      JSON.stringify({
+        PreToolUse: [
+          {
+            matcher: "exec",
+            hooks: [{ type: "command", command: "./scripts/guard.sh", fail_closed: true }],
+          },
+        ],
+      }),
+    );
+
+    const hooks = await DevinPluginHooks.fromFile({ outputRoot: testDir });
+
+    expect(hooks.toRulesyncHooks().getJson().hooks.preToolUse).toEqual([
+      expect.objectContaining({
+        matcher: "exec",
+        command: "./scripts/guard.sh",
+        failClosed: true,
+      }),
     ]);
   });
 });

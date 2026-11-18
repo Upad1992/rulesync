@@ -1,12 +1,9 @@
-import { join } from "node:path";
-
 import { z } from "zod/mini";
 
+import { AGENTSMD_SKILLS_DIR_PATH } from "../../constants/agentsmd-paths.js";
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { QWENCODE_SKILLS_DIR_PATH } from "../../constants/qwencode-paths.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
-import { formatError } from "../../utils/error.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
 import { resolveDisableModelInvocation, resolveUserInvocable } from "./skills-utils.js";
 import {
@@ -120,8 +117,20 @@ export class QwencodeSkill extends ToolSkill {
   }: {
     global?: boolean;
   } = {}): ToolSkillSettablePaths {
+    // Qwen Code reads project skills from `.qwen/skills/` and user skills from
+    // `~/.qwen/skills/`; both share the relative path, with only the output
+    // base differing. It also discovers the cross-tool Agent Skills root at
+    // `<projectRoot>/.agents/skills/` and `~/.agents/skills/`
+    // (`SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents']`). That root is
+    // import-only: rulesync never writes there for this target, so a skill
+    // another tool put in the shared tree must not become an orphan deletion
+    // candidate — least of all under the user's home directory. When the same
+    // skill name exists in both roots, the Qwen-specific root wins, matching
+    // Qwen Code's own "first directory wins" fold.
+    // @see https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/
     return {
       relativeDirPath: QWENCODE_SKILLS_DIR_PATH,
+      importOnlySkillRoots: [AGENTSMD_SKILLS_DIR_PATH],
     };
   }
 
@@ -130,28 +139,8 @@ export class QwencodeSkill extends ToolSkill {
     return result;
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (this.mainFile === undefined) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-    const result = QwencodeSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(QwencodeSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -180,16 +169,7 @@ export class QwencodeSkill extends ToolSkill {
       ...(Object.keys(qwencodeSection).length > 0 && { qwencode: qwencodeSection }),
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -250,53 +230,15 @@ export class QwencodeSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const frontmatter = rulesyncSkill.getFrontmatter();
-    const targets = frontmatter.targets;
-    return targets.includes("*") || targets.includes("qwencode");
-  }
+  protected static override readonly toolTarget = "qwencode";
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<QwencodeSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: QwencodeSkill.getSettablePaths,
-    });
-
-    const result = QwencodeSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new QwencodeSkill({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new QwencodeSkill(
+      await this.loadStandardSkillParams({ params, schema: QwencodeSkillFrontmatterSchema }),
+    );
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): QwencodeSkill {
-    return new QwencodeSkill({
-      outputRoot,
-      relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): QwencodeSkill {
+    return new QwencodeSkill(this.forDeletionParams(params));
   }
 }

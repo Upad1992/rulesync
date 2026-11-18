@@ -9,12 +9,12 @@ import {
 } from "../../constants/reasonix-paths.js";
 import type { ClaudeSettingsJson } from "../../types/claude-settings.js";
 import { readFileContentOrNull } from "../../utils/file.js";
-import { isPlainObject } from "../../utils/type-guards.js";
+import { isPlainObject, toStringArray } from "../../utils/type-guards.js";
 import {
   REASONIX_LEGACY_READ_TOOL_NAME,
   REASONIX_READ_TOOL_NAME,
-  toReasonixStringArray,
   toReasonixTable,
+  warnIfReasonixNestedProjectConfigShadowed,
 } from "../shared/reasonix-config-table.js";
 import {
   applyIgnoreReadDenies,
@@ -24,8 +24,10 @@ import {
   type SharedConfigDocument,
   stringifySharedConfig,
 } from "../shared/shared-config-gateway.js";
+import { claudeReadDenyPathToIgnorePattern } from "./claude-read-deny-pattern.js";
 import { RulesyncIgnore } from "./rulesync-ignore.js";
 import {
+  parseIgnorePatterns,
   ToolIgnore,
   ToolIgnoreForDeletionParams,
   ToolIgnoreFromFileParams,
@@ -53,12 +55,12 @@ const asClaudeStyleSettings = (document: SharedConfigDocument): ClaudeSettingsJs
     ...document,
     permissions: {
       ...table,
-      allow: toReasonixStringArray(table.allow),
-      ask: toReasonixStringArray(table.ask),
+      allow: toStringArray(table.allow),
+      ask: toStringArray(table.ask),
       // Read denies rulesync wrote under the legacy `Read(...)` spelling never
       // matched a Reasonix tool. They are dropped here so the `read_file(...)`
       // replacements below are the only copies left.
-      deny: toReasonixStringArray(table.deny).filter(
+      deny: toStringArray(table.deny).filter(
         (entry) => !isReadDenyEntry(entry, REASONIX_LEGACY_READ_TOOL_NAME),
       ),
     },
@@ -69,7 +71,10 @@ const asClaudeStyleSettings = (document: SharedConfigDocument): ClaudeSettingsJs
 const readDenyPatternOf = (entry: string): string | null => {
   for (const toolName of [REASONIX_READ_TOOL_NAME, REASONIX_LEGACY_READ_TOOL_NAME]) {
     if (isReadDenyEntry(entry, toolName)) {
-      return entry.slice(toolName.length + 1, -1);
+      return claudeReadDenyPathToIgnorePattern({
+        path: entry.slice(toolName.length + 1, -1),
+        toolLabel: "Reasonix",
+      });
     }
   }
   return null;
@@ -107,7 +112,7 @@ export class ReasonixIgnore extends ToolIgnore {
     super(params);
 
     const document = parseSharedConfig({ format: "toml", fileContent: this.fileContent });
-    this.patterns = toReasonixStringArray(permissionsTableOf(document).deny);
+    this.patterns = toStringArray(permissionsTableOf(document).deny);
   }
 
   static getSettablePaths({
@@ -137,24 +142,21 @@ export class ReasonixIgnore extends ToolIgnore {
         .filter((pattern): pattern is string => pattern !== null && pattern.length > 0),
     );
 
-    return new RulesyncIgnore({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RulesyncIgnore.getSettablePaths().recommended.relativeDirPath,
-      relativeFilePath: RulesyncIgnore.getSettablePaths().recommended.relativeFilePath,
-      fileContent: rulesyncPatterns.join("\n"),
-    });
+    return this.toRulesyncIgnoreDefault({ fileContent: rulesyncPatterns.join("\n") });
   }
 
   static async fromRulesyncIgnore({
     outputRoot = process.cwd(),
     rulesyncIgnore,
     global = false,
+    logger,
   }: ToolIgnoreFromRulesyncIgnoreParams): Promise<ReasonixIgnore> {
-    const patterns = rulesyncIgnore
-      .getFileContent()
-      .split(/\r?\n|\r/)
-      .map((line: string) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"));
+    await warnIfReasonixNestedProjectConfigShadowed({
+      outputRoot,
+      global,
+      logger,
+    });
+    const patterns = parseIgnorePatterns(rulesyncIgnore.getFileContent());
     const readDenies = patterns.map((pattern) =>
       buildReadDenyEntry(pattern, REASONIX_READ_TOOL_NAME),
     );

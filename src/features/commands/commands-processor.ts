@@ -2,11 +2,6 @@ import { basename, dirname, join, relative } from "node:path";
 
 import { z } from "zod/mini";
 
-import { GOOSE_GLOBAL_DIR, GOOSE_MCP_FILE_NAME } from "../../constants/goose-paths.js";
-import {
-  HERMESAGENT_CONFIG_FILE_PATH,
-  HERMESAGENT_RULESYNC_COMMANDS_PLUGIN_OWNERSHIP_PATH,
-} from "../../constants/hermesagent-paths.js";
 import {
   COMMANDS_FEATURE_SUBDIR,
   RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
@@ -16,7 +11,6 @@ import {
   ClaimedIdentities,
   FeatureProcessor,
   mergeByCaseInsensitiveIdentity,
-  refusesWriteOutsideRoot,
 } from "../../types/feature-processor.js";
 import type { FlattenedCommandNaming } from "../../types/features.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
@@ -29,11 +23,8 @@ import {
   checkPathTraversal,
   directoryExistsStrict,
   findFilesByGlobs,
-  readFileContentOrNull,
   toPosixPath,
-  writeFileContent,
 } from "../../utils/file.js";
-import { getHermesagentRelativeFilePath } from "../../utils/hermesagent.js";
 import type { Logger } from "../../utils/logger.js";
 import { AgentsmdCommand } from "./agentsmd-command.js";
 import { AntigravityCliCommand } from "./antigravity-cli-command.js";
@@ -54,17 +45,11 @@ import { CopilotCommand } from "./copilot-command.js";
 import { CursorCommand } from "./cursor-command.js";
 import { DevinCommand } from "./devin-command.js";
 import { FactorydroidCommand } from "./factorydroid-command.js";
+import { FirebenderCommand } from "./firebender-command.js";
 import { GitlabduoCommand } from "./gitlabduo-command.js";
-import {
-  getGooseSlashCommandsConfigContent,
-  GooseCommand,
-  hasManagedGooseSlashCommands,
-} from "./goose-command.js";
+import { GooseCommand } from "./goose-command.js";
 import { GrokcliCommand } from "./grokcli-command.js";
-import {
-  getDisabledHermesCommandsPluginConfigContent,
-  HermesagentCommand,
-} from "./hermesagent-command.js";
+import { HermesagentCommand } from "./hermesagent-command.js";
 import { JunieCommand } from "./junie-command.js";
 import { KiloCommand } from "./kilo-command.js";
 import { KimiCodeCommand } from "./kimi-code-command.js";
@@ -72,9 +57,11 @@ import { KimiCodePluginCommand } from "./kimi-code-plugin-command.js";
 import { KiroCliCommand } from "./kiro-cli-command.js";
 import { KiroCommand } from "./kiro-command.js";
 import { KiroIdeCommand } from "./kiro-ide-command.js";
+import { LettacodeCommand } from "./lettacode-command.js";
 import { MimocodeCommand } from "./mimocode-command.js";
 import { OmpCommand } from "./omp-command.js";
 import { OpenCodeCommand } from "./opencode-command.js";
+import { Opencodev1Command } from "./opencodev1-command.js";
 import { PiCommand } from "./pi-command.js";
 import { QoderCommand } from "./qoder-command.js";
 import { QwencodeCommand } from "./qwencode-command.js";
@@ -86,6 +73,7 @@ import { TabnineCommand } from "./tabnine-command.js";
 import { TaktCommand } from "./takt-command.js";
 import {
   ToolCommand,
+  ToolCommandAfterOrphanSweepParams,
   ToolCommandForDeletionParams,
   ToolCommandFromFileParams,
   ToolCommandFromRulesyncCommandParams,
@@ -130,6 +118,8 @@ type ToolCommandFactory = {
       global?: boolean;
       forDeletion?: boolean;
     }): Promise<ToolFile[]> | ToolFile[];
+    /** See {@link ToolCommand.afterOrphanSweep}. */
+    afterOrphanSweep?(params: ToolCommandAfterOrphanSweepParams): Promise<number>;
     canDeleteAuxiliaryFiles?(params: {
       outputRoot: string;
       global?: boolean;
@@ -158,7 +148,7 @@ type ToolCommandFactory = {
   };
   meta: {
     /** File extension for the command file */
-    extension: "json" | "md" | "toml" | "prompt.md" | "yaml";
+    extension: "json" | "md" | "mdc" | "toml" | "prompt.md" | "yaml";
     /** Whether the tool supports project-level commands */
     supportsProject: boolean;
     /** Whether the tool supports global (user-level) commands */
@@ -175,6 +165,21 @@ type ToolCommandFactory = {
      * or crashing on — files that feature (or the user) placed there.
      */
     skipToolFileScan?: boolean;
+    /**
+     * Whether the upstream tool reads the project commands from the
+     * **committed** repository through a root too generic to ignore (Letta
+     * Code's repository-root `.commands/`). The gitignore derivation skips such
+     * outputs: a recursive entry for `.commands/` would hide hand-authored
+     * prompts that belong in version control.
+     *
+     * The `--delete` orphan sweep also leaves such a project root alone: it
+     * routinely holds hand-authored commands that no `.rulesync/commands/`
+     * source accounts for, and nothing on disk tells them apart from a command
+     * rulesync generated earlier. Generation still overwrites the commands it
+     * emits; a stale generated command there has to be removed by hand. Global
+     * scope is swept as usual.
+     */
+    committedOutput?: boolean;
     failOnFlattenCollision?: boolean;
     /**
      * When true, a command from `loadAdditionalImportFiles` is treated as a
@@ -483,6 +488,22 @@ export const toolCommandFactories = new Map<CommandsProcessorToolTarget, ToolCom
     },
   ],
   [
+    "firebender",
+    {
+      class: FirebenderCommand,
+      meta: {
+        // Firebender commands are `.mdc` files under .firebender/commands/
+        // (project) and ~/.firebender/commands/ (personal/global).
+        // https://docs.firebender.com/api-reference/commands
+        extension: "mdc",
+        supportsProject: true,
+        supportsGlobal: true,
+        isSimulated: false,
+        supportsSubdirectory: false,
+      },
+    },
+  ],
+  [
     "goose",
     {
       class: GooseCommand,
@@ -654,6 +675,28 @@ export const toolCommandFactories = new Map<CommandsProcessorToolTarget, ToolCom
     },
   ],
   [
+    "lettacode",
+    {
+      // Letta Code custom slash commands: `*.md` files discovered recursively
+      // under `.commands/` (project, at the working-directory root rather than
+      // under `.letta/`) and `~/.letta/commands/` (global). Commands are
+      // invoked by basename; subdirectories only organize files.
+      // https://docs.letta.com/platform/cli/slash-commands
+      class: LettacodeCommand,
+      meta: {
+        extension: "md",
+        supportsProject: true,
+        supportsGlobal: true,
+        isSimulated: false,
+        supportsSubdirectory: true,
+        // The project `.commands/` is a generic repository-root directory that
+        // is committed and may hold hand-written prompts: not gitignored, and
+        // never swept by `--delete`.
+        committedOutput: true,
+      },
+    },
+  ],
+  [
     "mimocode",
     {
       class: MimocodeCommand,
@@ -683,6 +726,19 @@ export const toolCommandFactories = new Map<CommandsProcessorToolTarget, ToolCom
     "opencode",
     {
       class: OpenCodeCommand,
+      meta: {
+        extension: "md",
+        supportsProject: true,
+        supportsGlobal: true,
+        isSimulated: false,
+        supportsSubdirectory: true,
+      },
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Command,
       meta: {
         extension: "md",
         supportsProject: true,
@@ -959,6 +1015,10 @@ const commandsProcessorToolTargetsGlobal: ToolTarget[] = allToolTargetKeys.filte
 export class CommandsProcessor extends FeatureProcessor {
   private readonly toolTarget: CommandsProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
   private readonly getFactory: GetFactory;
   private readonly flattenedCommandNaming: FlattenedCommandNaming;
 
@@ -1153,6 +1213,23 @@ export class CommandsProcessor extends FeatureProcessor {
   }
 
   /**
+   * Whether {@link loadToolFiles} must not scan the tool's output tree at all.
+   * `skipToolFileScan` targets never scan it; a `committedOutput` target is not
+   * swept at project scope, because nothing on disk tells a hand-written
+   * command in such a committed root apart from one rulesync generated.
+   */
+  private skipsToolFileScan({
+    factory,
+    forDeletion,
+  }: {
+    factory: ToolCommandFactory;
+    forDeletion: boolean;
+  }): boolean {
+    if (factory.meta.skipToolFileScan) return true;
+    return forDeletion && factory.meta.committedOutput === true && !this.global;
+  }
+
+  /**
    * Implementation of abstract method from FeatureProcessor
    * Load tool-specific command configurations and parse them into ToolCommand instances
    */
@@ -1162,7 +1239,7 @@ export class CommandsProcessor extends FeatureProcessor {
     forDeletion?: boolean;
   } = {}): Promise<ToolFile[]> {
     const factory = this.getFactory(this.toolTarget);
-    if (factory.meta.skipToolFileScan) {
+    if (this.skipsToolFileScan({ factory, forDeletion })) {
       return [];
     }
     const paths = factory.class.getSettablePaths({ global: this.global });
@@ -1316,101 +1393,20 @@ export class CommandsProcessor extends FeatureProcessor {
     existingFiles: AiFile[],
     generatedFiles: AiFile[],
   ): Promise<number> {
-    const ownershipPath = join(
-      this.outputRoot,
-      getHermesagentRelativeFilePath({
-        global: this.global,
-        relativeFilePath: HERMESAGENT_RULESYNC_COMMANDS_PLUGIN_OWNERSHIP_PATH,
-      }),
-    );
-    const ownershipMarker =
-      this.toolTarget === "hermesagent"
-        ? existingFiles.find((file) => file.getFilePath() === ownershipPath)
-        : undefined;
     const removedBefore = this.getRemovedPaths().length;
-    let changedCount = await super.removeOrphanAiFiles(existingFiles, generatedFiles);
-    // Decided after the base sweep, from what it actually removed (or would
-    // remove under `--check`): a marker it refused to delete — one reached
-    // through a link out of the root — stays in place, and disabling the
-    // plugin while its marker survives would leave the two out of step.
-    const shouldDisableHermesCommandsPlugin =
-      ownershipMarker !== undefined &&
-      this.getRemovedPaths()
-        .slice(removedBefore)
-        .some(
-          (removed) =>
-            removed.kind === "file" && removed.path === ownershipMarker.getRelativePathFromCwd(),
-        );
-
-    changedCount += await this.retractGooseSlashCommands(generatedFiles);
-
-    if (!shouldDisableHermesCommandsPlugin) return changedCount;
-    const configPath = join(
-      this.outputRoot,
-      getHermesagentRelativeFilePath({
+    const changedCount = await super.removeOrphanAiFiles(existingFiles, generatedFiles);
+    const factory = this.getFactory(this.toolTarget);
+    const auxiliaryChangedCount =
+      (await factory.class.afterOrphanSweep?.({
+        outputRoot: this.outputRoot,
         global: this.global,
-        relativeFilePath: HERMESAGENT_CONFIG_FILE_PATH,
-      }),
-    );
-    if (
-      await refusesWriteOutsideRoot({
+        dryRun: this.dryRun,
         logger: this.logger,
-        rootPath: this.outputRoot,
-        targetPath: configPath,
-      })
-    ) {
-      return changedCount;
-    }
-    const currentContent = await readFileContentOrNull(configPath);
-    if (currentContent === null) return changedCount;
-    const nextContent = getDisabledHermesCommandsPluginConfigContent({
-      currentContent,
-      global: this.global,
-    });
-    if (nextContent === currentContent) return changedCount;
-
-    if (this.dryRun) {
-      this.logger.info(`[DRY RUN] Would write: ${configPath}`);
-    } else {
-      await writeFileContent(configPath, nextContent);
-    }
-    changedCount++;
-    return changedCount;
-  }
-
-  /**
-   * Drop the `slash_commands` registrations when no Goose recipe is generated
-   * any more. `GooseCommand.getAuxiliaryFiles` handles every other case, but it
-   * is not reached when the whole feature has no source files left (`--delete`
-   * removes the recipes there), which would strand `/name` on a deleted recipe.
-   */
-  private async retractGooseSlashCommands(generatedFiles: AiFile[]): Promise<number> {
-    if (this.toolTarget !== "goose" || !this.global) return 0;
-    if (generatedFiles.some((file) => file instanceof GooseCommand)) return 0;
-
-    const configPath = join(this.outputRoot, GOOSE_GLOBAL_DIR, GOOSE_MCP_FILE_NAME);
-    if (
-      await refusesWriteOutsideRoot({
-        logger: this.logger,
-        rootPath: this.outputRoot,
-        targetPath: configPath,
-      })
-    ) {
-      return 0;
-    }
-    const currentContent = await readFileContentOrNull(configPath);
-    // Rewriting a config that holds no managed registration would reformat the
-    // user's file (dropping their comments) for no gain.
-    if (currentContent === null || !hasManagedGooseSlashCommands(currentContent)) return 0;
-    const nextContent = getGooseSlashCommandsConfigContent({ currentContent, entries: [] });
-    if (nextContent === currentContent) return 0;
-
-    if (this.dryRun) {
-      this.logger.info(`[DRY RUN] Would write: ${configPath}`);
-    } else {
-      await writeFileContent(configPath, nextContent);
-    }
-    return 1;
+        existingFiles,
+        generatedFiles,
+        removedPaths: this.getRemovedPaths().slice(removedBefore),
+      })) ?? 0;
+    return changedCount + auxiliaryChangedCount;
   }
 
   /**

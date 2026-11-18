@@ -1,9 +1,13 @@
+import { join } from "node:path";
+
 import {
   RULESYNC_HOOKS_FILE_NAME,
   RULESYNC_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
-import type { AiFileFromFileParams, AiFileParams } from "../../types/ai-file.js";
+import type { AiFileFromFileParams, AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { ToolFile } from "../../types/tool-file.js";
+import { formatError } from "../../utils/error.js";
+import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { buildHooksOwnershipLockFile, type OwnedHookRef } from "./hooks-ownership-lock.js";
 import { RulesyncHooks } from "./rulesync-hooks.js";
@@ -78,6 +82,11 @@ export abstract class ToolHooks extends ToolFile {
     }
   }
 
+  /** Hooks files carry no schema of their own to check; adapters that do override this. */
+  validate(): ValidationResult {
+    return { success: true, error: null };
+  }
+
   /**
    * The ownership record for this destination, or nothing when preservation is
    * off — in which case rulesync owns the whole list and needs no record.
@@ -126,22 +135,97 @@ export abstract class ToolHooks extends ToolFile {
     });
   }
 
-  static async fromFile(_params: ToolHooksFromFileParams): Promise<ToolHooks> {
-    throw new Error("Please implement this method in the subclass.");
+  /**
+   * Parse this file's content, rethrowing a failure with the tool's display
+   * name and the file path so an import names the file it could not read.
+   */
+  protected parseFileContentOrThrow<T>({
+    displayName,
+    parse,
+  }: {
+    displayName: string;
+    parse: (fileContent: string) => T;
+  }): T {
+    try {
+      return parse(this.getFileContent());
+    } catch (error) {
+      throw new Error(
+        `Failed to parse ${displayName} hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
+        { cause: error },
+      );
+    }
   }
 
-  static forDeletion(_params: ToolHooksForDeletionParams): ToolHooks {
-    throw new Error("Please implement this method in the subclass.");
+  /**
+   * `new this(params)` for the concrete adapter the static method was called
+   * on; the cast is what an abstract class needs to be constructed through
+   * `this`, and lives in one place.
+   */
+  protected static instantiate(params: ToolHooksParams): ToolHooks {
+    const ctor = this as unknown as new (p: ToolHooksParams) => ToolHooks;
+    return new ctor(params);
   }
 
-  static async getAuxiliaryFiles(_params: {
+  /** What {@link fromFile} reads when the hooks file does not exist. */
+  protected static getMissingFileContent(): string {
+    return '{"hooks":{}}';
+  }
+
+  /** The content of the instance {@link forDeletion} builds. */
+  protected static getDeletionFileContent(): string {
+    return JSON.stringify({ hooks: {} }, null, 2);
+  }
+
+  /**
+   * Reads the hooks file at the settable path, or {@link getMissingFileContent}
+   * when it is absent. Adapters that read more than one file override this.
+   */
+  static async fromFile({
+    outputRoot = process.cwd(),
+    validate = true,
+    global = false,
+  }: ToolHooksFromFileParams): Promise<ToolHooks> {
+    const paths = this.getSettablePaths({ global });
+    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
+    const fileContent = (await readFileContentOrNull(filePath)) ?? this.getMissingFileContent();
+    return this.instantiate({
+      outputRoot,
+      relativeDirPath: paths.relativeDirPath,
+      relativeFilePath: paths.relativeFilePath,
+      fileContent,
+      validate,
+    });
+  }
+
+  static forDeletion({
+    outputRoot = process.cwd(),
+    relativeDirPath,
+    relativeFilePath,
+  }: ToolHooksForDeletionParams): ToolHooks {
+    return this.instantiate({
+      outputRoot,
+      relativeDirPath,
+      relativeFilePath,
+      fileContent: this.getDeletionFileContent(),
+      validate: false,
+    });
+  }
+
+  /**
+   * Extra files to write next to the hooks file. By default that is the
+   * ownership lock, which only an adapter that preserved unowned handlers
+   * records (see {@link getOwnershipLockFiles}).
+   */
+  static async getAuxiliaryFiles({
+    toolHooks,
+  }: {
     outputRoot?: string;
     global?: boolean;
     /** The instance just built, for adapters whose extra files derive from it. */
     toolHooks?: ToolHooks;
     logger?: Logger;
-  }): Promise<ToolFile[]> {
-    return [];
+  } = {}): Promise<ToolFile[]> {
+    return toolHooks instanceof this ? toolHooks.getOwnershipLockFiles() : [];
   }
 
   /**

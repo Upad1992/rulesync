@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -187,6 +187,21 @@ describe("KiroSubagent", () => {
       name: "filename-agent",
       description: "Filename-derived agent",
     });
+  });
+
+  it("should derive an omitted nested agent name from its path", () => {
+    const subagent = new KiroSubagent({
+      outputRoot: testDir,
+      relativeDirPath: ".kiro/agents",
+      relativeFilePath: join("team", "planner.json"),
+      body: JSON.stringify({ description: "Nested agent" }),
+      fileContent: "",
+      validate: true,
+    });
+
+    const rulesyncSubagent = subagent.toRulesyncSubagent();
+    expect(rulesyncSubagent.getFrontmatter().name).toBe("team/planner");
+    expect(rulesyncSubagent.getRelativeFilePath()).toBe(join("team", "planner.md"));
   });
 
   it("should create KiroSubagent from RulesyncSubagent with frontmatter", () => {

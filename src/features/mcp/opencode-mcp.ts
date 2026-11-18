@@ -5,13 +5,28 @@ import { refine, z } from "zod/mini";
 
 import { OPENCODE_LAYOUT, type OpencodeLayout } from "../../constants/opencode-paths.js";
 import { ValidationResult } from "../../types/ai-file.js";
+import type { FeatureOptions } from "../../types/features.js";
 import { McpServers } from "../../types/mcp.js";
 import { readFileContentOrNull, toPosixPath } from "../../utils/file.js";
 import { parseJsonc as parseJsoncStrict } from "../../utils/jsonc.js";
 import type { Logger } from "../../utils/logger.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
 import { isRecord } from "../../utils/type-guards.js";
-import { findOpencodeV2McpContainers, lowerOpencodeV2Mcp } from "../opencode-config.js";
+import {
+  findOpencodeV2McpContainers,
+  getOpencodeMcpServerEntry,
+  getOpencodeV2GlobalMcpTimeout,
+  lowerOpencodeV2Mcp,
+  mergeOpencodeConfigValues,
+  raiseOpencodeServerToV2,
+  readOpencodeDotDirConfigLayers,
+  warnOpencodeDotDirOverrides,
+} from "../opencode-config.js";
+import {
+  findOpencodeMcpToolKeyOwner,
+  isBareOpencodeMcpServerPrefix,
+  opencodeMcpToolPermissionKey,
+} from "../shared/opencode-family-mcp-tool-keys.js";
 import {
   applySharedConfigPatch,
   sharedConfigFileKey,
@@ -30,6 +45,7 @@ import {
   resolveLocalMcpCommand,
   resolveRemoteMcpUrl,
   splitMcpServersByTransport,
+  skipServersWithEmptyEnabledTools,
   warnAndSkipMcpServer,
 } from "./mcp-transport.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
@@ -66,7 +82,7 @@ const OpencodeMcpLocalServerSchema = z.looseObject({
 
 // OpenCode native format for remote servers.
 // looseObject preserves documented-but-unmodeled per-server fields (e.g. `timeout`,
-// `oauth`, `protocol`, `codemode`) and future additions on round-trip. https://opencode.ai/docs/mcp-servers
+// `oauth`, `protocol`, `codemode`, `pool`) and future additions on round-trip. https://opencode.ai/docs/mcp-servers
 const OpencodeMcpRemoteServerSchema = z.looseObject({
   type: z.literal("remote"),
   url: z.string(),
@@ -82,15 +98,24 @@ const OpencodeMcpRemoteServerSchema = z.looseObject({
 // rulesync `mcp.json` is a multi-tool superset, so export uses an explicit
 // allow-list to avoid leaking other tools' keys (e.g. `kiroAutoApprove`,
 // `alwaysAllow`, `trust`) into `opencode.json`.
-// `protocol` (`legacy` | `auto` | `2026-07-28`) and `codemode` are OpenCode V2
-// per-server keys (https://opencode.ai/v2/docs/mcp-servers/). This adapter
-// reads and writes the V1 file shape (a flat `mcp` map), so the two keys reach
-// it only when a canonical server carries them — hand-authored in
-// `.rulesync/mcp.jsonc`, or imported from a flat-`mcp` `opencode.json` entry
-// that has them — and they are never emitted otherwise. V1's published schema
-// does not list them.
+// `protocol` (`legacy` | `auto` | `2026-07-28`), `codemode` and `pool` (OpenCode
+// 2.2.6+, shares one connection across directories) are OpenCode V2
+// per-server keys (https://opencode.ai/v2/docs/mcp-servers/). The OpenCode V2
+// target writes the `mcp.servers` envelope, while OpenCode V1 and MiMo Code
+// write the V1 file shape (a flat `mcp` map) unless the `mcp` feature option
+// `configShape` says otherwise, so these keys
+// reach it only when a canonical server carries them — hand-authored in
+// `.rulesync/mcp.jsonc`, or imported from an `opencode.json` entry that has
+// them — and they are never emitted otherwise. V1's published schema does not
+// list them.
 // https://opencode.ai/docs/mcp-servers
-const OPENCODE_PASSTHROUGH_SERVER_FIELDS = ["timeout", "oauth", "protocol", "codemode"] as const;
+const OPENCODE_PASSTHROUGH_SERVER_FIELDS = [
+  "timeout",
+  "oauth",
+  "protocol",
+  "codemode",
+  "pool",
+] as const;
 
 // Every field of the two transport schemas except `enabled`, which is what a
 // toggle entry carries, and `disabled`, which a toggle may carry too — plus
@@ -169,7 +194,8 @@ export function isOpencodeTransportServer(
 
 /**
  * Convert OpenCode native format back to standard MCP format
- * - type: "local" -> "stdio", "remote" -> "sse"
+ * - type: "local" -> "stdio", "remote" -> "sse" (OpenCode 1.x, which falls back
+ *   to SSE) or "http" (OpenCode 2.x, which speaks Streamable HTTP only)
  * - command (array) -> command (first element) + args (rest)
  * - environment -> env
  * - enabled -> disabled (inverted)
@@ -198,36 +224,76 @@ const OPENCODE_KNOWN_SERVER_KEYS = new Set([
 
 function convertFromOpencodeFormat(
   opencodeMcp: Record<string, OpencodeMcpServer>,
-  tools?: Record<string, boolean>,
+  tools: Record<string, boolean> | undefined,
+  remoteType: "sse" | "http",
 ): McpServers {
+  const serverNames = Object.keys(opencodeMcp);
+  // Pre-filter with findOpencodeToolOwner so sanitized and legacy raw prefixes
+  // both count as owned. The owner lookup needs a nonempty tool suffix, so a
+  // bare sanitized prefix (a_b_ for server a.b or a_b) is dropped here too;
+  // otherwise the orphan importer splits it into server a and tool b_.
+  // fromRulesyncMcp writes such a key back from the existing file, so the drop
+  // loses nothing on generate. Only a bare raw prefix (a.b_ for server a.b) is
+  // left to the raw `<server>_` check in orphanMcpToolFiltersToRulesync, which
+  // is why that second pass must stay.
+  const orphanTools = Object.fromEntries(
+    Object.entries(tools ?? {}).filter(
+      ([key]) =>
+        !findOpencodeToolOwner({ key, serverNames }) &&
+        !isBareOpencodeMcpServerPrefix({ key, serverNames }),
+    ),
+  );
   return {
-    ...orphanMcpToolFiltersToRulesync(opencodeMcp, tools),
-    ...convertOpencodeServers(opencodeMcp, tools),
+    ...orphanMcpToolFiltersToRulesync(opencodeMcp, orphanTools),
+    ...convertOpencodeServers(opencodeMcp, tools, remoteType),
   };
+}
+
+// OpenCode's top-level `tools` map holds only MCP toggles. Built-in tool names
+// never appear there (unlike Kilo), so the owner lookup uses an empty set.
+const OPENCODE_MCP_BUILTIN_TOOL_KEYS: ReadonlySet<string> = new Set();
+
+/** Recognize both OpenCode's sanitized names and keys older rulesync versions wrote. */
+function findOpencodeToolOwner({
+  key,
+  serverNames,
+}: {
+  key: string;
+  serverNames: readonly string[];
+}) {
+  // When two server names sanitize to the same prefix of equal length (for
+  // example `a.b` and `a_b`), findOpencodeMcpToolKeyOwner keeps the first
+  // listed server, so the later server's filters are attributed to it.
+  return findOpencodeMcpToolKeyOwner({
+    key,
+    serverNames,
+    builtinKeys: OPENCODE_MCP_BUILTIN_TOOL_KEYS,
+    acceptRawPrefix: true,
+  });
 }
 
 /** Split the shared top-level `tools` map into this server's own two lists. */
 function splitOpencodeServerTools(
   serverName: string,
+  serverNames: readonly string[],
   tools: Record<string, boolean> | undefined,
 ): { enabledTools: string[]; disabledTools: string[] } {
   const enabledTools: string[] = [];
   const disabledTools: string[] = [];
-  const prefix = `${serverName}_`;
-
   for (const [toolName, enabled] of Object.entries(tools ?? {})) {
-    if (!toolName.startsWith(prefix)) {
+    const owner = findOpencodeToolOwner({ key: toolName, serverNames });
+    if (owner?.serverName !== serverName) {
       continue;
     }
-    const toolSuffix = toolName.slice(prefix.length);
-    (enabled ? enabledTools : disabledTools).push(toolSuffix);
+    (enabled ? enabledTools : disabledTools).push(owner.toolName);
   }
   return { enabledTools, disabledTools };
 }
 
 function convertOpencodeServers(
   opencodeMcp: Record<string, OpencodeMcpServer>,
-  tools?: Record<string, boolean>,
+  tools: Record<string, boolean> | undefined,
+  remoteType: "sse" | "http",
 ): McpServers {
   return Object.fromEntries(
     Object.entries(opencodeMcp).map(([serverName, serverConfig]) => {
@@ -236,7 +302,11 @@ function convertOpencodeServers(
         Object.entries(serverConfig).filter(([key]) => !OPENCODE_KNOWN_SERVER_KEYS.has(key)),
       );
 
-      const { enabledTools, disabledTools } = splitOpencodeServerTools(serverName, tools);
+      const { enabledTools, disabledTools } = splitOpencodeServerTools(
+        serverName,
+        Object.keys(opencodeMcp),
+        tools,
+      );
 
       if (!isOpencodeTransportServer(serverConfig)) {
         // A toggle entry names a server another config layer defines, so there
@@ -260,7 +330,7 @@ function convertOpencodeServers(
             // Spread extras first so converter-derived fields below always win
             // on any key collision.
             ...extraFields,
-            type: "sse" as const,
+            type: remoteType,
             url: serverConfig.url,
             ...(serverConfig.enabled === false && { disabled: true }),
             ...(serverConfig.headers && { headers: serverConfig.headers }),
@@ -339,15 +409,16 @@ function warnAboutToggleDroppedKeys(
  * - env -> environment
  * - disabled -> enabled (inverted)
  * - enabledTools/disabledTools -> top-level tools map (with server name prefix)
- * - OpenCode-supported extras (timeout, oauth, protocol, codemode) -> passed through verbatim
+ * - OpenCode-supported extras (timeout, oauth, protocol, codemode, pool) -> passed through verbatim
  */
 function convertServerToOpencodeFormat(
   serverName: string,
   serverConfig: McpServerConfig,
   existingEntry: OpencodeMcpServer | undefined,
+  configShape: OpencodeMcpConfigShape,
   logger?: Logger,
 ): OpencodeMcpServer | null {
-  // Preserve OpenCode-supported extras (e.g. timeout, oauth, protocol, codemode) on export so a
+  // Preserve OpenCode-supported extras (e.g. timeout, oauth, protocol, codemode, pool) on export so a
   // round-trip keeps them. Spread first so derived fields below always win.
   const serverRecord = serverConfig as Record<string, unknown>;
   const passthrough: Record<string, unknown> = {};
@@ -360,6 +431,17 @@ function convertServerToOpencodeFormat(
   const enabled = serverConfig.disabled !== undefined ? !serverConfig.disabled : true;
 
   if (declaresNoTransport(serverConfig)) {
+    if (configShape === "v2") {
+      // OpenCode V2 documents no toggle-only entry: every `mcp.servers` entry
+      // is a local or remote server, so there is nothing to write.
+      return warnAndSkipMcpServer({
+        toolName: "OpenCode",
+        serverName,
+        reason:
+          'no transport, and the OpenCode V2 shape ("configShape": "v2") has no toggle-only entry',
+        logger,
+      });
+    }
     if (serverConfig.disabled === undefined) {
       // A toggle overrides whatever the global config or a marketplace says
       // about a server of this name, so writing `enabled: true` for a server
@@ -425,9 +507,37 @@ function convertServerToOpencodeFormat(
   };
 }
 
+/**
+ * OpenCode 2.x connects a `remote` server over Streamable HTTP only (its MCP
+ * client has no SSE fallback, unlike OpenCode 1.x), so a server that speaks
+ * only the legacy SSE transport is written as `remote` but cannot connect.
+ *
+ * @see https://opencode.ai/v2/docs/mcp-servers/
+ */
+function warnAboutOpencodeV2SseServers({
+  mcpServers,
+  convertedMcp,
+  logger,
+}: {
+  mcpServers: McpServers;
+  convertedMcp: Record<string, OpencodeMcpServer>;
+  logger?: Logger;
+}): void {
+  for (const [serverName, serverConfig] of Object.entries(mcpServers)) {
+    const written = Object.hasOwn(convertedMcp, serverName) ? convertedMcp[serverName] : undefined;
+    const isSse = serverConfig.type === "sse" || serverConfig.transport === "sse";
+    if (isSse && written !== undefined && "type" in written && written.type === "remote") {
+      logger?.warn(
+        `OpenCode MCP: server "${serverName}" uses the SSE transport, but OpenCode 2.x connects remote servers over Streamable HTTP only. Point it at a Streamable HTTP endpoint, or target "opencodev1" (OpenCode 1.x falls back to SSE).`,
+      );
+    }
+  }
+}
+
 function convertToOpencodeFormat(
   mcpServers: McpServers,
   existingMcp: Record<string, OpencodeMcpServer>,
+  configShape: OpencodeMcpConfigShape,
   logger?: Logger,
 ): {
   mcp: Record<string, OpencodeMcpServer>;
@@ -442,6 +552,7 @@ function convertToOpencodeFormat(
           serverName,
           serverConfig,
           existingMcp[serverName],
+          configShape,
           logger,
         );
 
@@ -450,12 +561,15 @@ function convertToOpencodeFormat(
         // filter turning off a dangerous tool is not this entry's to take away.
         if (serverConfig.enabledTools) {
           for (const tool of serverConfig.enabledTools) {
-            tools[`${serverName}_${tool}`] = true;
+            const key = opencodeMcpToolPermissionKey(serverName, tool);
+            // Different server/tool names can sanitize to the same key. An
+            // existing deny must survive a later allow, regardless of order.
+            tools[key] = tools[key] !== false;
           }
         }
         if (serverConfig.disabledTools) {
           for (const tool of serverConfig.disabledTools) {
-            tools[`${serverName}_${tool}`] = false;
+            tools[opencodeMcpToolPermissionKey(serverName, tool)] = false;
           }
         }
         return converted === null ? null : ([serverName, converted] as const);
@@ -466,9 +580,90 @@ function convertToOpencodeFormat(
   return { mcp, tools };
 }
 
+/**
+ * Copy each key of `existingTools` that is a bare sanitized `<server>_` prefix
+ * of one of `serverNames` into `tools`, unless a generated filter already
+ * writes the same key or another listed server owns it (`a_b_` is tool `b_` of
+ * server `a` when `a` is listed too). An owned key is the rulesync config's to
+ * write, so carrying it over would keep a filter the user removed. Mutates
+ * `tools` in place.
+ */
+function preserveBareOpencodeMcpServerPrefixKeys({
+  tools,
+  existingTools,
+  serverNames,
+}: {
+  tools: Record<string, boolean>;
+  existingTools: Record<string, boolean> | undefined;
+  serverNames: readonly string[];
+}): void {
+  for (const [key, enabled] of Object.entries(existingTools ?? {})) {
+    if (
+      !Object.hasOwn(tools, key) &&
+      isBareOpencodeMcpServerPrefix({ key, serverNames }) &&
+      !findOpencodeToolOwner({ key, serverNames })
+    ) {
+      tools[key] = enabled;
+    }
+  }
+}
+
+/**
+ * When the existing file does not pass the schema, its `tools` map cannot be
+ * read, so a bare `<server>_` key in it is not carried over. Say so rather
+ * than lift the deny it may hold without a word.
+ */
+function warnAboutUnreadableBareOpencodeMcpServerPrefixKeys({
+  existingJson,
+  serverNames,
+  logger,
+}: {
+  existingJson: unknown;
+  serverNames: readonly string[];
+  logger?: Logger;
+}): void {
+  const rawTools = isRecord(existingJson) ? existingJson.tools : undefined;
+  if (!isRecord(rawTools)) {
+    return;
+  }
+  // Same selection as preserveBareOpencodeMcpServerPrefixKeys: an owned key is
+  // never carried over, so it is not worth a warning either.
+  const bareKeys = Object.keys(rawTools).filter(
+    (key) =>
+      isBareOpencodeMcpServerPrefix({ key, serverNames }) &&
+      !findOpencodeToolOwner({ key, serverNames }),
+  );
+  if (bareKeys.length > 0) {
+    logger?.warn(
+      `OpenCode MCP: the existing config does not match the expected schema, so the bare server-prefix ` +
+        `tool ${bareKeys.length === 1 ? "key" : "keys"} ${bareKeys.map(quoteValueForWarning).join(", ")} ` +
+        `${bareKeys.length === 1 ? "is" : "are"} not kept in "tools".`,
+    );
+  }
+}
+
+/**
+ * The `mcp` key shape `generate` writes: OpenCode V1's flat `mcp.<name>` map
+ * with `enabled` (the default, which both 1.x and 2.x read), or OpenCode V2's
+ * `mcp.servers.<name>` envelope with `disabled`.
+ * https://opencode.ai/v2/docs/mcp-servers/
+ */
+type OpencodeMcpConfigShape = "v1" | "v2";
+
+const OpencodeMcpFeatureOptionsSchema = z.looseObject({
+  configShape: z.optional(z.enum(["v1", "v2"])),
+});
+
 export class OpencodeMcp extends ToolMcp {
   /** Directory layout; OpenCode forks (MiMo Code) override it. */
   protected static readonly layout: OpencodeLayout = OPENCODE_LAYOUT;
+
+  /**
+   * Per-server keys a fork's MCP schema adds on top of OpenCode's. On generate
+   * each one a canonical server carries is copied verbatim onto that server's
+   * local or remote entry, as `timeout` and `oauth` are. OpenCode adds none.
+   */
+  protected static readonly extraPassthroughServerFields: readonly string[] = [];
 
   private readonly json: OpencodeConfig;
 
@@ -523,6 +718,32 @@ export class OpencodeMcp extends ToolMcp {
   }
 
   /**
+   * Reads the `configShape` option of the target's `mcp` feature options
+   * (`targets.opencode.mcp.configShape`). It defaults to the layout's config
+   * version: the V2 envelope for OpenCode 2.x, the flat V1 map otherwise.
+   * Only a layout that reads the V2 spellings back can be given the V2 shape.
+   */
+  protected static resolveConfigShape(options?: FeatureOptions): OpencodeMcpConfigShape {
+    const defaultShape = this.layout.configVersion;
+    if (!options) {
+      return defaultShape;
+    }
+    const parsed = OpencodeMcpFeatureOptionsSchema.safeParse(options);
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid options for the ${this.layout.toolTarget} mcp feature: \`configShape\` must be either "v1" or "v2".`,
+      );
+    }
+    const configShape = parsed.data.configShape ?? defaultShape;
+    if (configShape === "v2" && !this.layout.readsV2ConfigSpellings) {
+      throw new Error(
+        `Invalid options for the ${this.layout.toolTarget} mcp feature: \`configShape: "v2"\` is supported only for OpenCode.`,
+      );
+    }
+    return configShape;
+  }
+
+  /**
    * opencode.json may contain other settings, so it should not be deleted.
    */
   override isDeletable(): boolean {
@@ -561,7 +782,19 @@ export class OpencodeMcp extends ToolMcp {
     }
 
     const fileContentToUse = fileContent ?? '{"mcp":{}}';
-    const json = parseJsonc(fileContentToUse);
+    // OpenCode merges `.opencode/opencode.json(c)` over the root config, so
+    // their servers are imported too, each file lowered on its own first.
+    const overlays = await readOpencodeDotDirConfigLayers({
+      outputRoot,
+      global,
+      layout: this.layout,
+    });
+    const json =
+      overlays.length === 0
+        ? parseJsonc(fileContentToUse)
+        : [parseJsonc(fileContentToUse), ...overlays.map(({ config }) => config)]
+            .map((layer: unknown) => this.lowerConfig(layer, logger))
+            .reduce(mergeOpencodeConfigValues);
     const newJson = { ...json, mcp: json.mcp ?? {} };
 
     return new this({
@@ -580,7 +813,9 @@ export class OpencodeMcp extends ToolMcp {
     validate = true,
     global = false,
     logger,
+    featureOptions,
   }: ToolMcpFromRulesyncMcpParams): Promise<OpencodeMcp> {
+    const configShape = this.resolveConfigShape(featureOptions);
     const basePaths = this.getSettablePaths({ global });
     const jsonDir = join(outputRoot, basePaths.relativeDirPath);
 
@@ -599,7 +834,11 @@ export class OpencodeMcp extends ToolMcp {
       }
     }
 
-    const mcpServers = rulesyncMcp.getMcpServers();
+    const mcpServers = skipServersWithEmptyEnabledTools({
+      mcpServers: rulesyncMcp.getMcpServers(),
+      toolName: "OpenCode",
+      logger,
+    });
     const transformedServers = convertEnvVarRefsToToolFormat({
       mcpServers,
       replacement: "{env:$1}",
@@ -610,8 +849,9 @@ export class OpencodeMcp extends ToolMcp {
     // A toggle under the V2 `mcp.servers` envelope counts too.
     const existingJson: unknown = parseJsonc(fileContent || "{}");
     const existingMcp = OpencodeConfigSchema.safeParse(this.lowerConfig(existingJson));
-    if (this.layout.readsV2ConfigSpellings && isRecord(existingJson)) {
-      const containers = findOpencodeV2McpContainers(existingJson.mcp);
+    const existingRawMcp = isRecord(existingJson) ? existingJson.mcp : undefined;
+    if (configShape === "v1" && this.layout.readsV2ConfigSpellings) {
+      const containers = findOpencodeV2McpContainers(existingRawMcp);
       if (containers.length > 0) {
         logger?.warn(
           `OpenCode MCP: the whole "mcp" key is rewritten in the flat V1 shape, so ` +
@@ -623,8 +863,49 @@ export class OpencodeMcp extends ToolMcp {
     const { mcp: convertedMcp, tools: mcpTools } = convertToOpencodeFormat(
       transformedServers,
       (existingMcp.success ? existingMcp.data.mcp : undefined) ?? {},
+      configShape,
       logger,
     );
+    this.copyExtraPassthroughServerFields({ convertedMcp, mcpServers: transformedServers });
+    // A bare `<server>_` key is left out on import (see
+    // isBareOpencodeMcpServerPrefix), so nothing in the rulesync config writes
+    // it back. Carry it over from the file instead: rewriting `tools` without
+    // it would silently lift a deny another config layer's server relies on.
+    if (existingMcp.success) {
+      preserveBareOpencodeMcpServerPrefixKeys({
+        tools: mcpTools,
+        existingTools: existingMcp.data.tools,
+        serverNames: Object.keys(transformedServers),
+      });
+    } else {
+      warnAboutUnreadableBareOpencodeMcpServerPrefixKeys({
+        existingJson: this.lowerConfig(existingJson),
+        serverNames: Object.keys(transformedServers),
+        logger,
+      });
+    }
+    if (this.layout.configVersion === "v2") {
+      warnAboutOpencodeV2SseServers({ mcpServers: transformedServers, convertedMcp, logger });
+    }
+    const generatedServers = undefinedWhenEmpty(convertedMcp);
+    const generatedMcp =
+      configShape === "v2"
+        ? this.toV2Mcp({ servers: convertedMcp, existingRawMcp })
+        : generatedServers;
+    const generatedTools = Object.keys(mcpTools).length > 0 ? mcpTools : undefined;
+    warnOpencodeDotDirOverrides({
+      // Overlays are compared in their lowered (flat) form, so the flat
+      // server map is what is checked in either shape.
+      generated: { mcp: generatedServers, tools: generatedTools },
+      overlays: (
+        await readOpencodeDotDirConfigLayers({ outputRoot, global, layout: this.layout })
+      ).map((overlay) => {
+        const lowered = this.lowerConfig(overlay.config);
+        return { ...overlay, config: isRecord(lowered) ? lowered : {} };
+      }),
+      rootFileName: relativeFilePath,
+      logger,
+    });
 
     return new this({
       outputRoot,
@@ -637,15 +918,75 @@ export class OpencodeMcp extends ToolMcp {
         fileKey: sharedConfigFileKey(basePaths),
         feature: "mcp",
         existingContent: fileContent ?? "",
-        patch: {
-          mcp: undefinedWhenEmpty(convertedMcp),
-          tools: Object.keys(mcpTools).length > 0 ? mcpTools : undefined,
-        },
+        patch: { mcp: generatedMcp, tools: generatedTools },
         filePath: join(jsonDir, relativeFilePath),
         logger,
       }),
       validate,
     });
+  }
+
+  /**
+   * Copies {@link OpencodeMcp.extraPassthroughServerFields} from each canonical
+   * server onto its generated transport entry. A toggle entry is left alone:
+   * it has no transport for these keys to configure.
+   */
+  private static copyExtraPassthroughServerFields({
+    convertedMcp,
+    mcpServers,
+  }: {
+    convertedMcp: Record<string, OpencodeMcpServer>;
+    mcpServers: McpServers;
+  }): void {
+    if (this.extraPassthroughServerFields.length === 0) {
+      return;
+    }
+    for (const [serverName, entry] of Object.entries(convertedMcp)) {
+      const source = Object.hasOwn(mcpServers, serverName) ? mcpServers[serverName] : undefined;
+      if (source === undefined || !isOpencodeTransportServer(entry)) {
+        continue;
+      }
+      const sourceRecord = source as Record<string, unknown>;
+      const entryRecord = entry as Record<string, unknown>;
+      for (const key of this.extraPassthroughServerFields) {
+        if (sourceRecord[key] !== undefined) {
+          entryRecord[key] = sourceRecord[key];
+        }
+      }
+    }
+  }
+
+  /**
+   * Builds the V2 `mcp` value: each server raised to the V2 spelling under the
+   * `mcp.servers` envelope, keeping what the existing file has that Rulesync
+   * cannot express (see {@link raiseOpencodeServerToV2}), plus the existing
+   * global `mcp.timeout`, which has no canonical counterpart.
+   */
+  private static toV2Mcp({
+    servers,
+    existingRawMcp,
+  }: {
+    servers: Record<string, OpencodeMcpServer>;
+    existingRawMcp: unknown;
+  }): Record<string, unknown> | undefined {
+    const v2Servers: Record<string, unknown> = {};
+    for (const [name, server] of Object.entries(servers)) {
+      Object.defineProperty(v2Servers, name, {
+        value: raiseOpencodeServerToV2(server, getOpencodeMcpServerEntry(existingRawMcp, name)),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    const globalTimeout = getOpencodeV2GlobalMcpTimeout(existingRawMcp);
+    const hasServers = Object.keys(v2Servers).length > 0;
+    if (!hasServers && globalTimeout === undefined) {
+      return undefined;
+    }
+    return {
+      ...(globalTimeout !== undefined && { timeout: globalTimeout }),
+      ...(hasServers && { servers: v2Servers }),
+    };
   }
 
   /**
@@ -773,7 +1114,12 @@ export class OpencodeMcp extends ToolMcp {
   }
 
   toRulesyncMcp(): RulesyncMcp {
-    const convertedMcpServers = convertFromOpencodeFormat(this.json.mcp ?? {}, this.json.tools);
+    const convertedMcpServers = convertFromOpencodeFormat(
+      this.json.mcp ?? {},
+      this.json.tools,
+      // OpenCode 2.x connects a `remote` server over Streamable HTTP only.
+      (this.constructor as typeof OpencodeMcp).layout.configVersion === "v2" ? "http" : "sse",
+    );
     const transformedServers = convertEnvVarRefsFromToolFormat({
       mcpServers: convertedMcpServers,
       pattern: BRACE_ENV_VAR_PATTERN,

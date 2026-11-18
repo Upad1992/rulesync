@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import * as smolToml from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -21,6 +21,42 @@ describe("ReasonixMcp", () => {
   afterEach(async () => {
     await cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("warns when generate would shadow a nested .reasonix/reasonix.toml", async () => {
+    await writeFileContent(
+      join(testDir, ".reasonix", "reasonix.toml"),
+      ["[permissions]", 'deny = ["Bash(rm *)"]'].join("\n"),
+    );
+    const rulesyncMcp = new RulesyncMcp({
+      outputRoot: testDir,
+      relativeDirPath: ".rulesync",
+      relativeFilePath: "mcp.json",
+      fileContent: JSON.stringify({ mcpServers: {} }),
+    });
+    const logger = createMockLogger();
+
+    await ReasonixMcp.fromRulesyncMcp({ outputRoot: testDir, rulesyncMcp, logger });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(String(logger.warn.mock.calls[0]?.[0])).toContain(
+      "Reasonix: .reasonix/reasonix.toml exists but reasonix.toml does not",
+    );
+  });
+
+  it("does not warn about the nested project config in global scope", async () => {
+    await writeFileContent(join(testDir, ".reasonix", "reasonix.toml"), "");
+    const rulesyncMcp = new RulesyncMcp({
+      outputRoot: testDir,
+      relativeDirPath: ".rulesync",
+      relativeFilePath: "mcp.json",
+      fileContent: JSON.stringify({ mcpServers: {} }),
+    });
+    const logger = createMockLogger();
+
+    await ReasonixMcp.fromRulesyncMcp({ outputRoot: testDir, rulesyncMcp, logger, global: true });
+
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("should export rulesync MCP servers as Reasonix [[plugins]] and preserve config keys", async () => {
@@ -961,6 +997,64 @@ describe("ReasonixMcp", () => {
       expect(logger.warn).not.toHaveBeenCalledWith(
         expect.stringContaining("project reasonix.toml"),
       );
+    });
+
+    // Reasonix v2.53.0 reads a project-declared `load` as `deferred`
+    // (`PluginEntry.DeclaredMCPLoad`), so a project `always` is still written
+    // (older v2 builds honor it) but named in a warning.
+    it.each([["always"], [" ALWAYS "]])(
+      "should warn that a project load of %j is ignored by Reasonix 2.53.0+ but still write it",
+      async (load) => {
+        const logger = createMockLogger();
+        const rulesyncMcp = new RulesyncMcp({
+          outputRoot: testDir,
+          relativeDirPath: ".rulesync",
+          relativeFilePath: "mcp.json",
+          fileContent: JSON.stringify({
+            mcpServers: { remote: { type: "http", url: "https://example.com/mcp", load } },
+          }),
+        });
+
+        const reasonixMcp = await ReasonixMcp.fromRulesyncMcp({
+          outputRoot: testDir,
+          rulesyncMcp,
+          logger,
+        });
+        const parsed = smolToml.parse(reasonixMcp.getFileContent()) as any;
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('"remote" sets "load" to "always" in the project reasonix.toml'),
+        );
+        expect(parsed.plugins[0].load).toBe(load);
+      },
+    );
+
+    it.each([
+      ["a global always", { load: "always" }, true],
+      ["a project deferred", { load: "deferred" }, false],
+      ["a disabled project always", { load: "always", disabled: true }, false],
+    ])("should not warn about load for %s", async (_label, fields, global) => {
+      const logger = createMockLogger();
+      const rulesyncMcp = new RulesyncMcp({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "mcp.json",
+        fileContent: JSON.stringify({
+          mcpServers: { remote: { type: "http", url: "https://example.com/mcp", ...fields } },
+        }),
+      });
+
+      const reasonixMcp = await ReasonixMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp,
+        global,
+        logger,
+      });
+
+      expect((smolToml.parse(reasonixMcp.getFileContent()) as any).plugins[0].load).toBe(
+        fields.load,
+      );
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('sets "load"'));
     });
 
     it.each([

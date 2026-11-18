@@ -7,9 +7,15 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
+import { kiroAgentNameFromPath } from "./kiro-subagent.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -82,7 +88,7 @@ export class KiroIdeSubagent extends ToolSubagent {
 
     const rulesyncFrontmatter: RulesyncSubagentFrontmatter = {
       targets: ["*"] as const,
-      name: name ?? this.getRelativeFilePath().replace(/\.md$/, ""),
+      name: name ?? kiroAgentNameFromPath(this.getRelativeFilePath()),
       description: description ?? "",
       ...(Object.keys(kiroIdeSection).length > 0 && { "kiro-ide": kiroIdeSection }),
     };
@@ -115,14 +121,13 @@ export class KiroIdeSubagent extends ToolSubagent {
       ...kiroIdeSection,
     };
 
-    const result = KiroIdeSubagentFrontmatterSchema.safeParse(rawFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid kiro-ide subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
+    const frontmatter = parseGeneratedSubagentFrontmatter({
+      schema: KiroIdeSubagentFrontmatterSchema,
+      frontmatter: rawFrontmatter,
+      toolTarget: "kiro-ide",
+      rulesyncSubagent,
+    });
 
-    const frontmatter = result.data;
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, frontmatter);
     const paths = this.getSettablePaths({ global });
@@ -140,16 +145,12 @@ export class KiroIdeSubagent extends ToolSubagent {
   }
 
   validate(): ValidationResult {
-    const result = KiroIdeSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: KiroIdeSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

@@ -4,9 +4,7 @@ import {
   ZCODE_PLUGIN_HOOKS_DIR,
   ZCODE_PLUGIN_HOOKS_FILE_NAME,
 } from "../../constants/plugin-paths.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
-import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { isRecord } from "../../utils/type-guards.js";
 import type { RulesyncHooks } from "./rulesync-hooks.js";
@@ -18,8 +16,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
@@ -32,7 +28,7 @@ import { stripProcessHooks, ZCODE_CONVERTER_CONFIG } from "./zcode-hooks.js";
  * consumer's project as its working directory, where a `./`-relative script
  * shipped in the plugin does not exist.
  */
-const ZCODE_PLUGIN_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const ZCODE_PLUGIN_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   ...ZCODE_CONVERTER_CONFIG,
   projectDirVar: "$ZCODE_PLUGIN_ROOT",
   prefixDotRelativeCommandsOnly: true,
@@ -72,22 +68,6 @@ export class ZcodePluginHooks extends ToolHooks {
       relativeDirPath: ZCODE_PLUGIN_HOOKS_DIR,
       relativeFilePath: ZCODE_PLUGIN_HOOKS_FILE_NAME,
     };
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-  }: ToolHooksFromFileParams): Promise<ZcodePluginHooks> {
-    const paths = this.getSettablePaths();
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new ZcodePluginHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -132,24 +112,6 @@ export class ZcodePluginHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): ZcodePluginHooks {
-    return new ZcodePluginHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

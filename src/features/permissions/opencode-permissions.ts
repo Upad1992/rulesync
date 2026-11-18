@@ -16,18 +16,33 @@ import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { parseJsonc as parseJsoncStrict } from "../../utils/jsonc.js";
 import type { Logger } from "../../utils/logger.js";
-import { isRecord } from "../../utils/type-guards.js";
+import { invertRecord, lookupOwn } from "../../utils/own-lookup.js";
+import { isRecord, toRecord } from "../../utils/type-guards.js";
+import {
+  lowerOpencodeV2Mcp,
+  mergeOpencodeConfigValues,
+  setOwnEntry,
+  toOpencodeV2PermissionRules,
+  readOpencodeDotDirConfigLayers,
+  warnOpencodeDotDirOverrides,
+} from "../opencode-config.js";
+import {
+  findOpencodeMcpToolKeyOwner,
+  opencodeMcpToolPermissionKey,
+  sanitizeOpencodeMcpNamePart,
+} from "../shared/opencode-family-mcp-tool-keys.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
+import { restateAllToolsRestrictionsLast } from "./last-match-restate.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { honorAllToolsOnBash } from "./shell-command-categories.js";
+import { honorAllToolsOnBash, MCP_CATEGORY_PREFIX } from "./shell-command-categories.js";
 import {
   collapseRulesToSingleAction,
   hasPatternSpecificRules,
+  isStricterAction,
   PERMISSION_ACTION_PRIORITY,
 } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -87,6 +102,28 @@ function toOpencodePermission({
 }
 
 /**
+ * OpenCode V2 matches `webfetch` / `websearch` against the URL / query, so
+ * their pattern maps are kept as V2 rules; only an empty map still collapses
+ * (to `deny`, rather than emitting no rule and falling through to OpenCode's
+ * default allow). The other action-only keys match `*` only, so they collapse
+ * to a single action in V2 as in V1.
+ */
+const OPENCODE_V2_PATTERN_ACTION_KEYS = new Set(["webfetch", "websearch"]);
+
+function collapsesInOpencodeV2({
+  category,
+  value,
+}: {
+  category: string;
+  value: OpencodePermission;
+}): boolean {
+  if (typeof value === "string" || !OPENCODE_ACTION_ONLY_PERMISSION_KEYS.has(category)) {
+    return false;
+  }
+  return !OPENCODE_V2_PATTERN_ACTION_KEYS.has(category) || Object.keys(value).length === 0;
+}
+
+/**
  * Canonical rulesync permission categories that carry a cross-tool meaning (see
  * the "Supported tool categories" list in `docs/reference/file-formats.md`).
  * On import, any OpenCode category outside this set — plus MCP tool names — is
@@ -118,11 +155,8 @@ const CANONICAL_TO_OPENCODE_PERMISSION_KEYS: Record<string, string> = {
   agent: "task",
 };
 
-const OPENCODE_TO_CANONICAL_PERMISSION_KEYS: Record<string, string> = Object.fromEntries(
-  Object.entries(CANONICAL_TO_OPENCODE_PERMISSION_KEYS).map(([canonical, opencode]) => [
-    opencode,
-    canonical,
-  ]),
+const OPENCODE_TO_CANONICAL_PERMISSION_KEYS: Record<string, string> = invertRecord(
+  CANONICAL_TO_OPENCODE_PERMISSION_KEYS,
 );
 
 /**
@@ -145,10 +179,99 @@ const CANONICAL_TO_OPENCODE_FOLDED_PERMISSION_KEYS: Record<string, string> = {
  */
 const OPENCODE_UNSUPPORTED_PERMISSION_CATEGORIES = new Set(["notebookedit"]);
 
+/**
+ * OpenCode permission keys (V1) and actions (V2) that are not MCP tools, so a
+ * server whose name is a prefix of one (`external` vs. `external_directory`,
+ * `opencode` vs. `opencode_read_mcp_resource`) does not claim it on import.
+ */
+const OPENCODE_BUILTIN_PERMISSION_KEYS: ReadonlySet<string> = new Set([
+  "*",
+  "read",
+  "edit",
+  "write",
+  "patch",
+  "apply_patch",
+  "glob",
+  "grep",
+  "list",
+  "bash",
+  "shell",
+  "task",
+  "subagent",
+  "external_directory",
+  "todowrite",
+  "question",
+  "webfetch",
+  "websearch",
+  "lsp",
+  "doom_loop",
+  "skill",
+  "opencode_list_mcp_resources",
+  "opencode_read_mcp_resource",
+]);
+
+/**
+ * The OpenCode permission key of a canonical `mcp__<server>__<tool>` category
+ * (see {@link opencodeMcpToolPermissionKey}), or `<server>_*` for a
+ * whole-server `mcp__<server>` category. Returns `undefined` for a category
+ * that is not an MCP tool name or whose server part is itself a wildcard,
+ * which has no OpenCode key that matches only MCP tools.
+ */
+function toOpencodeMcpPermissionKey(category: string): string | undefined {
+  if (!category.startsWith(MCP_CATEGORY_PREFIX)) {
+    return undefined;
+  }
+  const remainder = category.slice(MCP_CATEGORY_PREFIX.length);
+  const separator = remainder.indexOf("__");
+  const server = separator === -1 ? remainder : remainder.slice(0, separator);
+  const tool = separator === -1 ? "" : remainder.slice(separator + 2);
+  if (server === "" || /[*?]/.test(server)) {
+    return undefined;
+  }
+  return opencodeMcpToolPermissionKey(server, tool === "" ? "*" : tool);
+}
+
+/**
+ * The canonical `mcp__<server>__<tool>` category an OpenCode permission key
+ * names, for a key that starts with the sanitized name of one of
+ * `serverNames` followed by `_` (see {@link findOpencodeMcpToolKeyOwner}).
+ * `<server>_*` becomes the whole-server `mcp__<server>`. Servers whose
+ * sanitized names collide cannot be told apart, so they claim no key.
+ */
+function fromOpencodeMcpPermissionKey(
+  key: string,
+  serverNames: readonly string[],
+): string | undefined {
+  const sanitizedCounts = new Map<string, number>();
+  for (const name of serverNames) {
+    const sanitized = sanitizeOpencodeMcpNamePart(name);
+    sanitizedCounts.set(sanitized, (sanitizedCounts.get(sanitized) ?? 0) + 1);
+  }
+  const owner = findOpencodeMcpToolKeyOwner({
+    key,
+    serverNames: serverNames.filter(
+      (name) => sanitizedCounts.get(sanitizeOpencodeMcpNamePart(name)) === 1,
+    ),
+    builtinKeys: OPENCODE_BUILTIN_PERMISSION_KEYS,
+  });
+  if (owner === undefined) {
+    return undefined;
+  }
+  return owner.toolName === "*"
+    ? `${MCP_CATEGORY_PREFIX}${owner.serverName}`
+    : `${MCP_CATEGORY_PREFIX}${owner.serverName}__${owner.toolName}`;
+}
+
+/** The MCP server names an OpenCode config declares (V1 flat map or V2 `mcp.servers`). */
+function getOpencodeMcpServerNames(mcp: unknown): string[] {
+  const lowered = lowerOpencodeV2Mcp(mcp);
+  return isRecord(lowered) ? Object.keys(lowered) : [];
+}
+
 function toOpencodePermissionKey(canonical: string): string {
   return (
-    CANONICAL_TO_OPENCODE_PERMISSION_KEYS[canonical] ??
-    CANONICAL_TO_OPENCODE_FOLDED_PERMISSION_KEYS[canonical] ??
+    lookupOwn({ record: CANONICAL_TO_OPENCODE_PERMISSION_KEYS, key: canonical }) ??
+    lookupOwn({ record: CANONICAL_TO_OPENCODE_FOLDED_PERMISSION_KEYS, key: canonical }) ??
     canonical
   );
 }
@@ -175,10 +298,7 @@ function mergePatternRules(
   const merged: Record<string, PermissionAction> = { ...base };
   for (const [pattern, action] of Object.entries(incoming)) {
     const existing = Object.hasOwn(merged, pattern) ? merged[pattern] : undefined;
-    if (
-      existing === undefined ||
-      PERMISSION_ACTION_PRIORITY[action] > PERMISSION_ACTION_PRIORITY[existing]
-    ) {
+    if (isStricterAction({ action, existing })) {
       merged[pattern] = action;
     }
   }
@@ -190,7 +310,9 @@ function mergePatternRules(
 }
 
 function toCanonicalPermissionKey(opencodeKey: string): string {
-  return OPENCODE_TO_CANONICAL_PERMISSION_KEYS[opencodeKey] ?? opencodeKey;
+  return (
+    lookupOwn({ record: OPENCODE_TO_CANONICAL_PERMISSION_KEYS, key: opencodeKey }) ?? opencodeKey
+  );
 }
 
 function isSharedPermissionCategory(category: string): boolean {
@@ -201,8 +323,110 @@ function isSharedPermissionCategory(category: string): boolean {
   return (
     category === "*" ||
     CANONICAL_PERMISSION_CATEGORIES.has(category) ||
-    category.startsWith("mcp__")
+    category.startsWith(MCP_CATEGORY_PREFIX)
   );
+}
+
+/**
+ * One entry of OpenCode V2's ordered `permissions` array. The last matching
+ * entry wins.
+ *
+ * @see https://opencode.ai/v2/docs/permissions/
+ */
+const OpencodeV2PermissionRuleSchema = z.looseObject({
+  action: z.string(),
+  resource: z.string(),
+  effect: z.enum(["allow", "ask", "deny"]),
+});
+type OpencodeV2PermissionRule = z.infer<typeof OpencodeV2PermissionRuleSchema>;
+
+/**
+ * OpenCode V2 actions mapped back to the V1 permission keys the import path
+ * already translates into canonical categories.
+ */
+const OPENCODE_V2_TO_V1_PERMISSION_KEYS: Record<string, string> = {
+  shell: "bash",
+  subagent: "task",
+};
+
+/**
+ * Folds OpenCode V2's ordered `permissions` array back into the V1 per-key
+ * map the import path splits into canonical categories (`shell` → `bash`,
+ * `subagent` → `task`). A pattern repeated for one action keeps its last
+ * effect, as the last matching V2 rule wins; the relative order of rules
+ * across different actions is not representable in the map and is dropped.
+ */
+function fromOpencodeV2PermissionRules(
+  rules: readonly OpencodeV2PermissionRule[],
+): Record<string, Record<string, PermissionAction>> {
+  const permission: Record<string, Record<string, PermissionAction>> = {};
+  for (const { action, resource, effect } of rules) {
+    const key = lookupOwn({ record: OPENCODE_V2_TO_V1_PERMISSION_KEYS, key: action }) ?? action;
+    const patterns = Object.hasOwn(permission, key) ? permission[key]! : {};
+    // Re-insert so the pattern takes the position of its last occurrence.
+    // `setOwnEntry` keeps a `__proto__` action or resource an own key.
+    delete patterns[resource];
+    setOwnEntry(patterns, resource, effect);
+    setOwnEntry(permission, key, patterns);
+  }
+  return permission;
+}
+
+/**
+ * Translates the shared canonical permission block into OpenCode's native
+ * permission keys (`agent` → `task`, `write` → `edit`), so each rule is
+ * written under the key OpenCode actually reads. A folded `write` is merged
+ * with any canonical `edit` rules rather than replacing them.
+ */
+function toOpencodeSharedPermission({
+  permission,
+  toolTarget,
+  logger,
+}: {
+  permission: PermissionsConfig["permission"];
+  toolTarget: string;
+  logger?: Logger;
+}): Record<string, Record<string, PermissionAction>> {
+  const sharedPermission: Record<string, Record<string, PermissionAction>> = {};
+  for (const [category, value] of Object.entries(honorAllToolsOnBash(permission))) {
+    if (OPENCODE_UNSUPPORTED_PERMISSION_CATEGORIES.has(category)) {
+      logger?.warn(
+        `OpenCode has no permission key for the "${category}" category; its rules were skipped.`,
+      );
+      continue;
+    }
+    let key = toOpencodePermissionKey(category);
+    if (category.startsWith(MCP_CATEGORY_PREFIX)) {
+      const mcpKey = toOpencodeMcpPermissionKey(category);
+      if (mcpKey === undefined) {
+        logger?.warn(
+          `OpenCode names MCP tools "<server>_<tool>" and has no permission key for the "${category}" category; it was written verbatim and matches no OpenCode tool.`,
+        );
+      } else {
+        key = mcpKey;
+      }
+    }
+    const existing = Object.hasOwn(sharedPermission, key) ? sharedPermission[key] : undefined;
+    if (existing) {
+      const merged = mergePatternRules(existing, value);
+      if (merged !== existing) {
+        logger?.warn(
+          `Several canonical categories map to OpenCode's "${key}" key, so their rules were merged; patterns were reordered allow, ask, deny so no rule set is loosened, which disables an allow carve-out under a broader ask or deny pattern. Set ${toolTarget}.permission.${key} to control the exact order.`,
+        );
+      }
+      // OpenCode flattens every key's rules in object order and the last
+      // match wins across keys too (a `*` key also matches `edit`), so the
+      // merged map takes the native category's own position, never the
+      // folded one's: placing it earlier could let a later key override it.
+      if (category === key) {
+        delete sharedPermission[key];
+      }
+      sharedPermission[key] = merged;
+    } else {
+      sharedPermission[key] = value;
+    }
+  }
+  return restateAllToolsRestrictionsLast(sharedPermission);
 }
 
 const OpencodePermissionsConfigSchema = z.looseObject({
@@ -213,6 +437,8 @@ const OpencodePermissionsConfigSchema = z.looseObject({
   permission: z.optional(
     z.union([z.enum(["allow", "ask", "deny"]), z.record(z.string(), OpencodePermissionSchema)]),
   ),
+  // OpenCode V2's ordered rule list (read and written for a V2 layout only).
+  permissions: z.optional(z.array(OpencodeV2PermissionRuleSchema)),
 });
 
 type OpencodePermissionsConfig = z.infer<typeof OpencodePermissionsConfigSchema>;
@@ -230,10 +456,6 @@ export class OpencodePermissions extends ToolPermissions {
 
   getJson(): OpencodePermissionsConfig {
     return this.json;
-  }
-
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths({
@@ -266,16 +488,27 @@ export class OpencodePermissions extends ToolPermissions {
       }
     }
 
-    const parsed: unknown = parseJsonc(fileContent ?? "{}");
-    const record = isRecord(parsed) ? parsed : {};
+    // OpenCode merges `.opencode/opencode.json(c)` over the root config, so
+    // their permission rules are imported too.
+    const overlays = await readOpencodeDotDirConfigLayers({
+      outputRoot,
+      global,
+      layout: this.layout,
+    });
+    const parsed = overlays
+      .map(({ config }): unknown => config)
+      .reduce(mergeOpencodeConfigValues, parseJsonc(fileContent ?? "{}"));
+    const record = toRecord(parsed);
+    // Read as an own property rather than through the prototype chain:
+    // `jsonc-parser` assigns keys with `obj[key] = value`, so a literal
+    // `"__proto__": { "permission": ... }` in the config replaces this
+    // object's prototype, and `record.permission` would import a permission
+    // block that the word "permission" never appears next to in the file.
+    const v1Permission = Object.hasOwn(record, "permission") ? (record.permission ?? {}) : {};
+    const { permissions: v2Rules, ...rest } = record;
     const nextJson = {
-      ...record,
-      // Read as an own property rather than through the prototype chain:
-      // `jsonc-parser` assigns keys with `obj[key] = value`, so a literal
-      // `"__proto__": { "permission": ... }` in the config replaces this
-      // object's prototype, and `record.permission` would import a permission
-      // block that the word "permission" never appears next to in the file.
-      permission: Object.hasOwn(record, "permission") ? (record.permission ?? {}) : {},
+      ...rest,
+      permission: this.mergeV2PermissionRules({ v1Permission, v2Rules }),
     };
 
     return new this({
@@ -285,6 +518,49 @@ export class OpencodePermissions extends ToolPermissions {
       fileContent: JSON.stringify(nextJson, null, 2),
       validate,
     });
+  }
+
+  /**
+   * For a V2 layout, folds the V2 `permissions` array into the V1 map read
+   * from the same config. OpenCode V2 applies the V1 map's rules before the
+   * array's, so a key the array touches moves after the V1-only keys, with
+   * the array's patterns after (and over) its V1 patterns: otherwise a later
+   * V1 key could override a V2 rule that OpenCode V2 evaluates after it.
+   */
+  private static mergeV2PermissionRules({
+    v1Permission,
+    v2Rules,
+  }: {
+    v1Permission: unknown;
+    v2Rules: unknown;
+  }): unknown {
+    if (this.layout.configVersion !== "v2") {
+      return v1Permission;
+    }
+    const parsedRules = z.array(OpencodeV2PermissionRuleSchema).safeParse(v2Rules);
+    if (!parsedRules.success || parsedRules.data.length === 0) {
+      return v1Permission;
+    }
+    const fromV2 = fromOpencodeV2PermissionRules(parsedRules.data);
+    const merged: Record<string, unknown> = {};
+    const v1Map = typeof v1Permission === "string" ? { "*": v1Permission } : v1Permission;
+    if (isRecord(v1Map)) {
+      for (const [key, value] of Object.entries(v1Map)) {
+        setOwnEntry(merged, key, value);
+      }
+    }
+    for (const [key, patterns] of Object.entries(fromV2)) {
+      const existing = Object.hasOwn(merged, key) ? merged[key] : undefined;
+      const combined: Record<string, unknown> = {};
+      const base = typeof existing === "string" ? { "*": existing } : toRecord(existing);
+      for (const [resource, effect] of [...Object.entries(base), ...Object.entries(patterns)]) {
+        delete combined[resource];
+        setOwnEntry(combined, resource, effect);
+      }
+      delete merged[key];
+      setOwnEntry(merged, key, combined);
+    }
+    return merged;
   }
 
   static async fromRulesyncPermissions({
@@ -316,50 +592,39 @@ export class OpencodePermissions extends ToolPermissions {
     // replaces the shared entry without affecting other tools' outputs.
     const overridePermission = rulesyncJson[this.layout.toolTarget]?.permission ?? {};
 
-    // Translate canonical category names into OpenCode's native permission keys
-    // (`agent` → `task`, `write` → `edit`) before emitting them, so each rule is
-    // written under the key OpenCode actually reads. A folded `write` is merged
-    // with any canonical `edit` rules rather than replacing them.
-    const sharedPermission: Record<string, Record<string, PermissionAction>> = {};
-    for (const [category, value] of Object.entries(
-      honorAllToolsOnBash(rulesyncJson.permission ?? {}),
-    )) {
-      if (OPENCODE_UNSUPPORTED_PERMISSION_CATEGORIES.has(category)) {
-        logger?.warn(
-          `OpenCode has no permission key for the "${category}" category; its rules were skipped.`,
-        );
-        continue;
-      }
-      const key = toOpencodePermissionKey(category);
-      const existing = Object.hasOwn(sharedPermission, key) ? sharedPermission[key] : undefined;
-      if (existing) {
-        const merged = mergePatternRules(existing, value);
-        if (merged !== existing) {
-          logger?.warn(
-            `Several canonical categories map to OpenCode's "${key}" key, so their rules were merged; patterns were reordered allow, ask, deny so no rule set is loosened, which disables an allow carve-out under a broader ask or deny pattern. Set opencode.permission.${key} to control the exact order.`,
-          );
-        }
-        // OpenCode flattens every key's rules in object order and the last
-        // match wins across keys too (a `*` key also matches `edit`), so the
-        // merged map takes the native category's own position, never the
-        // folded one's: placing it earlier could let a later key override it.
-        if (category === key) {
-          delete sharedPermission[key];
-        }
-        sharedPermission[key] = merged;
-      } else {
-        sharedPermission[key] = value;
-      }
-    }
+    const sharedPermission = toOpencodeSharedPermission({
+      permission: rulesyncJson.permission ?? {},
+      toolTarget: this.layout.toolTarget,
+      logger,
+    });
 
+    const isV2 = this.layout.configVersion === "v2";
     const permission: Record<string, OpencodePermission> = {};
     for (const [category, value] of Object.entries({
       ...sharedPermission,
       ...overridePermission,
     })) {
-      const opencodePermission = toOpencodePermission({ category, value, logger });
-      permission[category] = opencodePermission;
+      permission[category] =
+        isV2 && !collapsesInOpencodeV2({ category, value })
+          ? value
+          : toOpencodePermission({ category, value, logger });
     }
+
+    // OpenCode V2 reads the V1 `permission` map too and applies it before the
+    // `permissions` array, so the V2 write retracts the V1 map rather than
+    // leaving stale rules in front of the generated ones.
+    const patch = isV2
+      ? { permissions: toOpencodeV2PermissionRules(permission), permission: undefined }
+      : { permission };
+
+    warnOpencodeDotDirOverrides({
+      // OpenCode V2 appends an overlay's rules (from either spelling) after
+      // the root config's, so they take precedence like a V1 overlay's keys.
+      generated: isV2 ? { permission, permissions: patch.permissions } : { permission },
+      overlays: await readOpencodeDotDirConfigLayers({ outputRoot, global, layout: this.layout }),
+      rootFileName: relativeFilePath,
+      logger,
+    });
 
     return new this({
       outputRoot,
@@ -369,7 +634,7 @@ export class OpencodePermissions extends ToolPermissions {
         fileKey: sharedConfigFileKey(basePaths),
         feature: "permissions",
         existingContent: fileContent ?? "",
-        patch: { permission },
+        patch,
         filePath: join(jsonDir, relativeFilePath),
         logger,
       }),
@@ -396,13 +661,23 @@ export class OpencodePermissions extends ToolPermissions {
     // (bare action string or pattern map) so the round-trip stays stable.
     const shared: PermissionsConfig["permission"] = {};
     const overrideOnly: NonNullable<OpencodePermissionsOverride["permission"]> = {};
+    const mcpServerNames = getOpencodeMcpServerNames(this.json.mcp);
     for (const [category, value] of Object.entries(rawPermission)) {
       // Translate OpenCode's native permission keys back into canonical category
-      // names (`task` → `agent`) so subagent-launch gating lands in the shared
-      // block instead of being treated as an OpenCode-only override.
-      const canonicalCategory = toCanonicalPermissionKey(category);
+      // names (`task` → `agent`, `<server>_<tool>` of a server the config
+      // declares → `mcp__<server>__<tool>`) so they land in the shared block
+      // instead of being treated as an OpenCode-only override.
+      const canonicalCategory =
+        fromOpencodeMcpPermissionKey(category, mcpServerNames) ??
+        toCanonicalPermissionKey(category);
       if (isSharedPermissionCategory(canonicalCategory)) {
-        shared[canonicalCategory] = typeof value === "string" ? { "*": value } : value;
+        const patterns = typeof value === "string" ? { "*": value } : value;
+        // Two keys can name one canonical category: a verbatim
+        // `mcp__<server>__<tool>` key earlier rulesync versions wrote next to
+        // the `<server>_<tool>` key OpenCode reads. Keep the stricter rules.
+        shared[canonicalCategory] = Object.hasOwn(shared, canonicalCategory)
+          ? mergePatternRules(shared[canonicalCategory]!, patterns)
+          : patterns;
       } else {
         overrideOnly[category] = value;
       }
@@ -439,20 +714,6 @@ export class OpencodePermissions extends ToolPermissions {
         error: new Error(`Failed to parse OpenCode permissions JSON: ${formatError(error)}`),
       };
     }
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): OpencodePermissions {
-    return new this({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ permission: {} }, null, 2),
-      validate: false,
-    });
   }
 
   /**

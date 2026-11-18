@@ -119,10 +119,6 @@ export class TaktSkill extends ToolSkill {
     return toPosixPath(this.relativeDirPath);
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   getFileName(): string {
     return this.fileName;
   }
@@ -178,10 +174,7 @@ export class TaktSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("takt");
-  }
+  protected static override readonly toolTarget = "takt";
 
   /**
    * Importing existing TAKT facet files into rulesync is not supported.

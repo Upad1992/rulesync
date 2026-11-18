@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import { KIMI_CODE_CONFIG_FILE_NAME } from "../../constants/kimi-code-paths.js";
 import type { SharedWritePath } from "../../lib/shared-file-derive.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
@@ -13,7 +13,8 @@ import {
   getKimiCodeRulesyncOutputRoot,
 } from "../../utils/kimi-code.js";
 import { type Logger, warnWithFallback } from "../../utils/logger.js";
-import { isRecord } from "../../utils/type-guards.js";
+import { lookupOwn } from "../../utils/own-lookup.js";
+import { isRecord, isStringArray, toRecord } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   KIMI_CODE_CONFIG_SHARED_FILE_KEY,
@@ -21,9 +22,10 @@ import {
   stringifySharedConfig,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
+import { MCP_CATEGORY_PREFIX } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -51,13 +53,13 @@ const CATEGORY_TO_KIMI_CODE_TOOL: Record<string, string> = {
 };
 
 function buildKimiCodePattern(category: string, pattern: string): string | null {
-  if (category.startsWith("mcp__")) {
+  if (category.startsWith(MCP_CATEGORY_PREFIX)) {
     return pattern === "*" || pattern === "" ? category : null;
   }
   if (category === "mcp") {
     return pattern === "*" || pattern === "" ? "mcp__*" : `mcp__${pattern}`;
   }
-  const tool = CATEGORY_TO_KIMI_CODE_TOOL[category];
+  const tool = lookupOwn({ record: CATEGORY_TO_KIMI_CODE_TOOL, key: category });
   if (!tool) {
     return null;
   }
@@ -88,8 +90,8 @@ function mergeKimiCodeToolsSection({
     existing = undefined;
   }
   const merged: Record<string, unknown> = {
-    ...(isRecord(existing) ? existing : {}),
-    ...(isRecord(patch.tools) ? patch.tools : {}),
+    ...toRecord(existing),
+    ...toRecord(patch.tools),
   };
   if (Object.keys(merged).length === 0) {
     return undefined;
@@ -123,10 +125,10 @@ function mergeKimiCodePermissionSection({
   } catch {
     existing = undefined;
   }
-  const { rules: _existingRules, ...siblings } = isRecord(existing) ? existing : {};
+  const { rules: _existingRules, ...siblings } = toRecord(existing);
   return {
     ...siblings,
-    ...(isRecord(patch.permission) ? patch.permission : {}),
+    ...toRecord(patch.permission),
   };
 }
 
@@ -153,14 +155,10 @@ function buildKimiCodeToolsSection(tools: unknown): Record<string, unknown> | un
   }
   const section = Object.fromEntries(
     Object.entries(tools).filter(([key, value]) =>
-      key === "enabled" || key === "disabled" ? isStringList(value) : true,
+      key === "enabled" || key === "disabled" ? isStringArray(value) : true,
     ),
   );
   return Object.keys(section).length > 0 ? section : undefined;
-}
-
-function isStringList(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
 /**
@@ -172,7 +170,7 @@ function isStringList(value: unknown): value is string[] {
  */
 function warnAboutMistypedToolLists(section: Record<string, unknown>): void {
   for (const key of ["enabled", "disabled"] as const) {
-    if (key in section && !isStringList(section[key])) {
+    if (key in section && !isStringArray(section[key])) {
       warnWithFallback(
         undefined,
         `Kimi Code permissions: \`[tools] ${key}\` in ${KIMI_CODE_CONFIG_SHARED_FILE_KEY} is not a list of strings. It is left as written, but Kimi may reject the whole \`[tools]\` section — including entries rulesync generated.`,
@@ -191,11 +189,18 @@ function canonicalToKimiCodeRules({
   const canonicalRules: KimiCodePermissionRule[] = [];
   const overrideRules = config["kimi-code"]?.rules ?? [];
 
-  for (const [category, rules] of Object.entries(config.permission)) {
+  // `*` restrictions reach `bash` and withhold the allows they cover in the
+  // other categories, since Kimi Code has no rule spanning every tool.
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Kimi Code",
+    logger,
+  });
+  for (const [category, rules] of Object.entries(permission)) {
     const isSupported =
       category === "mcp" ||
-      category.startsWith("mcp__") ||
-      CATEGORY_TO_KIMI_CODE_TOOL[category] !== undefined;
+      category.startsWith(MCP_CATEGORY_PREFIX) ||
+      lookupOwn({ record: CATEGORY_TO_KIMI_CODE_TOOL, key: category }) !== undefined;
     if (!isSupported) {
       if (Object.keys(rules).length > 0) {
         logger?.warn(`Kimi Code permissions: skipping unsupported category "${category}".`);
@@ -203,7 +208,7 @@ function canonicalToKimiCodeRules({
       continue;
     }
     for (const [pattern, decision] of Object.entries(rules)) {
-      if (category.startsWith("mcp__") && pattern !== "*" && pattern !== "") {
+      if (category.startsWith(MCP_CATEGORY_PREFIX) && pattern !== "*" && pattern !== "") {
         if (decision === "deny") {
           logger?.warn(
             `Kimi Code permissions: broadening argument-specific deny for "${category}" to the whole MCP tool because Kimi does not match MCP tool arguments.`,
@@ -370,14 +375,6 @@ export class KimiCodePermissions extends ToolPermissions {
     };
   }
 
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  override isDeletable(): boolean {
-    return false;
-  }
-
   /**
    * `config.toml` under both spellings its directory can take.
    * @see getKimiCodeSharedConfigWritePaths
@@ -478,7 +475,7 @@ export class KimiCodePermissions extends ToolPermissions {
       format: "toml",
       fileContent: this.getFileContent(),
     });
-    const permissionConfig = isRecord(config.permission) ? config.permission : {};
+    const permissionConfig = toRecord(config.permission);
     const { permission, nativeRules } = preserveKimiCodeRules(permissionConfig.rules);
     const defaultPermissionMode = config.default_permission_mode;
     const dangerousCommandGuard = permissionConfig.dangerous_command_guard;
@@ -509,17 +506,6 @@ export class KimiCodePermissions extends ToolPermissions {
         null,
         2,
       ),
-    });
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-  }: ToolPermissionsForDeletionParams): KimiCodePermissions {
-    return new KimiCodePermissions({
-      outputRoot,
-      fileContent: "",
-      validate: false,
-      global: true,
     });
   }
 }

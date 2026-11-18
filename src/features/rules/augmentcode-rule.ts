@@ -4,6 +4,7 @@ import { z } from "zod/mini";
 
 import { AUGMENTCODE_DIR } from "../../constants/augmentcode-paths.js";
 import { ValidationResult } from "../../types/ai-file.js";
+import { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
@@ -15,7 +16,6 @@ import {
   ToolRuleFromRulesyncRuleParams,
   ToolRuleParams,
   ToolRuleSettablePaths,
-  buildToolPath,
 } from "./tool-rule.js";
 
 /**
@@ -96,12 +96,11 @@ export class AugmentcodeRule extends ToolRule {
   static getSettablePaths(
     _options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): AugmentcodeRuleSettablePaths {
     return {
       nonRoot: {
-        relativeDirPath: buildToolPath(AUGMENTCODE_DIR, "rules", _options.excludeToolDir),
+        relativeDirPath: join(AUGMENTCODE_DIR, "rules"),
       },
     };
   }
@@ -244,10 +243,5 @@ export class AugmentcodeRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "augmentcode",
-    });
-  }
+  protected static override readonly toolTarget: ToolTarget = "augmentcode";
 }

@@ -4,7 +4,7 @@ import { uniq } from "es-toolkit";
 import * as smolToml from "smol-toml";
 
 import { DEEPAGENTS_CONFIG_FILE_NAME, DEEPAGENTS_DIR } from "../../constants/deepagents-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type {
   DeepagentsPermissionsOverride,
   PermissionAction,
@@ -32,7 +32,6 @@ import {
 } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -248,10 +247,6 @@ export class DeepagentsPermissions extends ToolPermissions {
     });
   }
 
-  override isDeletable(): boolean {
-    return false;
-  }
-
   /**
    * `config.toml` is dcode's file, not one rulesync owns: rulesync merges into
    * it when it exists but has no business bringing it into existence to hold
@@ -443,25 +438,6 @@ export class DeepagentsPermissions extends ToolPermissions {
       }),
       sourcePath: this.getRelativePathFromCwd(),
       fileContent: JSON.stringify(result, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): DeepagentsPermissions {
-    return new DeepagentsPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global: true,
     });
   }
 }

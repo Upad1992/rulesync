@@ -12,20 +12,11 @@ import type { Feature } from "../types/features.js";
 import type { ToolTarget } from "../types/tool-targets.js";
 import type { Logger } from "../utils/logger.js";
 import { isPackagingToolTarget } from "../utils/plugin-root.js";
+import type { FeatureCounts } from "../utils/result.js";
 import { resolveToolOutputRoot } from "../utils/tool-output-root.js";
 import { resetRunWarningState } from "../utils/warned-once.js";
 
-export type ConvertResult = {
-  rulesCount: number;
-  ignoreCount: number;
-  mcpCount: number;
-  commandsCount: number;
-  subagentsCount: number;
-  skillsCount: number;
-  hooksCount: number;
-  permissionsCount: number;
-  checksCount: number;
-};
+export type ConvertResult = FeatureCounts;
 
 type ConvertContext = {
   config: Config;
@@ -71,7 +62,8 @@ export async function convertFromTool(params: {
   if (packagingTarget) {
     throw new Error(
       `Plugin packaging target '${packagingTarget}' is not supported by convert. ` +
-        "Use import and generate with explicit plugin directories.",
+        "Use import with the plugin directory as outputRoot (--output-root) and generate " +
+        "with it in outputRoots (--output-roots).",
     );
   }
 
@@ -114,9 +106,8 @@ export async function convertFromTool(params: {
 
 async function runFeatureConvert<TProcessor, TSourceItem, TRulesyncItem>(
   ctx: ConvertContext,
-  strategy: ConvertStrategy<TProcessor, TSourceItem, TRulesyncItem> | null,
+  strategy: ConvertStrategy<TProcessor, TSourceItem, TRulesyncItem>,
 ): Promise<number> {
-  if (!strategy) return 0;
   const { config, fromTool, toTools, logger } = ctx;
   const {
     feature,
@@ -261,6 +252,7 @@ function buildMcpStrategy(ctx: ConvertContext) {
         global,
         dryRun,
         logger,
+        featureOptions: config.getFeatureOptions(toolTarget, "mcp"),
       }),
     loadSource: (p) => p.loadToolFiles(),
     toRulesync: (p, files) => p.convertToolFilesToRulesyncFiles(files),

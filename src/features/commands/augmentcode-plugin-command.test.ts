@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
@@ -39,7 +39,6 @@ describe("AugmentcodePluginCommand", () => {
         },
       },
       body: "Review $ARGUMENTS.",
-      fileContent: "",
     });
 
   it("writes into commands/ and drops the fields Auggie ignores for plugin commands", () => {
@@ -76,7 +75,6 @@ describe("AugmentcodePluginCommand", () => {
           augmentcode: { model: "sonnet" },
         },
         body: "Review.",
-        fileContent: "",
       }),
       logger,
     });

@@ -12,7 +12,6 @@ import type { SharedWritePath } from "../../lib/shared-file-derive.js";
 import type { ValidationResult } from "../../types/ai-file.js";
 import { isMcpServers, type McpServers } from "../../types/mcp.js";
 import { ToolFile } from "../../types/tool-file.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import {
   getKimiCodeConfigSharedFileKey,
@@ -23,6 +22,7 @@ import {
 import { type Logger, warnWithFallback } from "../../utils/logger.js";
 import { isRecord } from "../../utils/type-guards.js";
 import { applySharedConfigPatch, parseSharedConfig } from "../shared/shared-config-gateway.js";
+import { parseMcpJsonOrThrow } from "./mcp-json-config.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
 import {
   ToolMcp,
@@ -50,6 +50,77 @@ function normalizeKimiCodeTransport({
     return "http";
   }
   return hasCommand ? "stdio" : "http";
+}
+
+/**
+ * The only `executor` value every current Kimi Code release accepts on a stdio
+ * server. 2.2.0 removed the never-implemented `kaos` option and narrowed the
+ * schema to `z.enum(['local'])`, so 2.2.0 through 2.4.x fail validation on any
+ * other value when they load `mcp.json`. 2.5.0 widened the enum back to
+ * `'local' | 'kaos'`, but `kaos` is still undocumented and would break the
+ * older releases, so it keeps being dropped.
+ * @see https://github.com/MoonshotAI/kimi-code/pull/4184
+ * @see https://github.com/MoonshotAI/kimi-code/pull/4062
+ */
+const KIMI_CODE_MCP_EXECUTOR = "local";
+
+/** Remove, with a warning, an `executor` value Kimi Code would reject. Mutates `server`. */
+function dropUnsupportedKimiCodeExecutor({
+  name,
+  server,
+  logger,
+}: {
+  name: string;
+  server: Record<string, unknown>;
+  logger?: Logger;
+}): void {
+  if (server.executor === undefined || server.executor === KIMI_CODE_MCP_EXECUTOR) {
+    return;
+  }
+  warnWithFallback(
+    logger,
+    `Kimi Code MCP: dropping executor ${JSON.stringify(server.executor)} from "${name}" because Kimi Code 2.2.0 through 2.4.x accept only "${KIMI_CODE_MCP_EXECUTOR}".`,
+  );
+  delete server.executor;
+}
+
+/**
+ * Remove, with a warning, an `environment_id` Kimi Code cannot use. Kimi Code
+ * 2.5.0 added it to stdio servers only, as a non-empty string naming an
+ * `[environments.<id>]` entry of `config.toml`; an empty or non-string value
+ * fails Kimi's validation. Mutates `server`.
+ * @see https://github.com/MoonshotAI/kimi-code/pull/4062
+ */
+function dropUnsupportedKimiCodeEnvironmentId({
+  name,
+  server,
+  isStdio,
+  logger,
+}: {
+  name: string;
+  server: Record<string, unknown>;
+  isStdio: boolean;
+  logger?: Logger;
+}): void {
+  const environmentId = server.environment_id;
+  if (environmentId === undefined) {
+    return;
+  }
+  if (!isStdio) {
+    warnWithFallback(
+      logger,
+      `Kimi Code MCP: dropping environment_id from "${name}" because Kimi Code only accepts it on stdio servers.`,
+    );
+    delete server.environment_id;
+    return;
+  }
+  if (typeof environmentId !== "string" || environmentId.length === 0) {
+    warnWithFallback(
+      logger,
+      `Kimi Code MCP: dropping environment_id ${JSON.stringify(environmentId)} from "${name}" because Kimi Code requires a non-empty string.`,
+    );
+    delete server.environment_id;
+  }
 }
 
 function toKimiCodeServer({
@@ -94,14 +165,18 @@ function toKimiCodeServer({
   };
   // Kimi's documented per-server keys beyond the transport itself. `deferred`
   // (0.43.0) keeps the server's tools out of the top-level tool list until the
-  // model loads them on demand. `executor` (`local` | `kaos`) and `runtime_id`
-  // pick where a stdio server runs; they are accepted by the server schema but
-  // not documented yet.
+  // model loads them on demand. `environment_id` (2.5.0) starts a stdio server
+  // inside a remote environment declared under `[environments.<id>]`.
+  // `executor` and `runtime_id` are undocumented stdio keys: `runtime_id` is
+  // accepted by 2.2.0 through 2.4.x and silently stripped by 2.5.0+, which
+  // replaced it with `environment_id`; it is passed through unchanged for the
+  // older releases.
   // https://moonshotai.github.io/kimi-code/en/customization/mcp.html
-  // https://github.com/MoonshotAI/kimi-code/blob/%40moonshot-ai/kimi-code%402.1.1/packages/agent-core-v2/src/mcpCore/config-schema.ts
+  // https://github.com/MoonshotAI/kimi-code/blob/%40moonshot-ai/kimi-code%402.5.2/packages/agent-core-v2/src/mcpCore/config-schema.ts
   for (const field of [
     "env",
     "cwd",
+    "environment_id",
     "executor",
     "runtime_id",
     "headers",
@@ -117,6 +192,13 @@ function toKimiCodeServer({
       converted[field] = server[field];
     }
   }
+  dropUnsupportedKimiCodeExecutor({ name, server: converted, logger });
+  dropUnsupportedKimiCodeEnvironmentId({
+    name,
+    server: converted,
+    isStdio: normalizedTransport === "stdio",
+    logger,
+  });
   if (server.disabled === true) {
     converted.enabled = false;
   }
@@ -140,14 +222,29 @@ function toKimiCodeServers({
   return result;
 }
 
-function fromKimiCodeServers(servers: McpServers): McpServers {
+function fromKimiCodeServers({
+  servers,
+  logger,
+}: {
+  servers: McpServers;
+  logger?: Logger;
+}): McpServers {
   return Object.fromEntries(
     Object.entries(servers).map(([name, server]) => {
       const { transport, enabled, ...rest } = server;
+      dropUnsupportedKimiCodeExecutor({ name, server: rest, logger });
       const type =
         transport === "stdio" || transport === "sse" || transport === "http"
           ? transport
           : undefined;
+      dropUnsupportedKimiCodeEnvironmentId({
+        name,
+        server: rest,
+        isStdio:
+          normalizeKimiCodeTransport({ transport, hasCommand: rest.command !== undefined }) ===
+          "stdio",
+        logger,
+      });
       return [
         name,
         {
@@ -170,13 +267,34 @@ function fromKimiCodeServers(servers: McpServers): McpServers {
  */
 
 /** Kimi's `[mcp]` global defaults, in rulesync's camelCase spelling. */
-export type KimiCodeMcpDefaults = {
+type KimiCodeMcpDefaults = {
   startupTimeoutMs?: number;
   toolTimeoutMs?: number;
+  /**
+   * `[mcp] default_deferred` (Kimi Code 2.3.0): load every server's tools on
+   * demand unless the server sets `deferred: false` in `mcp.json`. Only takes
+   * effect when Kimi's experimental `tool-select` flag is on, and is captured
+   * when a server connects (a change applies after reconnect or restart).
+   * @see https://github.com/MoonshotAI/kimi-code/pull/4210
+   * @see https://moonshotai.github.io/kimi-code/en/customization/mcp.html
+   */
+  defaultDeferred?: boolean;
+  /**
+   * `[mcp] reconnect_initial_delay_ms` / `reconnect_max_delay_ms` (Kimi Code
+   * 2.4.0): the first delay and the cap of the exponential backoff with which
+   * Kimi automatically reconnects a workspace-level MCP server that failed to
+   * connect or dropped unexpectedly. Kimi's defaults are 5000 and 300000.
+   * @see https://github.com/MoonshotAI/kimi-code/pull/4283
+   * @see https://moonshotai.github.io/kimi-code/en/configuration/config-files.html#mcp
+   */
+  reconnectInitialDelayMs?: number;
+  reconnectMaxDelayMs?: number;
 };
 
 type KimiCodeMcpExtraParams = {
   configDefaults?: KimiCodeMcpDefaults;
+  /** Kept for the synchronous `toRulesyncMcp`, which warns about dropped keys. */
+  logger?: Logger;
 };
 
 /** Path of the shared user `config.toml`, relative to the output root. */
@@ -217,6 +335,34 @@ async function readKimiCodeConfig({
 }
 
 /**
+ * Kimi's reconnect delays are millisecond counts, so only a non-negative safe
+ * integer is passed through. Anything else (a negative, a fraction, a string)
+ * is dropped with a warning rather than written into, or lifted out of, the
+ * shared global `config.toml`.
+ */
+function toKimiCodeReconnectDelay({
+  value,
+  key,
+  logger,
+}: {
+  value: unknown;
+  key: string;
+  logger?: Logger;
+}): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return value;
+  }
+  warnWithFallback(
+    logger,
+    `Kimi Code MCP: dropping ${key} because it is not a non-negative integer number of milliseconds.`,
+  );
+  return undefined;
+}
+
+/**
  * Read the `[mcp]` defaults back out of the shared user `config.toml` so a
  * generate → import round trip keeps them. Absent or unparseable content yields
  * no defaults rather than failing the import: this file belongs to three
@@ -224,13 +370,25 @@ async function readKimiCodeConfig({
  */
 async function readKimiCodeMcpDefaults({
   outputRoot,
+  logger,
 }: {
   outputRoot: string;
+  logger?: Logger;
 }): Promise<KimiCodeMcpDefaults> {
   const config = await readKimiCodeConfig({ outputRoot });
   if (!config.parsed) {
     return {};
   }
+  const reconnectInitialDelayMs = toKimiCodeReconnectDelay({
+    value: config.mcp.reconnect_initial_delay_ms,
+    key: "[mcp] reconnect_initial_delay_ms",
+    logger,
+  });
+  const reconnectMaxDelayMs = toKimiCodeReconnectDelay({
+    value: config.mcp.reconnect_max_delay_ms,
+    key: "[mcp] reconnect_max_delay_ms",
+    logger,
+  });
   return {
     ...(typeof config.mcp.startup_timeout_ms === "number" && {
       startupTimeoutMs: config.mcp.startup_timeout_ms,
@@ -238,14 +396,19 @@ async function readKimiCodeMcpDefaults({
     ...(typeof config.mcp.tool_timeout_ms === "number" && {
       toolTimeoutMs: config.mcp.tool_timeout_ms,
     }),
+    ...(typeof config.mcp.default_deferred === "boolean" && {
+      defaultDeferred: config.mcp.default_deferred,
+    }),
+    ...(reconnectInitialDelayMs !== undefined && { reconnectInitialDelayMs }),
+    ...(reconnectMaxDelayMs !== undefined && { reconnectMaxDelayMs }),
   };
 }
 
 /**
  * Kimi's `[mcp]` section in the shared user config sets the default connect and
- * per-tool-call timeouts for *every* MCP server, including ones rulesync did not
- * write. Per-server values in `mcp.json` still take precedence; this only moves
- * the floor.
+ * per-tool-call timeouts, whether tools load on demand, and the automatic
+ * reconnect backoff for *every* MCP server, including ones rulesync did not write. Per-server values in
+ * `mcp.json` still take precedence; this only moves the default.
  *
  * Written as an auxiliary file so it goes through the normal write phase and
  * respects `--dry-run`, and merged through the shared-config gateway so the
@@ -253,7 +416,8 @@ async function readKimiCodeMcpDefaults({
  *
  * The gateway replaces an owned key wholesale, and `mcp` is a table, so the
  * section is recomputed from the existing file: authoring only
- * `startupTimeoutMs` must not delete a hand-written `tool_timeout_ms`. Same
+ * `startupTimeoutMs` must not delete a hand-written `tool_timeout_ms` or
+ * `default_deferred`. Same
  * approach the `.vibe/config.toml` `tools` writer takes.
  *
  * @see https://moonshotai.github.io/kimi-code/en/configuration/config-files.html#mcp
@@ -295,6 +459,15 @@ export class KimiCodeMcpConfigToml extends ToolFile {
           ...(defaults.toolTimeoutMs !== undefined && {
             tool_timeout_ms: defaults.toolTimeoutMs,
           }),
+          ...(defaults.defaultDeferred !== undefined && {
+            default_deferred: defaults.defaultDeferred,
+          }),
+          ...(defaults.reconnectInitialDelayMs !== undefined && {
+            reconnect_initial_delay_ms: defaults.reconnectInitialDelayMs,
+          }),
+          ...(defaults.reconnectMaxDelayMs !== undefined && {
+            reconnect_max_delay_ms: defaults.reconnectMaxDelayMs,
+          }),
         },
       },
       // Relative, matching the hooks and permissions writers of the same file,
@@ -317,19 +490,20 @@ export class KimiCodeMcp extends ToolMcp {
    * instance because `toRulesyncMcp` is synchronous, while the defaults live in
    * a different file that only the async `fromFile` can read.
    */
-  private readonly configDefaults: { startupTimeoutMs?: number; toolTimeoutMs?: number };
+  private readonly configDefaults: KimiCodeMcpDefaults;
+  private readonly logger: Logger | undefined;
 
-  constructor(params: ToolMcpParams & KimiCodeMcpExtraParams) {
+  constructor({ configDefaults, logger, ...params }: ToolMcpParams & KimiCodeMcpExtraParams) {
     super(params);
-    this.configDefaults = params.configDefaults ?? {};
-    try {
-      this.json = this.fileContent ? JSON.parse(this.fileContent) : {};
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Kimi Code MCP config at ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(error)}`,
-        { cause: error },
-      );
-    }
+    this.configDefaults = configDefaults ?? {};
+    this.logger = logger;
+    this.json = this.fileContent
+      ? parseMcpJsonOrThrow({
+          fileContent: this.fileContent,
+          relativePath: join(this.relativeDirPath, this.relativeFilePath),
+          label: "Kimi Code",
+        })
+      : {};
   }
 
   override isDeletable(): boolean {
@@ -347,6 +521,7 @@ export class KimiCodeMcp extends ToolMcp {
     outputRoot = process.cwd(),
     validate = true,
     global = false,
+    logger,
   }: ToolMcpFromFileParams): Promise<KimiCodeMcp> {
     const paths = this.getSettablePaths({ global });
     const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
@@ -358,7 +533,8 @@ export class KimiCodeMcp extends ToolMcp {
       fileContent,
       validate,
       global,
-      configDefaults: global ? await readKimiCodeMcpDefaults({ outputRoot }) : {},
+      configDefaults: global ? await readKimiCodeMcpDefaults({ outputRoot, logger }) : {},
+      logger,
     });
   }
 
@@ -373,17 +549,11 @@ export class KimiCodeMcp extends ToolMcp {
     const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
     const existingContent = (await readFileContentOrNull(filePath)) ?? "{}";
 
-    let existing: Record<string, unknown>;
-    try {
-      existing = JSON.parse(existingContent);
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Kimi Code MCP config at ${filePath}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const existing = parseMcpJsonOrThrow({
+      fileContent: existingContent,
+      relativePath: filePath,
+      label: "Kimi Code",
+    });
 
     return new KimiCodeMcp({
       outputRoot,
@@ -441,7 +611,25 @@ export class KimiCodeMcp extends ToolMcp {
     const startupTimeoutMs =
       typeof block.startupTimeoutMs === "number" ? block.startupTimeoutMs : undefined;
     const toolTimeoutMs = typeof block.toolTimeoutMs === "number" ? block.toolTimeoutMs : undefined;
-    if (startupTimeoutMs === undefined && toolTimeoutMs === undefined) {
+    const defaultDeferred =
+      typeof block.defaultDeferred === "boolean" ? block.defaultDeferred : undefined;
+    const reconnectInitialDelayMs = toKimiCodeReconnectDelay({
+      value: block.reconnectInitialDelayMs,
+      key: "kimi-code.reconnectInitialDelayMs",
+      logger,
+    });
+    const reconnectMaxDelayMs = toKimiCodeReconnectDelay({
+      value: block.reconnectMaxDelayMs,
+      key: "kimi-code.reconnectMaxDelayMs",
+      logger,
+    });
+    if (
+      startupTimeoutMs === undefined &&
+      toolTimeoutMs === undefined &&
+      defaultDeferred === undefined &&
+      reconnectInitialDelayMs === undefined &&
+      reconnectMaxDelayMs === undefined
+    ) {
       return [];
     }
 
@@ -452,7 +640,7 @@ export class KimiCodeMcp extends ToolMcp {
       const paths = kimiCodeConfigRelativePath();
       warnWithFallback(
         logger,
-        `Skipping the Kimi Code MCP timeout defaults: ${join(paths.relativeDirPath, paths.relativeFilePath)} is not valid TOML.`,
+        `Skipping the Kimi Code MCP [mcp] defaults: ${join(paths.relativeDirPath, paths.relativeFilePath)} is not valid TOML.`,
       );
       return [];
     }
@@ -460,7 +648,13 @@ export class KimiCodeMcp extends ToolMcp {
     return [
       KimiCodeMcpConfigToml.fromDefaults({
         outputRoot,
-        defaults: { startupTimeoutMs, toolTimeoutMs },
+        defaults: {
+          startupTimeoutMs,
+          toolTimeoutMs,
+          defaultDeferred,
+          reconnectInitialDelayMs,
+          reconnectMaxDelayMs,
+        },
         existing,
       }),
     ];
@@ -477,9 +671,10 @@ export class KimiCodeMcp extends ToolMcp {
       fileContent: JSON.stringify(
         {
           ...this.json,
-          mcpServers: fromKimiCodeServers(
-            isMcpServers(this.json.mcpServers) ? this.json.mcpServers : {},
-          ),
+          mcpServers: fromKimiCodeServers({
+            servers: isMcpServers(this.json.mcpServers) ? this.json.mcpServers : {},
+            logger: this.logger,
+          }),
           ...(Object.keys(this.configDefaults).length > 0 && {
             "kimi-code": this.configDefaults,
           }),
@@ -488,10 +683,6 @@ export class KimiCodeMcp extends ToolMcp {
         2,
       ),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

@@ -21,14 +21,16 @@ import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { globToAnchoredRegexSource } from "../../utils/glob.js";
 import { fallbackLogger, type Logger } from "../../utils/logger.js";
-import { lookupOwn } from "../../utils/own-lookup.js";
+import { invertRecord, lookupOwn } from "../../utils/own-lookup.js";
+import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
 import { bashRulesHonoringAllTools } from "./shell-command-categories.js";
+import { isStricterAction } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -99,23 +101,31 @@ const CANONICAL_TO_AUGMENT_TOOL_NAMES: Record<string, string> = {
   websearch: "web-search",
 };
 
-const AUGMENT_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries(
-  Object.entries(CANONICAL_TO_AUGMENT_TOOL_NAMES).map(([k, v]) => [v, k]),
+const AUGMENT_TO_CANONICAL_TOOL_NAMES: Record<string, string> = invertRecord(
+  CANONICAL_TO_AUGMENT_TOOL_NAMES,
 );
 
-// Current AugmentCode tool names and the legacy names they alias. Auggie's permissions docs
-// (https://docs.augmentcode.com/cli/permissions) renamed `launch-process` / `view` /
-// `str-replace-editor` / `save-file` to `terminal` / `read` / `edit` / `write` and state that
-// the legacy names are aliased to their current equivalents, so a hand-authored settings.json
-// may use either spelling for the same tool. Rulesync keeps EMITTING the legacy names because
-// the shipped CLI (0.36.0 at the time of writing) matches `toolName` exactly and only knows the
-// legacy spellings; this map is only consulted when reading an existing file, so that a row
-// written under a current name is imported, deduplicated and retracted like its legacy twin.
+// Other AugmentCode spellings of the managed tools and the legacy names rulesync emits for them.
+// Auggie 0.x's permissions docs (https://docs.augmentcode.com/cli/v0/permissions) named the tools
+// `terminal` / `read` / `edit` / `write` and aliased the legacy names to them. Auggie 1.x
+// (https://docs.augmentcode.com/cli/permissions, a prerelease at the time of writing) renamed the
+// shell tool to `bash` and recognizes only these legacy names in permission rules:
+// `launch-process` / `shell` → `bash`, `view` → `read`, `str-replace-editor` /
+// `str_replace_editor` → `edit`, `save-file` / `save_file` → `write`. A hand-authored
+// settings.json (or one written by 1.x's `/permissions` manager) may therefore use any of these
+// spellings for the same tool. Rulesync keeps EMITTING the legacy names, because both the shipped
+// 0.x CLI (0.36.0) and 1.x accept them while `terminal` and `bash` each work in one line only;
+// this map is only consulted when reading an existing file, so that a row written under another
+// spelling is imported, deduplicated and retracted like its legacy twin.
 const CURRENT_TO_LEGACY_AUGMENT_TOOL_NAMES: Record<string, string> = {
   terminal: "launch-process",
+  bash: "launch-process",
+  shell: "launch-process",
   read: "view",
   edit: "str-replace-editor",
+  str_replace_editor: "str-replace-editor",
   write: "save-file",
+  save_file: "save-file",
 };
 
 function toAugmentToolName(canonical: string): string {
@@ -299,6 +309,13 @@ function isShellRegexRoundtrippable(regex: string): boolean {
   while (i < body.length) {
     const ch = body[i];
     if (ch === "\\" && i + 1 < body.length) {
+      // An escaped `*` / `?` / `[` is a literal the glob form cannot spell: `shellRegexToGlob`
+      // would turn it into a wildcard or a character class, so `^rm \*$` would come back as the
+      // much wider `^rm .*$`, and `\[a-z\]` would be read as a one-character range by targets
+      // whose globs support `[...]`.
+      if (isGlobSpecial(body[i + 1])) {
+        return false;
+      }
       // Skip escaped char.
       i += 2;
       continue;
@@ -317,6 +334,39 @@ function isShellRegexRoundtrippable(regex: string): boolean {
     if (/[$^|+?*(){}[\]]/.test(ch ?? "")) {
       return false;
     }
+    i += 1;
+  }
+  return true;
+}
+
+/** Characters a glob reads as syntax (wildcards or the start of a character class). */
+function isGlobSpecial(ch: string | undefined): boolean {
+  return ch === "*" || ch === "?" || ch === "[";
+}
+
+/**
+ * Whether `shellRegexToGlob` can approximate a `shellInputRegex` without widening it. The lossy
+ * conversion keeps regex quantifiers as characters, and a `*` or `?` left in the glob becomes a
+ * wildcard: `^rm -rf /tmp/a*$` (a run of `a`s) would turn into the glob `rm -rf /tmp/a*`, which
+ * matches `rm -rf /tmp/a /home`. So a regex is unsafe when it has an escaped literal `\*` / `\?` /
+ * `\[` (a `[` would open a character class in targets whose globs support one),
+ * or a bare quantifier `*` / `?` / `+` / `{` that is not part of a `.*` run (which the glob `*`
+ * reproduces faithfully).
+ */
+function canApproximateShellRegexWithoutWidening(regex: string): boolean {
+  let i = 0;
+  while (i < regex.length) {
+    const ch = regex[i];
+    if (ch === "\\" && i + 1 < regex.length) {
+      if (isGlobSpecial(regex[i + 1])) return false;
+      i += 2;
+      continue;
+    }
+    if (ch === "." && regex[i + 1] === "*") {
+      i += 2;
+      continue;
+    }
+    if (ch === "*" || ch === "?" || ch === "+" || ch === "{") return false;
     i += 1;
   }
   return true;
@@ -341,10 +391,6 @@ export class AugmentcodePermissions extends ToolPermissions {
         throw result.error;
       }
     }
-  }
-
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
@@ -601,20 +647,6 @@ export class AugmentcodePermissions extends ToolPermissions {
       };
     }
   }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): AugmentcodePermissions {
-    return new AugmentcodePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ toolPermissions: [] }, null, 2),
-      validate: false,
-    });
-  }
 }
 
 /**
@@ -634,6 +666,10 @@ export class AugmentcodePermissions extends ToolPermissions {
  * `.augment/settings.json` ("values in user or local settings are ignored"), so
  * in global mode it is dropped with a warning instead of written somewhere it
  * does nothing.
+ *
+ * Only Auggie 0.x reads `recommendedMarketplaces`: the 1.x plugin settings
+ * reference lists `enabledPlugins` alone. The key is still written because the
+ * stable CLI is 0.x, and the write warning says it is 0.x-only.
  *
  * Both make Auggie load code the repository did not ship — a recommended
  * marketplace is one prompt away from being cloned, and an enabled plugin can
@@ -670,7 +706,7 @@ function buildPluginConsumptionPatch({
         !isDeepStrictEqual(recommendedMarketplaces, existingMarketplaces)
       ) {
         logger?.warn(
-          `Writing AugmentCode \`recommendedMarketplaces\` (${recommendedMarketplaces.map(quoteValueForWarning).join(", ")}): Auggie prompts everyone who opens this workspace to install these plugin marketplaces.`,
+          `Writing AugmentCode \`recommendedMarketplaces\` (${recommendedMarketplaces.map(quoteValueForWarning).join(", ")}): Auggie 0.x prompts everyone who opens this workspace to install these plugin marketplaces (Auggie 1.x no longer reads this key).`,
         );
       }
       warnAboutRemovedPluginIds({
@@ -810,10 +846,23 @@ function convertRulesyncToAugmentEntries({
   // AugmentCode has no wildcard toolName, so resolve the all-tools restrictions into its exact
   // shell tool even when the source did not state a separate `bash` category.
   const resolvedBashRules = bashRulesHonoringAllTools(config.permission);
+  // The managed tools with a category of their own lose the allows a
+  // pattern-specific `*` restriction covers, since their entries cannot carry
+  // the pattern. A tool left with no entry this way is treated like a tool
+  // with no rules of its own: it gets the blanket all-tools deny/ask below
+  // rather than AugmentCode's own default, which would auto-run read-only
+  // tools such as `view` on the very input the restriction names. The `*`
+  // catch-all is that blanket default already, so it stays out of this.
+  const honoredPermission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "AugmentCode",
+    logger,
+    writesAllToolsCatchAll: true,
+  });
   const permission =
     config.permission.bash !== undefined || Object.keys(resolvedBashRules).length > 0
-      ? { ...config.permission, bash: resolvedBashRules }
-      : config.permission;
+      ? { ...honoredPermission, bash: resolvedBashRules }
+      : honoredPermission;
 
   // The other managed tools (view / save-file / str-replace-editor / web-fetch / web-search) have
   // no per-input matcher either, so an all-tools restriction can only be carried as a blanket
@@ -834,8 +883,9 @@ function convertRulesyncToAugmentEntries({
         `AugmentCode permissions: the all-tools '*' category cannot be emitted as a single entry ` +
           `because AugmentCode has no wildcard toolName. Deny/ask rules are folded into ` +
           `'launch-process' and, for any other managed tool that has no explicit rules of its ` +
-          `own, applied as a blanket deny/ask; all-tools allow rules and tools that already ` +
-          `define their own rules are left untouched.`,
+          `own (or whose allow rules were all withheld because a '*' deny/ask covers them), ` +
+          `applied as a blanket deny/ask; all-tools allow rules and tools that still define ` +
+          `rules of their own are left untouched.`,
       );
       continue;
     }
@@ -939,9 +989,10 @@ function computeAllToolsFailClosedType(
  * other managed tools: one that produced no entries of its own above must not fall back to
  * AugmentCode's own default just because it has no per-input matcher to narrow the all-tools
  * restriction onto. A category can be stated yet still emit nothing (e.g. only non-`*` allow/ask
- * patterns, dropped with a warning), so this checks emitted entries rather than whether the
- * category was merely present in the source config. A tool whose own rules did emit entries is
- * left untouched here.
+ * patterns, dropped with a warning, or only allows withheld by `honorAllToolsRestrictions`), so
+ * this checks emitted entries rather than whether the category was merely present in the source
+ * config. Falling back to AugmentCode's own default instead would let a read-only tool run on the
+ * input the restriction names. A tool whose own rules did emit entries is left untouched here.
  */
 function synthesizeManagedToolFallbackEntries(
   categoriesWithOwnEntries: Set<string>,
@@ -1026,17 +1077,11 @@ function convertAugmentToRulesyncPermissions({
   // always use the catch-all `*` pattern on the import side), pick the most restrictive action
   // rather than letting the last entry silently overwrite earlier ones.
   // Precedence: deny > ask > allow.
-  const actionPriority: Record<PermissionAction, number> = {
-    deny: 2,
-    ask: 1,
-    allow: 0,
-  };
-  // Reserved keys that would mutate `Object.prototype` (or the `Object`
-  // constructor) if used as a bracket-assignment key. A hand-crafted
-  // settings.json could set `toolName` — or a `shellInputRegex` that converts
-  // to such a glob — to one of these, so they are rejected defensively before
-  // they are ever used as a map key.
-  const forbiddenMapKeys = new Set(["__proto__", "prototype", "constructor"]);
+  // A hand-crafted settings.json could set `toolName` — or a `shellInputRegex`
+  // that converts to such a glob — to a key that would mutate
+  // `Object.prototype` (or the `Object` constructor) if used as a
+  // bracket-assignment key, so prototype-pollution keys are rejected
+  // defensively before they are ever used as a map key.
   const permission: Record<string, Record<string, PermissionAction>> = {};
 
   for (const entry of entries) {
@@ -1056,7 +1101,7 @@ function convertAugmentToRulesyncPermissions({
 
     const legacyToolName = toLegacyAugmentToolName(entry.toolName);
     const canonical = toCanonicalToolName(entry.toolName);
-    if (forbiddenMapKeys.has(canonical)) {
+    if (isPrototypePollutionKey(canonical)) {
       logger?.warn(
         `AugmentCode permissions: skipping entry for tool '${entry.toolName}' because it maps ` +
           `to the reserved object key '${canonical}', which cannot be used as a permission key.`,
@@ -1065,7 +1110,7 @@ function convertAugmentToRulesyncPermissions({
     }
     const action = augmentTypeToAction(type);
 
-    // Only launch-process (or its current alias `terminal`) supports per-input pattern recovery
+    // Only launch-process (or one of its aliases `terminal` / `bash` / `shell`) supports per-input pattern recovery
     // via shellInputRegex. For other categories (view, str-replace-editor, save-file, web-fetch,
     // web-search) the AugmentCode schema does not carry per-pattern information, so they are
     // imported as the catch-all `*` pattern. This is the inverse of the fail-closed export side
@@ -1086,17 +1131,35 @@ function convertAugmentToRulesyncPermissions({
         // - `deny`: broaden to `*` (fail-closed) — over-blocking is safer than
         //   under-blocking, so a user-authored deny continues to protect
         //   against the original threat surface (and more).
-        // - `allow` / `ask`: warn but proceed with the lossy conversion. We
-        //   cannot safely broaden these because broadening an allow would
-        //   weaken security; dropping them would silently strip the user's
-        //   rule. Lossy conversion preserves the user's intent on the most
-        //   common patterns at the cost of the narrow regex semantics that
-        //   only AugmentCode supports.
-        if (action === "deny") {
+        // - `ask`: broaden to `*` as well. Widening an ask only adds prompts,
+        //   while narrowing or skipping it would let a broader allow
+        //   auto-approve the asked-about commands.
+        // - `allow`: warn but proceed with the lossy conversion. We cannot
+        //   safely broaden it because broadening an allow would weaken
+        //   security; dropping it would silently strip the user's rule.
+        //   Lossy conversion preserves the user's intent on the most common
+        //   patterns at the cost of the narrow regex semantics that only
+        //   AugmentCode supports.
+        if (action === "allow" && !canApproximateShellRegexWithoutWidening(regex)) {
+          // The lossy conversion below would leave a quantifier (or an escaped literal `*` /
+          // `?`) in the glob as a wildcard and so widen the rule; an allow or ask cannot be
+          // broadened safely, so skip it.
+          logger?.warn(
+            `AugmentCode permissions: skipping allow entry for tool '${entry.toolName}': ` +
+              `shellInputRegex '${regex}' uses a quantifier or a literal '*' / '?' that a glob ` +
+              `cannot express, and converting it would widen the rule. The entry is not imported.`,
+          );
+          continue;
+        }
+        if (action !== "allow") {
+          // An ask is widened like a deny: canonically an `ask` on `*` only
+          // adds prompts (deny still outranks it), whereas skipping or
+          // narrowing it would leave a broader allow auto-approving the
+          // commands the user asked to be prompted for.
           logger?.warn(
             `AugmentCode permissions: shellInputRegex '${regex}' on tool '${entry.toolName}' ` +
-              `is not faithfully roundtrippable to a glob. Importing as the catch-all '*' ` +
-              `pattern (fail-closed) so the deny rule cannot be silently narrowed on regenerate.`,
+              `is not faithfully roundtrippable to a glob. Importing the ${action} rule as the ` +
+              `catch-all '*' pattern (fail-closed) so it cannot be silently narrowed on regenerate.`,
           );
           pattern = "*";
         } else {
@@ -1112,7 +1175,7 @@ function convertAugmentToRulesyncPermissions({
       pattern = "*";
     }
 
-    if (forbiddenMapKeys.has(pattern)) {
+    if (isPrototypePollutionKey(pattern)) {
       logger?.warn(
         `AugmentCode permissions: skipping entry for tool '${entry.toolName}' because its ` +
           `pattern resolves to the reserved object key '${pattern}'.`,
@@ -1127,7 +1190,7 @@ function convertAugmentToRulesyncPermissions({
       permission[canonical] = bucket;
     }
     const existing = lookupOwn({ record: bucket, key: pattern });
-    if (existing === undefined || actionPriority[action] > actionPriority[existing]) {
+    if (isStricterAction({ action, existing })) {
       bucket[pattern] = action;
     }
   }

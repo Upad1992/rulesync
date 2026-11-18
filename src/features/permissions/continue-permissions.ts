@@ -3,20 +3,22 @@ import { join } from "node:path";
 import { dump } from "js-yaml";
 
 import { CONTINUE_DIR, CONTINUE_PERMISSIONS_FILE_NAME } from "../../constants/continue-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
+import { getOrCreateOwn, invertRecord, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
-import { isRecord, isStringArray } from "../../utils/type-guards.js";
+import { isStringArray, toRecord } from "../../utils/type-guards.js";
 import { loadYaml } from "../../utils/yaml.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { ALL_TOOLS_PERMISSION_CATEGORY, honorAllToolsOnBash } from "./shell-command-categories.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
+import { ALL_TOOLS_PERMISSION_CATEGORY, CATCH_ALL_PATTERN } from "./shell-command-categories.js";
+import { buildToolPatternEntry } from "./tool-pattern-entry.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -24,9 +26,6 @@ import {
 
 const CONTINUE_GLOBAL_ONLY_MESSAGE =
   "Continue permissions are global-only; use --global to sync ~/.continue/permissions.yaml";
-
-// The catch-all rulesync pattern; an entry with no argument pattern.
-const CATCH_ALL_PATTERN = "*";
 
 /**
  * A run of `*` (`**`, `***`) is the catch-all spelled another way: Continue
@@ -52,8 +51,8 @@ const CANONICAL_TO_CONTINUE_TOOL_NAMES: Record<string, string> = {
   webfetch: "Fetch",
 };
 
-const CONTINUE_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries(
-  Object.entries(CANONICAL_TO_CONTINUE_TOOL_NAMES).map(([k, v]) => [v, k]),
+const CONTINUE_TO_CANONICAL_TOOL_NAMES: Record<string, string> = invertRecord(
+  CANONICAL_TO_CONTINUE_TOOL_NAMES,
 );
 
 // rulesync canonical action -> permissions.yaml list key. `exclude` disables
@@ -86,23 +85,11 @@ const CONTINUE_PATTERN_RE = /^([^(]+)(?:\(([^)]*)\))?$/;
 // Own-property lookups only: a `constructor` category would otherwise resolve
 // to the `Object` function through the prototype chain.
 function toContinueToolName(canonical: string): string {
-  return Object.hasOwn(CANONICAL_TO_CONTINUE_TOOL_NAMES, canonical)
-    ? (CANONICAL_TO_CONTINUE_TOOL_NAMES[canonical] ?? canonical)
-    : canonical;
+  return lookupOwn({ record: CANONICAL_TO_CONTINUE_TOOL_NAMES, key: canonical }) ?? canonical;
 }
 
 function toCanonicalToolName(continueName: string): string {
-  return Object.hasOwn(CONTINUE_TO_CANONICAL_TOOL_NAMES, continueName)
-    ? (CONTINUE_TO_CANONICAL_TOOL_NAMES[continueName] ?? continueName)
-    : continueName;
-}
-
-/**
- * Build a permissions.yaml entry: the bare tool name for the catch-all, else
- * `Tool(pattern)`.
- */
-function buildContinuePermissionEntry(toolName: string, pattern: string): string {
-  return pattern === CATCH_ALL_PATTERN ? toolName : `${toolName}(${pattern})`;
+  return lookupOwn({ record: CONTINUE_TO_CANONICAL_TOOL_NAMES, key: continueName }) ?? continueName;
 }
 
 /**
@@ -161,10 +148,6 @@ export class ContinuePermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "",
     });
-  }
-
-  override isDeletable(): boolean {
-    return false;
   }
 
   /**
@@ -228,7 +211,7 @@ export class ContinuePermissions extends ToolPermissions {
         { cause: error },
       );
     }
-    const existing = parseContinuePermissionLists(isRecord(parsed) ? parsed : {});
+    const existing = parseContinuePermissionLists(toRecord(parsed));
 
     const config = rulesyncPermissions.getJson();
     const generated = convertRulesyncToContinuePermissions({ config, logger });
@@ -269,30 +252,11 @@ export class ContinuePermissions extends ToolPermissions {
         { cause: error },
       );
     }
-    const lists = parseContinuePermissionLists(isRecord(parsed) ? parsed : {});
+    const lists = parseContinuePermissionLists(toRecord(parsed));
     const rulesyncConfig = convertContinuePermissionsToRulesync(lists);
 
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify(rulesyncConfig, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): ContinuePermissions {
-    return new ContinuePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global: true,
     });
   }
 }
@@ -334,7 +298,15 @@ function convertRulesyncToContinuePermissions({
   // silently resolved by the CLI's exclude-first order.
   const actionByEntry = new Map<string, PermissionAction>();
 
-  for (const [category, rules] of Object.entries(honorAllToolsOnBash(config.permission))) {
+  for (const [category, rules] of Object.entries(
+    honorAllToolsRestrictions({
+      permission: config.permission,
+      toolLabel: "Continue",
+      logger,
+      writesAllToolsCatchAll: true,
+      isCatchAll: (pattern) => normalizeCatchAllPattern(pattern) === CATCH_ALL_PATTERN,
+    }),
+  )) {
     if (isPrototypePollutionKey(category)) continue;
     const toolName =
       category === ALL_TOOLS_PERMISSION_CATEGORY
@@ -354,7 +326,7 @@ function convertRulesyncToContinuePermissions({
       }
       // Continue matches a `*(pattern)` entry against no tool argument, so a
       // pattern-specific all-tools rule would be written as a dead entry
-      // (`honorAllToolsOnBash` mirrors it onto bash when that category exists).
+      // (`honorAllToolsRestrictions` mirrors it onto bash when that category exists).
       if (toolName === ALL_TOOLS_PERMISSION_CATEGORY && pattern !== CATCH_ALL_PATTERN) {
         logger?.warn(
           `Continue permissions.yaml cannot scope a pattern to every tool, so the ` +
@@ -362,7 +334,7 @@ function convertRulesyncToContinuePermissions({
         );
         continue;
       }
-      const entry = buildContinuePermissionEntry(toolName, pattern);
+      const entry = buildToolPatternEntry({ toolName, pattern });
       const previous = actionByEntry.get(entry);
       if (previous !== undefined && previous !== action) {
         logger?.warn(
@@ -405,10 +377,12 @@ function convertContinuePermissionsToRulesync(lists: ContinuePermissionLists): P
         continue;
       }
       const category = toCanonicalToolName(parsedEntry.toolName);
-      permission[category] ??= {};
+      const rules = getOrCreateOwn({ record: permission, key: category, create: () => ({}) });
       // The CLI evaluates exclude before ask before allow, and the lists are
       // read in that order, so the first action recorded for a pattern wins.
-      permission[category][parsedEntry.pattern] ??= action;
+      if (!Object.hasOwn(rules, parsedEntry.pattern)) {
+        rules[parsedEntry.pattern] = action;
+      }
     }
   }
 

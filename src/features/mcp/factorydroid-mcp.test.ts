@@ -1,8 +1,9 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_MCP_SCHEMA_URL } from "../../constants/rulesync-paths.js";
+import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
 import { FactorydroidMcp } from "./factorydroid-mcp.js";
@@ -108,6 +109,71 @@ describe("FactorydroidMcp", () => {
 
       expect(factorydroidMcp.getJson()).toEqual({ mcpServers: {} });
     });
+
+    it("should write the enabledTools and disabledTools filters unchanged", () => {
+      // Droid reads both per-server filters: https://docs.factory.com/harness/mcp
+      const filteredConfig = {
+        mcpServers: {
+          filtered: {
+            command: "server",
+            enabledTools: ["read", "search"],
+            disabledTools: ["write"],
+          },
+        },
+      };
+      const rulesyncMcp = new RulesyncMcp({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "rulesync.mcp.json",
+        fileContent: JSON.stringify(filteredConfig),
+        validate: true,
+      });
+
+      const factorydroidMcp = FactorydroidMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp,
+        validate: true,
+      });
+
+      expect(factorydroidMcp.getJson()).toEqual(filteredConfig);
+    });
+
+    it("should skip a server whose enabledTools list is empty, with a warning", () => {
+      // Droid applies `enabledTools` only "when the list is non-empty"
+      // (https://docs.factory.com/harness/mcp), so `[]` would load every tool,
+      // while canonically an empty allowlist allows none.
+      const rulesyncMcp = new RulesyncMcp({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync",
+        relativeFilePath: "rulesync.mcp.json",
+        fileContent: JSON.stringify({
+          mcpServers: {
+            emptyAllow: { command: "server", enabledTools: [] },
+            emptyDeny: { command: "server", disabledTools: [] },
+            kept: { command: "server", enabledTools: ["read"] },
+          },
+        }),
+        validate: true,
+      });
+      const logger = createMockLogger();
+
+      const factorydroidMcp = FactorydroidMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp,
+        validate: true,
+        logger,
+      });
+
+      expect(factorydroidMcp.getJson()).toEqual({
+        mcpServers: {
+          emptyDeny: { command: "server", disabledTools: [] },
+          kept: { command: "server", enabledTools: ["read"] },
+        },
+      });
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('"emptyAllow"'));
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("empty enabledTools"));
+    });
   });
 
   describe("fromFile", () => {
@@ -152,6 +218,27 @@ describe("FactorydroidMcp", () => {
         $schema: RULESYNC_MCP_SCHEMA_URL,
         ...validMcpConfig,
       });
+    });
+
+    it("should import the enabledTools and disabledTools filters", () => {
+      const filteredConfig = {
+        mcpServers: {
+          filtered: {
+            command: "server",
+            enabledTools: ["read"],
+            disabledTools: ["write"],
+          },
+        },
+      };
+      const mcp = new FactorydroidMcp({
+        outputRoot: testDir,
+        relativeDirPath: ".factory",
+        relativeFilePath: "mcp.json",
+        fileContent: JSON.stringify(filteredConfig),
+        validate: true,
+      });
+
+      expect(mcp.toRulesyncMcp().getMcpServers()).toEqual(filteredConfig.mcpServers);
     });
   });
 

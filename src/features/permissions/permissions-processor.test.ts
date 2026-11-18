@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -102,6 +102,7 @@ describe("PermissionsProcessor", () => {
         "mimocode",
         "omp",
         "opencode",
+        "opencodev1",
         "pi",
         "pool",
         "qoder",
@@ -147,6 +148,7 @@ describe("PermissionsProcessor", () => {
         "mimocode",
         "omp",
         "opencode",
+        "opencodev1",
         "pi",
         "pool",
         "qoder",
@@ -159,6 +161,7 @@ describe("PermissionsProcessor", () => {
         "warp",
         "warpcli",
         "zed",
+        "trae",
       ]);
     });
 
@@ -189,6 +192,7 @@ describe("PermissionsProcessor", () => {
         "mimocode",
         "omp",
         "opencode",
+        "opencodev1",
         "pi",
         "pool",
         "qoder",

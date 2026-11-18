@@ -1,7 +1,7 @@
 import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, MockedFunction, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, MockedFunction, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
@@ -273,7 +273,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test.md",
-        fileContent: "test content",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -316,7 +315,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test.md",
-        fileContent: "test content",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -353,7 +351,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test.md",
-        fileContent: "test content",
         frontmatter: {
           targets: ["roo"],
           description: "test description",
@@ -365,7 +362,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: join(".roo", "commands"),
         relativeFilePath: "test.md",
-        fileContent: "converted content",
         frontmatter: {
           description: "test description",
         },
@@ -397,7 +393,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test.md",
-        fileContent: "test content",
         frontmatter: {
           targets: ["cursor"],
           description: "test description",
@@ -432,7 +427,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("pj", "test.md"),
-        fileContent: "test content",
         frontmatter: {
           targets: ["cursor"],
           description: "test description",
@@ -463,7 +457,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("pj", "test.md"),
-        fileContent: "test content",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -496,7 +489,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("pj", "test.md"),
-        fileContent: "content from pj",
         frontmatter: {
           targets: ["cursor"],
           description: "pj command",
@@ -507,7 +499,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("ops", "test.md"),
-        fileContent: "content from ops",
         frontmatter: {
           targets: ["cursor"],
           description: "ops command",
@@ -557,7 +548,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("update", "confluence", "docs.md"),
-        fileContent: "test content",
         frontmatter: {
           targets: ["cursor"],
           description: "test description",
@@ -593,7 +583,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("pj", "test.md"),
-        fileContent: "content from pj",
         frontmatter: {
           targets: ["cursor"],
           description: "pj command",
@@ -604,7 +593,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("ops", "test.md"),
-        fileContent: "content from ops",
         frontmatter: {
           targets: ["cursor"],
           description: "ops command",
@@ -653,7 +641,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: join("pj", "test.md"),
-        fileContent: "test content",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -684,7 +671,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test.md",
-        fileContent: "test content",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -732,7 +718,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: join("nested", "goal.md"),
-          fileContent: "reserved",
           frontmatter: { targets: ["kilo"], description: "reserved" },
           body: "reserved",
         });
@@ -740,7 +725,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: "review.md",
-          fileContent: "allowed",
           frontmatter: { targets: ["kilo"], description: "allowed" },
           body: "allowed",
         });
@@ -872,7 +856,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: "test1.md",
-          fileContent: "content1",
           frontmatter: {
             targets: ["claudecode"],
             description: "test description 1",
@@ -883,7 +866,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: "test2.md",
-          fileContent: "content2",
           frontmatter: {
             targets: ["claudecode"],
             description: "test description 2",
@@ -926,7 +908,6 @@ describe("CommandsProcessor", () => {
         outputRoot: testDir,
         relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
         relativeFilePath: "test1.md",
-        fileContent: "content1",
         frontmatter: {
           targets: ["claudecode"],
           description: "test description",
@@ -961,7 +942,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: join("pj", "foo.md"),
-          fileContent: "content1",
           frontmatter: {
             targets: ["claudecode"],
             description: "subdirectory command",
@@ -972,7 +952,6 @@ describe("CommandsProcessor", () => {
           outputRoot: testDir,
           relativeDirPath: RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
           relativeFilePath: "bar.md",
-          fileContent: "content2",
           frontmatter: {
             targets: ["claudecode"],
             description: "flat command",
@@ -1056,7 +1035,6 @@ describe("CommandsProcessor", () => {
           description: "test description",
         },
         body: "content",
-        fileContent: '---\ndescription: "test description"\n---\n\ncontent',
       });
 
       mockFindFilesByGlobs.mockResolvedValue(mockPaths);
@@ -1311,6 +1289,7 @@ describe("CommandsProcessor", () => {
           "copilot",
           "cursor",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -1320,9 +1299,11 @@ describe("CommandsProcessor", () => {
           "kiro",
           "kiro-cli",
           "kiro-ide",
+          "lettacode",
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "qoder",
           "qwencode",
@@ -1364,6 +1345,7 @@ describe("CommandsProcessor", () => {
           "copilot",
           "cursor",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -1373,9 +1355,11 @@ describe("CommandsProcessor", () => {
           "kiro",
           "kiro-cli",
           "kiro-ide",
+          "lettacode",
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "qoder",
           "qwencode",
@@ -1416,6 +1400,7 @@ describe("CommandsProcessor", () => {
           "continue",
           "cursor",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -1423,9 +1408,11 @@ describe("CommandsProcessor", () => {
           "junie",
           "kilo",
           "kiro-cli",
+          "lettacode",
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "qoder",
           "qwencode",
@@ -1446,6 +1433,47 @@ describe("CommandsProcessor", () => {
   });
 
   describe("loadToolFiles with forDeletion: true", () => {
+    it("never sweeps a committedOutput project root (Letta Code's .commands/)", async () => {
+      await writeFileContent(join(testDir, ".commands", "hand-written.md"), "Hand-written prompt");
+
+      const actualFile =
+        await vi.importActual<typeof import("../../utils/file.js")>("../../utils/file.js");
+      mockFindFilesByGlobs.mockImplementation(actualFile.findFilesByGlobs);
+
+      try {
+        const projectProcessor = new CommandsProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "lettacode",
+        });
+        expect(await projectProcessor.loadToolFiles({ forDeletion: true })).toEqual([]);
+        expect(mockFindFilesByGlobs).not.toHaveBeenCalled();
+      } finally {
+        mockFindFilesByGlobs.mockReset();
+      }
+    });
+
+    it("still sweeps a committedOutput target at global scope", async () => {
+      await writeFileContent(join(testDir, ".letta", "commands", "stale.md"), "Stale prompt");
+
+      const actualFile =
+        await vi.importActual<typeof import("../../utils/file.js")>("../../utils/file.js");
+      mockFindFilesByGlobs.mockImplementation(actualFile.findFilesByGlobs);
+
+      try {
+        const globalProcessor = new CommandsProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "lettacode",
+          global: true,
+        });
+        const toolFiles = await globalProcessor.loadToolFiles({ forDeletion: true });
+        expect(toolFiles.map((file) => file.getRelativeFilePath())).toEqual(["stale.md"]);
+      } finally {
+        mockFindFilesByGlobs.mockReset();
+      }
+    });
+
     it("should load files when the output root contains glob metacharacters", async () => {
       const literalRoot = join(testDir, "project(glob)");
       await writeFileContent(

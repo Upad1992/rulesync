@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../test-utils/mock-logger.js";
 import { resolveDefaultRef, resolveRefToSha } from "./git-client.js";
@@ -181,6 +181,39 @@ describe("checkOutdatedSources", () => {
     expect(mockClient.getDefaultBranch).toHaveBeenCalledTimes(1);
     expect(mockClient.resolveRefToSha).toHaveBeenCalledWith("owner", "current", "v2");
     expect(reports[1]).toMatchObject({ status: "up-to-date", lockedRef: SHA_A });
+  });
+
+  it("reads each entry of a repository declared several times from its own lock entry", async () => {
+    vi.mocked(readLockFile).mockResolvedValue({
+      lockfileVersion: 1,
+      sources: {
+        "owner/market#path=plugins/a&ref=main": {
+          resolvedRef: SHA_A,
+          requestedRef: "main",
+          skills: {},
+        },
+        "owner/market#path=plugins/b&ref=v1": {
+          resolvedRef: SHA_B,
+          requestedRef: "v1",
+          skills: {},
+        },
+      },
+    });
+    mockClient.resolveRefToSha.mockResolvedValue(SHA_A);
+
+    const reports = await checkOutdatedSources({
+      sources: [
+        { source: "owner/market", ref: "main", path: "plugins/a" },
+        { source: "owner/market", ref: "v1", path: "plugins/b" },
+      ],
+      projectRoot: "/project",
+      logger,
+    });
+
+    expect(reports.map(({ status, lockedRef }) => ({ status, lockedRef }))).toEqual([
+      { status: "up-to-date", lockedRef: SHA_A },
+      { status: "outdated", lockedRef: SHA_B },
+    ]);
   });
 
   it("reports a source that cannot be resolved as failed and keeps checking the rest", async () => {

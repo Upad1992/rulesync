@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
@@ -293,6 +293,59 @@ Missing description field.`;
       const skill = AntigravityPluginSkill.fromRulesyncSkill({ rulesyncSkill });
 
       expect(skill.getFrontmatter()["disable-slash-command"]).toBe(true);
+    });
+
+    it("should write the root disable-model-invocation for the IDE and plugin skills trees", () => {
+      const rulesyncSkill = new RulesyncSkill({
+        relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+        dirName: "manual",
+        frontmatter: {
+          name: "manual",
+          description: "Manual skill",
+          targets: ["*"],
+          "disable-model-invocation": true,
+        },
+        body: "Body",
+        validate: true,
+      });
+
+      expect(
+        AntigravityIdeSkill.fromRulesyncSkill({ rulesyncSkill }).getFrontmatter()[
+          "disable-model-invocation"
+        ],
+      ).toBe(true);
+      expect(
+        AntigravityPluginSkill.fromRulesyncSkill({ rulesyncSkill }).getFrontmatter()[
+          "disable-model-invocation"
+        ],
+      ).toBe(true);
+    });
+
+    it("should let a section disable-model-invocation: false override the root true", () => {
+      const rulesyncSkill = new RulesyncSkill({
+        relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+        dirName: "manual",
+        frontmatter: {
+          name: "manual",
+          description: "Manual skill",
+          targets: ["*"],
+          "disable-model-invocation": true,
+          "antigravity-ide": { "disable-model-invocation": false },
+        },
+        body: "Body",
+        validate: true,
+      });
+
+      expect(
+        AntigravityIdeSkill.fromRulesyncSkill({ rulesyncSkill }).getFrontmatter()[
+          "disable-model-invocation"
+        ],
+      ).toBe(false);
+      expect(
+        AntigravityPluginSkill.fromRulesyncSkill({ rulesyncSkill }).getFrontmatter()[
+          "disable-model-invocation"
+        ],
+      ).toBe(false);
     });
   });
 

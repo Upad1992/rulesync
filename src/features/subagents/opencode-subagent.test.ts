@@ -1,8 +1,10 @@
+import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
+import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
 import { OpenCodeSubagent, OpenCodeSubagentFrontmatterSchema } from "./opencode-subagent.js";
@@ -54,8 +56,9 @@ describe("OpenCodeSubagent", () => {
       targets: ["*"],
       name: "review",
       description: "Reviews code",
+      // OpenCode V2 spells the V1 `temperature` as a request body field.
       opencode: {
-        temperature: 0.2,
+        request: { body: { temperature: 0.2 } },
         mode: "subagent",
       },
     });
@@ -88,8 +91,8 @@ describe("OpenCodeSubagent", () => {
     }) as OpenCodeSubagent;
 
     expect(toolSubagent).toBeInstanceOf(OpenCodeSubagent);
+    // No `name`: OpenCode V2 reads frontmatter carrying it as a V1 agent.
     expect(toolSubagent.getFrontmatter()).toEqual({
-      name: "docs-writer",
       description: "Writes documentation",
       model: "model-x",
       mode: "primary",
@@ -123,7 +126,6 @@ describe("OpenCodeSubagent", () => {
 
     expect(toolSubagent).toBeInstanceOf(OpenCodeSubagent);
     expect(toolSubagent.getFrontmatter()).toEqual({
-      name: "docs-writer",
       description: "Writes documentation",
       model: "model-x",
       mode: "subagent",
@@ -162,10 +164,154 @@ describe("OpenCodeSubagent", () => {
     }) as OpenCodeSubagent;
 
     expect(toolSubagent.getFrontmatter().mode).toBe("primary");
-    expect(toolSubagent.getFrontmatter().name).toBe("primary-agent");
-    expect(toolSubagent.getFrontmatter().tools).toEqual({
-      bash: true,
-      edit: true,
+    expect(toolSubagent.getFrontmatter().name).toBeUndefined();
+    expect(toolSubagent.getFrontmatter().tools).toBeUndefined();
+    expect(toolSubagent.getFrontmatter().permissions).toEqual([
+      { action: "shell", resource: "*", effect: "allow" },
+      { action: "edit", resource: "*", effect: "allow" },
+    ]);
+  });
+
+  it("should write V1 agent fields in the V2 spelling", () => {
+    const rulesyncSubagent = new RulesyncSubagent({
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+      relativeFilePath: "reviewer.md",
+      frontmatter: {
+        targets: ["*"],
+        name: "reviewer",
+        description: "Reviews",
+        opencode: {
+          model: "anthropic/claude-sonnet-4-5",
+          variant: "high",
+          temperature: 0.1,
+          top_p: 0.9,
+          maxSteps: 5,
+          disable: false,
+          color: "primary",
+          hidden: true,
+          tools: { write: false },
+          permission: { bash: { "*": "ask", "git status": "allow" }, edit: "deny" },
+          permissions: [{ action: "webfetch", resource: "*", effect: "deny" }],
+        },
+      },
+      body: "Review the diff",
+      validate: false,
+    });
+
+    const toolSubagent = OpenCodeSubagent.fromRulesyncSubagent({
+      rulesyncSubagent,
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+    }) as OpenCodeSubagent;
+
+    expect(toolSubagent.getFrontmatter()).toEqual({
+      description: "Reviews",
+      mode: "subagent",
+      model: "anthropic/claude-sonnet-4-5#high",
+      steps: 5,
+      disabled: false,
+      hidden: true,
+      request: { body: { temperature: 0.1, top_p: 0.9 } },
+      permissions: [
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "shell", resource: "*", effect: "ask" },
+        { action: "shell", resource: "git status", effect: "allow" },
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "webfetch", resource: "*", effect: "deny" },
+      ],
+    });
+  });
+
+  it("warns that OpenCode 2.x does not yet send request settings, and folds apply_patch into edit", () => {
+    const rulesyncSubagent = new RulesyncSubagent({
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+      relativeFilePath: "reviewer.md",
+      frontmatter: {
+        targets: ["*"],
+        name: "reviewer",
+        description: "Reviews",
+        opencode: { temperature: 0.2, tools: { apply_patch: false } },
+      },
+      body: "Review the diff",
+      validate: false,
+    });
+    const logger = createMockLogger();
+
+    const toolSubagent = OpenCodeSubagent.fromRulesyncSubagent({
+      rulesyncSubagent,
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+      logger,
+    }) as OpenCodeSubagent;
+
+    expect(toolSubagent.getFrontmatter()).toEqual({
+      description: "Reviews",
+      mode: "subagent",
+      request: { body: { temperature: 0.2 } },
+      permissions: [{ action: "edit", resource: "*", effect: "deny" }],
+    });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("does not yet send it with model requests"),
+    );
+  });
+
+  it("keeps permission rules after tool toggles so a broad allow cannot override them", () => {
+    const rulesyncSubagent = new RulesyncSubagent({
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+      relativeFilePath: "editor.md",
+      frontmatter: {
+        targets: ["*"],
+        name: "editor",
+        description: "Edits",
+        opencode: { tools: { edit: false }, permission: { "*": "allow", edit: "ask" } },
+      },
+      body: "Edit",
+      validate: false,
+    });
+
+    const toolSubagent = OpenCodeSubagent.fromRulesyncSubagent({
+      rulesyncSubagent,
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+    }) as OpenCodeSubagent;
+
+    // The last matching rule wins, so `edit` still asks.
+    expect(toolSubagent.getFrontmatter().permissions).toEqual([
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "*", resource: "*", effect: "allow" },
+      { action: "edit", resource: "*", effect: "ask" },
+    ]);
+  });
+
+  it("should import V1 frontmatter in the V2 spelling, keeping the name", () => {
+    const subagent = new OpenCodeSubagent({
+      outputRoot: testDir,
+      relativeDirPath: ".opencode/agents",
+      relativeFilePath: "legacy.md",
+      frontmatter: {
+        name: "legacy-agent",
+        description: "Legacy",
+        mode: "subagent",
+        disable: true,
+        permission: { bash: "deny" },
+      },
+      body: "Body",
+      fileContent: "",
+    });
+
+    expect(subagent.toRulesyncSubagent().getFrontmatter()).toEqual({
+      targets: ["*"],
+      name: "legacy-agent",
+      description: "Legacy",
+      opencode: {
+        mode: "subagent",
+        disabled: true,
+        permissions: [{ action: "shell", resource: "*", effect: "deny" }],
+      },
     });
   });
 
@@ -345,6 +491,42 @@ Body content`,
       expect(frontmatter.prompt).toBeUndefined();
     });
 
+    it("merges inline agents from .opencode/opencode.json over the root config", async () => {
+      await writeFileContent(join(testDir, ".opencode", "prompts", "agent.txt"), "Dot prompt");
+      await writeFileContent(
+        join(testDir, "opencode.json"),
+        JSON.stringify({
+          agent: {
+            reviewer: { description: "Root", mode: "subagent", prompt: "Root prompt" },
+            keeper: { description: "Keeps its prompt", prompt: "Kept prompt" },
+          },
+        }),
+      );
+      await writeFileContent(
+        join(testDir, ".opencode", "opencode.json"),
+        JSON.stringify({
+          agent: {
+            // Resolved against `.opencode/`, the directory of this file.
+            reviewer: { description: "Dot", prompt: "{file:./prompts/agent.txt}" },
+            keeper: { temperature: 0.1 },
+          },
+        }),
+      );
+
+      const subagents = await OpenCodeSubagent.loadAdditionalImportFiles({ outputRoot: testDir });
+      const byName = new Map(subagents.map((agent) => [agent.getRelativeFilePath(), agent]));
+
+      const reviewer = byName.get("reviewer.md");
+      expect(reviewer?.getBody()).toBe("Dot prompt");
+      expect(reviewer?.getFrontmatter()).toMatchObject({ description: "Dot", mode: "subagent" });
+      const keeper = byName.get("keeper.md");
+      expect(keeper?.getBody()).toBe("Kept prompt");
+      expect(keeper?.getFrontmatter()).toMatchObject({
+        description: "Keeps its prompt",
+        temperature: 0.1,
+      });
+    });
+
     it("resolves a {file:./path} prompt reference relative to the config dir", async () => {
       await writeFileContent(join(testDir, "prompts", "agent.txt"), "Prompt from file");
       await writeFileContent(
@@ -368,6 +550,66 @@ Body content`,
       const [subagent] = await OpenCodeSubagent.loadAdditionalImportFiles({ outputRoot: testDir });
 
       expect(subagent?.getBody()).toBe("{file:./missing.txt}");
+    });
+
+    it("follows a ../ {file:...} reference that stays inside the project", async () => {
+      await writeFileContent(join(testDir, "prompts", "agent.txt"), "Shared prompt");
+      await writeFileContent(
+        join(testDir, ".opencode", "opencode.json"),
+        JSON.stringify({ agent: { helper: { prompt: "{file:../prompts/agent.txt}" } } }),
+      );
+
+      const [subagent] = await OpenCodeSubagent.loadAdditionalImportFiles({ outputRoot: testDir });
+
+      expect(subagent?.getBody()).toBe("Shared prompt");
+    });
+
+    it("does not read a {file:...} reference that leaves the project at project scope", async () => {
+      const projectDir = join(testDir, "project");
+      await writeFileContent(join(testDir, "secret.txt"), "SECRET");
+      await writeFileContent(
+        join(projectDir, "opencode.json"),
+        JSON.stringify({
+          agent: {
+            parent: { prompt: "{file:../secret.txt}" },
+            linked: { prompt: "{file:./prompts/linked.txt}" },
+          },
+        }),
+      );
+      await writeFileContent(join(projectDir, "prompts", "placeholder.txt"), "");
+      await symlink(join(testDir, "secret.txt"), join(projectDir, "prompts", "linked.txt"));
+
+      const logger = createMockLogger();
+      const subagents = await OpenCodeSubagent.loadAdditionalImportFiles({
+        outputRoot: projectDir,
+        logger,
+      });
+      const byName = new Map(subagents.map((agent) => [agent.getRelativeFilePath(), agent]));
+
+      expect(byName.get("parent.md")?.getBody()).toBe("{file:../secret.txt}");
+      expect(byName.get("linked.md")?.getBody()).toBe("{file:./prompts/linked.txt}");
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/OpenCode agent "parent".*"\.\.\/secret\.txt" resolves outside/),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/OpenCode agent "linked".*"prompts\/linked\.txt" resolves outside/),
+      );
+    });
+
+    it("leaves {file:...} references unrestricted at global scope", async () => {
+      const homeDir = join(testDir, "home");
+      await writeFileContent(join(testDir, "shared-prompt.txt"), "Dotfiles prompt");
+      await writeFileContent(
+        join(homeDir, ".config", "opencode", "opencode.json"),
+        JSON.stringify({ agent: { helper: { prompt: "{file:../../../shared-prompt.txt}" } } }),
+      );
+
+      const [subagent] = await OpenCodeSubagent.loadAdditionalImportFiles({
+        outputRoot: homeDir,
+        global: true,
+      });
+
+      expect(subagent?.getBody()).toBe("Dotfiles prompt");
     });
 
     it("defaults the mode and round-trips into a RulesyncSubagent", async () => {

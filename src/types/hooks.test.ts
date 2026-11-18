@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   HOOK_TYPES,
@@ -28,30 +28,6 @@ import {
 } from "./hooks.js";
 
 describe("Event map completeness", () => {
-  it("every CLAUDE_HOOK_EVENTS entry should exist in CANONICAL_TO_CLAUDE_EVENT_NAMES", () => {
-    for (const event of CLAUDE_HOOK_EVENTS) {
-      expect(CANONICAL_TO_CLAUDE_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
-
-  it("every FACTORYDROID_HOOK_EVENTS entry should exist in CANONICAL_TO_FACTORYDROID_EVENT_NAMES", () => {
-    for (const event of FACTORYDROID_HOOK_EVENTS) {
-      expect(CANONICAL_TO_FACTORYDROID_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
-
-  it("every CLINE_HOOK_EVENTS entry should exist in CANONICAL_TO_CLINE_EVENT_NAMES", () => {
-    for (const event of CLINE_HOOK_EVENTS) {
-      expect(CANONICAL_TO_CLINE_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
-
-  it("every CURSOR_HOOK_EVENTS entry should exist in CANONICAL_TO_CURSOR_EVENT_NAMES", () => {
-    for (const event of CURSOR_HOOK_EVENTS) {
-      expect(CANONICAL_TO_CURSOR_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
-
   it("every OPENCODE_HOOK_EVENTS entry should exist in CANONICAL_TO_OPENCODE_EVENT_NAMES", () => {
     // The shell events are not in the generic event map: OpenCode has no
     // shell-execution lifecycle event, so they are emitted as bash-gated
@@ -71,18 +47,6 @@ describe("Event map completeness", () => {
       expect(CANONICAL_TO_DEEPAGENTS_EVENT_NAMES).toHaveProperty(event);
     }
   });
-
-  it("every CODEXCLI_HOOK_EVENTS entry should exist in CANONICAL_TO_CODEXCLI_EVENT_NAMES", () => {
-    for (const event of CODEXCLI_HOOK_EVENTS) {
-      expect(CANONICAL_TO_CODEXCLI_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
-
-  it("every JUNIE_HOOK_EVENTS entry should exist in CANONICAL_TO_JUNIE_EVENT_NAMES", () => {
-    for (const event of JUNIE_HOOK_EVENTS) {
-      expect(CANONICAL_TO_JUNIE_EVENT_NAMES).toHaveProperty(event);
-    }
-  });
 });
 
 describe("Junie CLI event naming", () => {
@@ -91,17 +55,19 @@ describe("Junie CLI event naming", () => {
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.sessionStart).toBe("SessionStart");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.beforeSubmitPrompt).toBe("UserPromptSubmit");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.preToolUse).toBe("PreToolUse");
+    expect(CANONICAL_TO_JUNIE_EVENT_NAMES.postToolUse).toBe("PostToolUse");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.stop).toBe("Stop");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.stopFailure).toBe("StopFailure");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.permissionRequest).toBe("PermissionRequest");
     expect(CANONICAL_TO_JUNIE_EVENT_NAMES.sessionEnd).toBe("SessionEnd");
   });
 
-  it("should support the seven documented Junie CLI hook events", () => {
+  it("should support the eight documented Junie CLI hook events", () => {
     expect(JUNIE_HOOK_EVENTS).toEqual([
       "sessionStart",
       "beforeSubmitPrompt",
       "preToolUse",
+      "postToolUse",
       "stop",
       "stopFailure",
       "permissionRequest",

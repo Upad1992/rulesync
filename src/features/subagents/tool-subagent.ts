@@ -1,6 +1,9 @@
+import type { z } from "zod/mini";
+
 import { AiFileFromFileParams, AiFileParams } from "../../types/ai-file.js";
 import { ToolFile } from "../../types/tool-file.js";
-import { ToolTarget } from "../../types/tool-targets.js";
+import { isTargetedByTargets, ToolTarget } from "../../types/tool-targets.js";
+import { formatError } from "../../utils/error.js";
 import type { Logger } from "../../utils/logger.js";
 import { RulesyncSubagent } from "./rulesync-subagent.js";
 
@@ -52,6 +55,30 @@ export type ToolSubagentForDeletionParams = {
   relativeFilePath: string;
   global?: boolean;
 };
+/**
+ * Parse the tool frontmatter built from a Rulesync subagent, failing with
+ * `Invalid <toolTarget> subagent frontmatter in <rulesync file>: <details>`.
+ */
+export function parseGeneratedSubagentFrontmatter<TSchema extends z.ZodMiniType>({
+  schema,
+  frontmatter,
+  toolTarget,
+  rulesyncSubagent,
+}: {
+  schema: TSchema;
+  frontmatter: unknown;
+  toolTarget: ToolTarget;
+  rulesyncSubagent: RulesyncSubagent;
+}): z.infer<TSchema> {
+  const result = schema.safeParse(frontmatter);
+  if (!result.success) {
+    throw new Error(
+      `Invalid ${toolTarget} subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
+    );
+  }
+  return result.data;
+}
+
 export abstract class ToolSubagent extends ToolFile {
   static getSettablePaths(): ToolSubagentSettablePaths {
     throw new Error("Please implement this method in the subclass.");
@@ -100,20 +127,7 @@ export abstract class ToolSubagent extends ToolFile {
     rulesyncSubagent: RulesyncSubagent;
     toolTarget: ToolTarget;
   }): boolean {
-    const targets = rulesyncSubagent.getFrontmatter().targets;
-    if (!targets) {
-      return true;
-    }
-
-    if (targets.includes("*")) {
-      return true;
-    }
-
-    if (targets.includes(toolTarget)) {
-      return true;
-    }
-
-    return false;
+    return isTargetedByTargets({ targets: rulesyncSubagent.getFrontmatter().targets, toolTarget });
   }
 
   protected static filterToolSpecificSection(

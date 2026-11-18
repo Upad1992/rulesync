@@ -1,7 +1,8 @@
+// cspell:ignore basehead -- the parameter name of Octokit's compareCommitsWithBasehead
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 
-import { MAX_FILE_SIZE } from "../constants/rulesync-paths.js";
+import { MAX_FILE_SIZE, MAX_FILE_SIZE_MB } from "../constants/rulesync-paths.js";
 import type {
   GitHubApiError,
   GitHubClientConfig,
@@ -23,7 +24,7 @@ import type { Logger } from "../utils/logger.js";
  * nothing about the ones it left out.
  * https://docs.github.com/en/rest/repos/contents#get-repository-content
  */
-export const GITHUB_CONTENTS_DIRECTORY_LIMIT = 1000;
+const GITHUB_CONTENTS_DIRECTORY_LIMIT = 1000;
 
 /**
  * Error class for GitHub API errors
@@ -257,7 +258,7 @@ export class GitHubClient {
         throw new GitHubClientError(
           // `path` names a file in the remote repository, so it is stripped
           // and quoted before it reaches a terminal.
-          `File ${quoteForLog(path)} exceeds maximum size limit of ${MAX_FILE_SIZE / 1024 / 1024}MB`,
+          `File ${quoteForLog(path)} exceeds maximum size limit of ${MAX_FILE_SIZE_MB}MB`,
         );
       }
 
@@ -299,6 +300,34 @@ export class GitHubClient {
         ref,
       });
       return data.sha;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * How `head` relates to `base` in the repository's history: `"identical"`,
+   * `"ahead"` (`base` is an ancestor of `head`), `"behind"` or `"diverged"`.
+   * GitHub serves commits of the whole fork network through any repository
+   * of it, so this is what tells a commit of `owner/repo` itself from one that
+   * only exists in a fork.
+   */
+  async compareCommits(params: {
+    owner: string;
+    repo: string;
+    base: string;
+    head: string;
+  }): Promise<string> {
+    const { owner, repo, base, head } = params;
+    try {
+      const { data } = await this.octokit.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${base}...${head}`,
+        // Only the status is needed, not the commit list or the file diff.
+        per_page: 1,
+      });
+      return data.status;
     } catch (error) {
       throw this.handleError(error);
     }

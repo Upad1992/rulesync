@@ -6,9 +6,9 @@ import {
 import { isPlainObject } from "../../utils/type-guards.js";
 import { type OwnedHookRef, ownedHookKey } from "./hooks-ownership-lock.js";
 
-export type HookListShape = "matcher-groups" | "flat";
+type HookListShape = "matcher-groups" | "flat";
 
-export type MergedHookLists = {
+type MergedHookLists = {
   /** The `hooks` value to write. */
   hooks: Record<string, unknown[]>;
   /**
@@ -26,7 +26,7 @@ export type MergedHookLists = {
  * read", so a caller that is about to preserve content can say out loud that
  * it is replacing a file it failed to parse.
  */
-export function parseExistingHooksValue(existingContent: string): {
+function parseExistingHooksValue(existingContent: string): {
   hooks: unknown;
   malformed: boolean;
 } {
@@ -101,7 +101,7 @@ export function mergeGeneratedHookLists({
  * - a previous run generated it and this one does not → it is retracted, with a warning;
  * - neither → it is unowned, and kept.
  */
-export function preserveUnownedHookCommands({
+function preserveUnownedHookCommands({
   existingHooks,
   generatedHooks,
   shape,

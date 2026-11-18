@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import * as smolToml from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -323,6 +323,57 @@ describe("GrokcliPermissions", () => {
       expect(permission.deny).toEqual(["Glob(secrets/**)"]);
     });
 
+    it("rewrites Claude-style // absolute path patterns to Grok's single leading /", async () => {
+      const permissions = await GrokcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissions({
+          read: { "//etc/shadow": "deny", "~/.ssh/**": "deny", "src/**": "allow" },
+          edit: { "//etc/**": "deny" },
+          write: { "///var/log/**": "ask" },
+          grep: { "//srv/data/**": "ask" },
+          glob: { "//opt/**": "allow" },
+        }),
+        global: true,
+      });
+
+      const permission = readPermission(permissions.getFileContent());
+      expect(permission.deny).toEqual(["Edit(/etc/**)", "Read(/etc/shadow)", "Read(~/.ssh/**)"]);
+      expect(permission.ask).toEqual(["Edit(/var/log/**)", "Grep(/srv/data/**)"]);
+      expect(permission.allow).toEqual(["Glob(/opt/**)", "Read(src/**)"]);
+    });
+
+    it("leaves // in non-path patterns such as Bash and WebFetch unchanged", async () => {
+      const permissions = await GrokcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissions({
+          bash: { "//usr/bin/env *": "deny" },
+          webfetch: { "//example.com/*": "deny" },
+        }),
+        global: true,
+      });
+
+      const permission = readPermission(permissions.getFileContent());
+      expect(permission.deny).toEqual(["Bash(//usr/bin/env *)", "WebFetch(//example.com/*)"]);
+    });
+
+    it("replaces a stale Read(//abs) entry from an earlier generate with the / form", async () => {
+      await writeFileContent(
+        join(testDir, ".grok", "config.toml"),
+        smolToml.stringify({ permission: { deny: ["Read(//etc/shadow)"] } }),
+      );
+
+      const permissions = await GrokcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissions({
+          read: { "//etc/shadow": "deny" },
+        }),
+        global: true,
+      });
+
+      const permission = readPermission(permissions.getFileContent());
+      expect(permission.deny).toEqual(["Read(/etc/shadow)"]);
+    });
+
     it("maps the agent category onto Grok's AgentMessage tool", async () => {
       const permissions = await GrokcliPermissions.fromRulesyncPermissions({
         outputRoot: testDir,
@@ -455,6 +506,16 @@ describe("GrokcliPermissions", () => {
   });
 
   describe("toRulesyncPermissions (import)", () => {
+    it("imports absolute path patterns as Grok spells them, without restoring //", async () => {
+      await writeFileContent(
+        join(testDir, ".grok", "config.toml"),
+        ["[permission]", 'deny = ["Read(/etc/shadow)"]', ""].join("\n"),
+      );
+      const tool = await GrokcliPermissions.fromFile({ outputRoot: testDir, global: true });
+      const json = JSON.parse(tool.toRulesyncPermissions().getFileContent());
+      expect(json.permission.read).toEqual({ "/etc/shadow": "deny" });
+    });
+
     it("parses fine-grained [permission] arrays into canonical categories", async () => {
       await writeFileContent(
         join(testDir, ".grok", "config.toml"),
@@ -842,6 +903,40 @@ describe("GrokcliPermissions", () => {
       const tool = await GrokcliPermissions.fromFile({ outputRoot: testDir, global: false });
       const json = JSON.parse(tool.toRulesyncPermissions().getFileContent());
       expect(json.permission.bash["git *"]).toBe("allow");
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("skips a category named like a prototype member instead of writing an empty entry", async () => {
+      const permissions = await GrokcliPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissions({
+          bash: { ls: "allow" },
+          toString: { "*": "allow", x: "deny" },
+        }),
+        global: true,
+        logger: createMockLogger(),
+      });
+
+      const permission = readPermission(permissions.getFileContent());
+      expect(permission.allow).toEqual(["Bash(ls)"]);
+      expect(permission.deny).toEqual([]);
+    });
+  });
+
+  describe("names that match Object.prototype members on import", () => {
+    it("imports a pattern named like a prototype member into its own entry", async () => {
+      await writeFileContent(
+        join(testDir, ".grok", "config.toml"),
+        ["[permission]", 'allow = ["Bash(toString)"]', ""].join("\n"),
+      );
+
+      const tool = await GrokcliPermissions.fromFile({ outputRoot: testDir, global: true });
+      expect(tool.toRulesyncPermissions().getJson().permission.bash).toEqual({
+        toString: "allow",
+      });
+      expect(Object.hasOwn(Object.prototype.toString, "*")).toBe(false);
+      expect(Object.hasOwn(Object.prototype.toString, "toString")).toBe(false);
     });
   });
 });

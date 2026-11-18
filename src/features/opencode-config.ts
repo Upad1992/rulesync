@@ -1,8 +1,17 @@
+import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { OPENCODE_LAYOUT, type OpencodeLayout } from "../constants/opencode-paths.js";
-import { readFileContentOrNull } from "../utils/file.js";
+import {
+  fileExists,
+  posixRelativePathEscapesRoot,
+  readFileContentOrNull,
+  resolvedRelativePath,
+  toPosixPath,
+} from "../utils/file.js";
+import type { Logger } from "../utils/logger.js";
+import { quoteValueForWarning } from "../utils/quote-value.js";
 import { isRecord, isStringArray } from "../utils/type-guards.js";
 import { parseSharedConfig } from "./shared/shared-config-gateway.js";
 
@@ -51,6 +60,168 @@ export async function readOpencodeConfig({
   }
 
   return parseSharedConfig({ format: "jsonc", fileContent });
+}
+
+/** One parsed OpenCode config file and the directory its relative paths resolve against. */
+type OpencodeConfigLayer = {
+  /** Absolute directory holding the file. */
+  configDir: string;
+  config: Record<string, unknown>;
+};
+
+/** A `.opencode/` config file, with its path relative to `outputRoot` for messages. */
+type OpencodeDotDirConfigLayer = OpencodeConfigLayer & { relativeFilePath: string };
+
+/**
+ * Reads the project-scope config files OpenCode merges over the root
+ * `opencode.json(c)`: `.opencode/opencode.json`, then `.opencode/opencode.jsonc`,
+ * in the order OpenCode loads them (a later file wins). Returns an empty list
+ * in global mode and for layouts without this location (MiMo Code).
+ *
+ * @see https://opencode.ai/docs/config/#precedence-order
+ * @see https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/config/config.ts
+ */
+export async function readOpencodeDotDirConfigLayers({
+  outputRoot,
+  global = false,
+  layout = OPENCODE_LAYOUT,
+}: {
+  outputRoot: string;
+  global?: boolean;
+  layout?: OpencodeLayout;
+}): Promise<OpencodeDotDirConfigLayer[]> {
+  if (global || !layout.readsDotDirConfig) {
+    return [];
+  }
+  const configDir = join(outputRoot, layout.dir);
+  const layers: OpencodeDotDirConfigLayer[] = [];
+  for (const fileName of [layout.jsonFileName, layout.jsoncFileName]) {
+    const fileContent = await readFileContentOrNull(join(configDir, fileName));
+    if (fileContent === null) {
+      continue;
+    }
+    layers.push({
+      relativeFilePath: join(layout.dir, fileName),
+      configDir,
+      config: parseSharedConfig({ format: "jsonc", fileContent }),
+    });
+  }
+  return layers;
+}
+
+/**
+ * Reads every OpenCode config file that applies at this scope, lowest
+ * precedence first: the root config (see {@link readOpencodeConfig}), then the
+ * `.opencode/` files (see {@link readOpencodeDotDirConfigLayers}).
+ */
+export async function readOpencodeConfigLayers({
+  outputRoot,
+  global = false,
+  layout = OPENCODE_LAYOUT,
+}: {
+  outputRoot: string;
+  global?: boolean;
+  layout?: OpencodeLayout;
+}): Promise<OpencodeConfigLayer[]> {
+  return [
+    {
+      configDir: getOpencodeConfigDir({ outputRoot, global, layout }),
+      config: await readOpencodeConfig({ outputRoot, global, layout }),
+    },
+    ...(await readOpencodeDotDirConfigLayers({ outputRoot, global, layout })),
+  ];
+}
+
+/**
+ * Deep-merges `source` over `target` the way OpenCode merges its config files
+ * (remeda's `mergeDeep`): plain objects merge key by key, and any other value —
+ * arrays included — replaces the target's.
+ */
+export function mergeOpencodeConfigValues(target: unknown, source: unknown): unknown {
+  if (!isRecord(target) || !isRecord(source)) {
+    return source;
+  }
+  const merged: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(target)) {
+    setOwnEntry(merged, key, value);
+  }
+  for (const [key, value] of Object.entries(source)) {
+    setOwnEntry(
+      merged,
+      key,
+      Object.hasOwn(target, key) ? mergeOpencodeConfigValues(target[key], value) : value,
+    );
+  }
+  return merged;
+}
+
+/**
+ * Merges per-file entry maps (the `command` or `agent` entries of each config
+ * layer, lowest precedence first) into one, as OpenCode does. Returns `null`
+ * when no layer has entries.
+ */
+export function mergeOpencodeEntryLayers(
+  layers: Array<Record<string, unknown> | null>,
+): Record<string, unknown> | null {
+  let merged: Record<string, unknown> | null = null;
+  for (const entries of layers) {
+    if (entries === null) {
+      continue;
+    }
+    const next = mergeOpencodeConfigValues(merged ?? {}, entries);
+    merged = isRecord(next) ? next : merged;
+  }
+  return merged;
+}
+
+/**
+ * Warns when a `.opencode/opencode.json(c)` file sets entries that the
+ * generated root config also sets. OpenCode merges those files over the root
+ * config, so their entries win and the generated ones never take effect.
+ *
+ * `generated` maps each top-level key rulesync writes (`mcp`, `permission`) to
+ * its generated value. `overlays` are the `.opencode/` layers, already lowered
+ * by the caller where needed.
+ */
+export function warnOpencodeDotDirOverrides({
+  generated,
+  overlays,
+  rootFileName,
+  logger,
+}: {
+  generated: Record<string, unknown>;
+  overlays: OpencodeDotDirConfigLayer[];
+  rootFileName: string;
+  logger?: Logger;
+}): void {
+  if (!logger) {
+    return;
+  }
+  for (const overlay of overlays) {
+    const overridden: string[] = [];
+    for (const [key, value] of Object.entries(generated)) {
+      if (value === undefined || !Object.hasOwn(overlay.config, key)) {
+        continue;
+      }
+      const overlayValue = overlay.config[key];
+      if (!isRecord(value) || !isRecord(overlayValue)) {
+        overridden.push(`"${key}"`);
+        continue;
+      }
+      for (const name of Object.keys(value)) {
+        if (Object.hasOwn(overlayValue, name)) {
+          overridden.push(`"${key}" > ${quoteValueForWarning(name)}`);
+        }
+      }
+    }
+    if (overridden.length > 0) {
+      logger.warn(
+        `OpenCode merges "${toPosixPath(overlay.relativeFilePath)}" over the generated ` +
+          `"${rootFileName}", so its values for these generated entries take precedence: ` +
+          `${overridden.join(", ")}.`,
+      );
+    }
+  }
 }
 
 /**
@@ -155,7 +326,7 @@ function mergeOpencodeV2Entries({
  * Sets `target[key]` as an own, enumerable property. A plain assignment to a
  * key named `__proto__` would set the prototype instead.
  */
-function setOwnEntry(target: Record<string, unknown>, key: string, value: unknown): void {
+export function setOwnEntry(target: Record<string, unknown>, key: string, value: unknown): void {
   Object.defineProperty(target, key, {
     value,
     enumerable: true,
@@ -186,7 +357,15 @@ export function getOpencodeAgentEntries({
     config,
     legacyKey: "agent",
     pluralKey: "agents",
-    lower: lowerOpencodeV2Agent,
+    // OpenCode V2 itself reads an entry's `permissions`, so the V2 layout keeps
+    // them next to the lowered fields (its importer raises the rest back).
+    lower:
+      layout.configVersion === "v2"
+        ? (entry) => ({
+            ...lowerOpencodeV2Agent(entry),
+            ...(Array.isArray(entry.permissions) && { permissions: entry.permissions }),
+          })
+        : lowerOpencodeV2Agent,
   });
 }
 
@@ -321,14 +500,14 @@ const OPENCODE_V2_UNSUPPORTED_OAUTH_KEYS: ReadonlySet<string> = new Set([
  * entry shadowed by a different flat entry of the same name, or a `disabled`
  * contradicting the server's own `enabled`.
  */
-export type OpencodeV2DropReason = "unsupported" | "conflict";
+type OpencodeV2DropReason = "unsupported" | "conflict";
 
 /**
  * Called with the dotted path (e.g. `mcp.servers.fs.timeout`) of a V2 value
  * that the lowering drops, so the caller can say so instead of the value
  * vanishing without a word.
  */
-export type OpencodeV2DropReporter = (path: string, reason: OpencodeV2DropReason) => void;
+type OpencodeV2DropReporter = (path: string, reason: OpencodeV2DropReason) => void;
 
 function lowerOpencodeV2OAuth(
   oauth: Record<string, unknown>,
@@ -441,6 +620,97 @@ export function findOpencodeV2McpContainers(mcp: unknown): string[] {
 }
 
 /**
+ * Returns the non-empty V2 global `mcp.timeout` object of an OpenCode `mcp`
+ * value, or `undefined` when there is none.
+ */
+export function getOpencodeV2GlobalMcpTimeout(mcp: unknown): Record<string, unknown> | undefined {
+  return isRecord(mcp) && findOpencodeV2McpContainers(mcp).includes("mcp.timeout")
+    ? (mcp.timeout as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Returns the raw entry an OpenCode `mcp` value holds for a server: the one
+ * under the V2 `mcp.servers` envelope, or else the flat V1 entry.
+ */
+export function getOpencodeMcpServerEntry(mcp: unknown, name: string): unknown {
+  if (!isRecord(mcp)) {
+    return undefined;
+  }
+  const envelope = getOpencodeV2McpEnvelope(mcp);
+  if (envelope !== null && Object.hasOwn(envelope, name)) {
+    return envelope[name];
+  }
+  return Object.hasOwn(mcp, name) ? mcp[name] : undefined;
+}
+
+const OPENCODE_V1_TO_V2_OAUTH_KEYS: ReadonlyMap<string, string> = new Map(
+  [...OPENCODE_V2_OAUTH_KEYS].map(([v2, v1]) => [v1, v2]),
+);
+
+/**
+ * Raises one V1-shaped OpenCode MCP server (`local` or `remote`) to the V2
+ * spelling — the inverse of {@link lowerOpencodeV2Server}:
+ *
+ * - `enabled` is dropped and `disabled: true` written only for a disabled server;
+ * - a number `timeout` becomes `{ catalog, execution }`, and camelCase `oauth`
+ *   keys become snake_case.
+ *
+ * Values Rulesync's canonical form cannot hold are taken from the entry the
+ * file already has for the server (`existing`): its `timeout` object and its
+ * `oauth` object are kept verbatim whenever lowering them gives back exactly
+ * what the canonical server carries, so a V2 file survives import and
+ * generate unchanged. When the canonical `timeout` differs, the existing
+ * `startup` value is still kept.
+ */
+export function raiseOpencodeServerToV2(
+  server: Record<string, unknown>,
+  existing: unknown,
+): Record<string, unknown> {
+  const { enabled, timeout, oauth, ...rest } = server;
+  const raised: Record<string, unknown> = { ...rest };
+  if (enabled === false) {
+    raised.disabled = true;
+  }
+
+  const existingTimeout =
+    isRecord(existing) && isRecord(existing.timeout) ? existing.timeout : null;
+  if (existingTimeout !== null && lowerOpencodeV2Timeout(existingTimeout) === timeout) {
+    raised.timeout = existingTimeout;
+  } else if (typeof timeout === "number") {
+    // A changed canonical timeout replaces `catalog` and `execution`, the two
+    // values it stands for; the existing `startup`, which it never carries, is
+    // kept.
+    const startup = existingTimeout?.startup;
+    raised.timeout = {
+      ...(startup !== undefined && { startup }),
+      catalog: timeout,
+      execution: timeout,
+    };
+  } else if (timeout !== undefined) {
+    raised.timeout = timeout;
+  }
+
+  const existingOauth = isRecord(existing) && isRecord(existing.oauth) ? existing.oauth : null;
+  if (
+    existingOauth !== null &&
+    isRecord(oauth) &&
+    isDeepStrictEqual(lowerOpencodeV2OAuth(existingOauth, ""), oauth)
+  ) {
+    raised.oauth = existingOauth;
+  } else if (isRecord(oauth)) {
+    const snakeOauth: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(oauth)) {
+      setOwnEntry(snakeOauth, OPENCODE_V1_TO_V2_OAUTH_KEYS.get(key) ?? key, value);
+    }
+    raised.oauth = snakeOauth;
+  } else if (oauth !== undefined) {
+    raised.oauth = oauth;
+  }
+  return raised;
+}
+
+/**
  * Lowers OpenCode V2 `mcp` spellings found in a V1 config to the flat V1 map,
  * the way OpenCode V1 itself does since v1.18.24 (`normalizeMcp`):
  *
@@ -498,6 +768,205 @@ export function lowerOpencodeV2Mcp(mcp: unknown, onDropped?: OpencodeV2DropRepor
 }
 
 /** Matches a string whose entire value is an OpenCode `{file:...}` reference. */
+/** One entry of OpenCode V2's ordered `permissions` array. */
+export type OpencodeV2PermissionRule = { action: string; resource: string; effect: string };
+
+/**
+ * OpenCode V1 permission keys that V2 renamed, as OpenCode V2's own V1 config
+ * compatibility pass translates them (`write`/`patch`/`apply_patch` fold into
+ * `edit`; `apply_patch` since OpenCode v2.1.3).
+ *
+ * @see https://opencode.ai/v2/docs/migrate-v1/
+ * @see https://github.com/anomalyco/opencode/pull/57900
+ */
+const OPENCODE_V1_TO_V2_PERMISSION_ACTIONS: Record<string, string> = {
+  bash: "shell",
+  task: "subagent",
+  write: "edit",
+  patch: "edit",
+  apply_patch: "edit",
+};
+
+function toOpencodeV2PermissionAction(v1Key: string): string {
+  return Object.hasOwn(OPENCODE_V1_TO_V2_PERMISSION_ACTIONS, v1Key)
+    ? OPENCODE_V1_TO_V2_PERMISSION_ACTIONS[v1Key]!
+    : v1Key;
+}
+
+/**
+ * Flattens an OpenCode V1 `permission` map into OpenCode V2's ordered
+ * `permissions` array the way OpenCode V2 reads a V1 map itself: keys in
+ * object order, each key's patterns in order, a bare action applying to `*`.
+ * The generated rules therefore keep the V1 map's last-match-wins semantics.
+ */
+export function toOpencodeV2PermissionRules(
+  permission: Record<string, string | Record<string, string>>,
+): OpencodeV2PermissionRule[] {
+  return Object.entries(permission).flatMap(([key, value]) => {
+    const action = toOpencodeV2PermissionAction(key);
+    if (typeof value === "string") {
+      return [{ action, resource: "*", effect: value }];
+    }
+    return Object.entries(value).map(([resource, effect]) => ({ action, resource, effect }));
+  });
+}
+
+/**
+ * Agent fields only OpenCode V1 knows. Before OpenCode v2.1.4, V2 read an agent
+ * entry or Markdown frontmatter carrying any of them (`name` included) as a V1
+ * entry and ignored the V2 fields next to them; since v2.1.4 a file that also
+ * carries a V2 field (`permissions`, `request`, `system`, `disabled`) is read
+ * as V2 and these fields are ignored with a warning. Either way an entry
+ * written for V2 must carry none of them.
+ *
+ * @see https://github.com/anomalyco/opencode/pull/58218
+ */
+const OPENCODE_V1_ONLY_AGENT_KEYS = [
+  "name",
+  "prompt",
+  "disable",
+  "maxSteps",
+  "variant",
+  "temperature",
+  "top_p",
+  "options",
+  "tools",
+  "permission",
+] as const;
+
+const OPENCODE_V2_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * The V1 `tools` toggles and `permission` of an agent as V2 permission rules:
+ * one rule per tool toggle (`write` / `patch` / `apply_patch` fold into `edit`), followed by
+ * the flattened `permission` map (a bare string applies to every action).
+ * Unlike a per-key merge, which would leave a `permission` value at its tool
+ * toggle's earlier position where a later broad rule could override it, this
+ * keeps every `permission` rule after the toggles, so the result is never
+ * looser than the `permission` map read on its own.
+ */
+function toOpencodeV2AgentPermissionRules({
+  tools,
+  permission,
+}: {
+  tools: unknown;
+  permission: unknown;
+}): OpencodeV2PermissionRule[] {
+  const toggleRules: OpencodeV2PermissionRule[] = isRecord(tools)
+    ? Object.entries(tools).flatMap(([tool, enabled]) =>
+        typeof enabled === "boolean"
+          ? [
+              {
+                action: toOpencodeV2PermissionAction(tool),
+                resource: "*",
+                effect: enabled ? "allow" : "deny",
+              },
+            ]
+          : [],
+      )
+    : [];
+  const permissionMap = typeof permission === "string" ? { "*": permission } : permission;
+  const flatPermission: Record<string, string | Record<string, string>> = {};
+  if (isRecord(permissionMap)) {
+    for (const [key, value] of Object.entries(permissionMap)) {
+      if (typeof value === "string") {
+        setOwnEntry(flatPermission, key, value);
+      } else if (isRecord(value)) {
+        const patterns: Record<string, string> = {};
+        for (const [pattern, effect] of Object.entries(value)) {
+          if (typeof effect === "string") setOwnEntry(patterns, pattern, effect);
+        }
+        setOwnEntry(flatPermission, key, patterns);
+      }
+    }
+  }
+  const permissionRules = toOpencodeV2PermissionRules(flatPermission);
+  return [...toggleRules, ...permissionRules];
+}
+
+/**
+ * Moves the scalar V1 agent fields of `legacy` into their V2 spelling on
+ * `raised` (see {@link raiseOpencodeAgentToV2}). A V2 field already present
+ * wins over its V1 spelling.
+ */
+function raiseOpencodeAgentScalarsToV2({
+  legacy,
+  raised,
+}: {
+  legacy: Record<string, unknown>;
+  raised: Record<string, unknown>;
+}): void {
+  if (typeof legacy.variant === "string" && legacy.variant !== "") {
+    if (typeof raised.model === "string" && !raised.model.includes("#")) {
+      raised.model = `${raised.model}#${legacy.variant}`;
+    }
+  }
+  if (typeof legacy.prompt === "string" && raised.system === undefined) {
+    raised.system = legacy.prompt;
+  }
+  if (typeof legacy.disable === "boolean" && raised.disabled === undefined) {
+    raised.disabled = legacy.disable;
+  }
+  if (legacy.maxSteps !== undefined && raised.steps === undefined) {
+    raised.steps = legacy.maxSteps;
+  }
+  if (typeof raised.color === "string" && !OPENCODE_V2_COLOR_PATTERN.test(raised.color)) {
+    delete raised.color;
+  }
+}
+
+/**
+ * Raises OpenCode V1 agent fields (an `opencode.json` agent entry or Markdown
+ * agent frontmatter) to the V2 spelling, mirroring OpenCode V2's own V1 agent
+ * translation: `prompt` → `system`, `disable` → `disabled`, `maxSteps` →
+ * `steps`, `variant` joined onto `model` as `provider/model#variant`,
+ * `temperature` / `top_p` / `options` under `request.body`, and `tools` /
+ * `permission` → a `permissions` array placed before any existing V2 rules.
+ * `name` is dropped (V2 takes the ID from the file name or the entry key), as
+ * is a `color` that is not a six-digit hex value (V2 accepts only those).
+ * Fields that are already V2, and fields V2 shares with V1, pass through.
+ *
+ * @see https://opencode.ai/v2/docs/agents/
+ * @see https://opencode.ai/v2/docs/migrate-v1/
+ */
+export function raiseOpencodeAgentToV2(fields: Record<string, unknown>): Record<string, unknown> {
+  const legacy: Record<string, unknown> = {};
+  const raised: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const target = (OPENCODE_V1_ONLY_AGENT_KEYS as readonly string[]).includes(key)
+      ? legacy
+      : raised;
+    setOwnEntry(target, key, value);
+  }
+
+  raiseOpencodeAgentScalarsToV2({ legacy, raised });
+
+  const body: Record<string, unknown> = {
+    ...(isRecord(legacy.options) ? legacy.options : {}),
+    ...(legacy.temperature !== undefined && { temperature: legacy.temperature }),
+    ...(legacy.top_p !== undefined && { top_p: legacy.top_p }),
+  };
+  if (Object.keys(body).length > 0) {
+    const request = isRecord(raised.request) ? raised.request : {};
+    raised.request = {
+      ...request,
+      body: { ...body, ...(isRecord(request.body) ? request.body : {}) },
+    };
+  }
+
+  const rules = toOpencodeV2AgentPermissionRules({
+    tools: legacy.tools,
+    permission: legacy.permission,
+  });
+  if (rules.length > 0) {
+    raised.permissions = [
+      ...rules,
+      ...(Array.isArray(raised.permissions) ? raised.permissions : []),
+    ];
+  }
+  return raised;
+}
+
 const OPENCODE_FILE_TEMPLATE_PATTERN = /^\s*\{file:(.+?)\}\s*$/;
 
 /**
@@ -508,14 +977,29 @@ const OPENCODE_FILE_TEMPLATE_PATTERN = /^\s*\{file:(.+?)\}\s*$/;
  * the referenced file cannot be read the literal value is preserved (so the
  * reference is not silently lost).
  *
+ * When `containmentRoot` is given (project scope), a reference whose real
+ * location — every `..` segment and symbolic link resolved — lies outside it is
+ * not read and its literal value is preserved too, so importing an untrusted
+ * checkout cannot copy an arbitrary file (credentials, say) into the project.
+ * A `../` that stays inside the root (from `.opencode/opencode.json` up to the
+ * project, say) is still followed. Global scope passes no root: a user config
+ * may point anywhere the user chose. A refused reference to a file that exists
+ * is reported through `logger`, naming `referrer` (the agent it belongs to).
+ *
  * @see https://opencode.ai/docs/agents/
  */
 export async function resolveOpencodeFileTemplate({
   value,
   configDir,
+  containmentRoot,
+  logger,
+  referrer,
 }: {
   value: string;
   configDir: string;
+  containmentRoot?: string;
+  logger?: Logger;
+  referrer?: string;
 }): Promise<string> {
   const match = OPENCODE_FILE_TEMPLATE_PATTERN.exec(value);
   if (!match) {
@@ -527,5 +1011,25 @@ export async function resolveOpencodeFileTemplate({
     return value;
   }
 
-  return (await readFileContentOrNull(join(configDir, referencedPath))) ?? value;
+  const targetPath = join(configDir, referencedPath);
+  if (containmentRoot === undefined) {
+    return (await readFileContentOrNull(targetPath)) ?? value;
+  }
+
+  // The path that is read is the one that was checked: the real location,
+  // taken relative to the real root once, rather than the spelled path, which
+  // could be resolved differently between the check and the read.
+  const relativePath = await resolvedRelativePath({ rootPath: containmentRoot, targetPath });
+  if (posixRelativePathEscapesRoot(relativePath)) {
+    // A missing file needs no warning: it would be kept literally anyway.
+    if (await fileExists(targetPath)) {
+      logger?.warn(
+        `Kept the {file:...} prompt of ${referrer ?? "an OpenCode agent"} as literal text: ` +
+          `${quoteValueForWarning(referencedPath)} resolves outside the project, so it was not read.`,
+      );
+    }
+    return value;
+  }
+  const realRoot = await realpath(containmentRoot).catch(() => containmentRoot);
+  return (await readFileContentOrNull(join(realRoot, relativePath))) ?? value;
 }

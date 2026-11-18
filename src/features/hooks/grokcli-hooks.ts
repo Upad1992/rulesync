@@ -1,14 +1,9 @@
-import { join } from "node:path";
-
 import { GROKCLI_HOOKS_DIR_PATH, GROKCLI_HOOKS_FILE_NAME } from "../../constants/grokcli-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import {
   CANONICAL_TO_GROKCLI_EVENT_NAMES,
   GROKCLI_HOOK_EVENTS,
   GROKCLI_TO_CANONICAL_EVENT_NAMES,
 } from "../../types/hooks.js";
-import { formatError } from "../../utils/error.js";
-import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { isRecord } from "../../utils/type-guards.js";
 import type { RulesyncHooks } from "./rulesync-hooks.js";
@@ -20,8 +15,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
@@ -49,7 +42,7 @@ import {
  */
 const GROKCLI_NO_MATCHER_EVENTS: ReadonlySet<string> = new Set(["stop", "beforeSubmitPrompt"]);
 
-const GROKCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const GROKCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedEvents: GROKCLI_HOOK_EVENTS,
   canonicalToToolEventNames: CANONICAL_TO_GROKCLI_EVENT_NAMES,
   toolToCanonicalEventNames: GROKCLI_TO_CANONICAL_EVENT_NAMES,
@@ -69,6 +62,35 @@ const GROKCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   // and it is merged into the spawned command's environment — so it is emitted
   // on `command` hooks only, matching how Qwen Code gates the same field.
   recordPassthroughFields: [{ canonical: "env", tool: "env", commandOnly: true }],
+  // Since Grok 1.0.71 a handler with `"failClosed": true` blocks when its run
+  // fails (timeout, crash, spawn failure, unreadable reply) instead of failing
+  // open. Grok's hooks guide: "Only `PreToolUse` and `UserPromptSubmit`
+  // support it; on any other event the field is ignored with a logged
+  // warning", so it is emitted on those two events only. Older Grok versions
+  // ignore the unknown key. The field sits on the handler and is not limited
+  // to `command` handlers.
+  booleanPassthroughFields: [
+    {
+      canonical: "failClosed",
+      tool: "failClosed",
+      events: new Set(["preToolUse", "beforeSubmitPrompt"]),
+    },
+  ],
+  // Command hooks: the exec form. Since Grok 1.0.63 a present `args` array
+  // (`[]` included) makes `command` one program spawned with these arguments
+  // and no shell. Grok 1.0.49–1.0.62 skip a handler carrying `args` with a
+  // hook load error, which still beats dropping `args` and running a bare
+  // `command` with the wrong arguments. An `http` handler ignores `args`, so
+  // it is emitted on command hooks only.
+  arrayPassthroughFields: [{ canonical: "args", tool: "args", commandOnly: true }],
+  // Grok does not evaluate Claude Code's `if` condition: since 1.0.49 it skips
+  // a handler that sets `if` (only an enforced hook still runs). Dropping just
+  // the field would widen the hook to every call its matcher selects, so a
+  // canonical hook with `if` is skipped with a warning on generate. On import,
+  // an `if` found in a Grok hook file is kept, so the hook stays conditional
+  // for the tools that honour it.
+  skippedWhenFields: ["if"],
+  stringPassthroughFields: [{ canonical: "if", tool: "if" }],
   noMatcherEvents: GROKCLI_NO_MATCHER_EVENTS,
 };
 
@@ -86,13 +108,6 @@ const GROKCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
  * @see https://docs.x.ai/build/features/hooks
  */
 export class GrokcliHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolHooksSettablePaths {
     // Grok resolves project vs global scope by the directory it runs in, so both
     // scopes share the same relative layout (`.grok/hooks/rulesync.json`).
@@ -100,23 +115,6 @@ export class GrokcliHooks extends ToolHooks {
       relativeDirPath: GROKCLI_HOOKS_DIR_PATH,
       relativeFilePath: GROKCLI_HOOKS_FILE_NAME,
     };
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<GrokcliHooks> {
-    const paths = GrokcliHooks.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new GrokcliHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -150,15 +148,10 @@ export class GrokcliHooks extends ToolHooks {
   }
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(this.getFileContent());
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Grok hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        { cause: error },
-      );
-    }
+    const parsed: unknown = this.parseFileContentOrThrow({
+      displayName: "Grok",
+      parse: (fileContent) => JSON.parse(fileContent),
+    });
     const events = isRecord(parsed) && isRecord(parsed.hooks) ? parsed.hooks : {};
     const hooks = toolHooksToCanonical({
       hooks: events,
@@ -171,24 +164,6 @@ export class GrokcliHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): GrokcliHooks {
-    return new GrokcliHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

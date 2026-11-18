@@ -20,8 +20,16 @@ export const SHELL_PERMISSION_CATEGORY = "bash";
  */
 export const ALL_TOOLS_PERMISSION_CATEGORY = "*";
 
+/**
+ * The prefix of a canonical per-tool MCP category: `mcp__<server>__<tool>`.
+ */
+export const MCP_CATEGORY_PREFIX = "mcp__";
+
+/** The canonical catch-all pattern: a rule about the whole tool or category. */
+export const CATCH_ALL_PATTERN = "*";
+
 /** One canonical rule that governs shell commands, and where it was written. */
-export type ShellCommandRule = {
+type ShellCommandRule = {
   pattern: string;
   action: PermissionAction;
   /**
@@ -32,7 +40,7 @@ export type ShellCommandRule = {
   fromAllToolsCategory: boolean;
 };
 
-export type ShellCommandRules = {
+type ShellCommandRules = {
   /** The rules that govern shell commands, in the order the source file wrote them. */
   rules: ShellCommandRule[];
   /**
@@ -103,6 +111,38 @@ export function collectShellCommandRules(
 }
 
 /**
+ * The widest glob a pattern stands for once a tool compares it as a command
+ * prefix: `git` also covers `git push --force`. Used only to compare allows
+ * against the restrictions, where widening can only withhold more allows,
+ * never fail open.
+ */
+export function widenToPrefixGlob(pattern: string): string {
+  return pattern.endsWith("*") ? pattern : `${pattern}*`;
+}
+
+// The pattern widened for the overlap test only, to every input some tool may
+// read it as:
+// - The flat glob matcher reads `**/.env` as "something, then `/.env`", so it
+//   misses `.env` itself, while most tools read a `**/` segment as zero or more
+//   directories and `src/**` as also naming `src`. Both become a bare `*`.
+// - A trailing ` *` is optional in the canonical reading and in OpenCode's
+//   matcher (`secrets *` also matches `secrets`), so it becomes `*`.
+// - Brace patterns may contain nested alternatives or ranges, which the glob
+//   matcher cannot model. Any `{` is therefore read as `*` for overlap checks,
+//   even if it might be literal in a particular tool.
+// Each rewrite matches every spelling the original allows (and some more), so
+// the widened comparison can only report more overlaps, never fewer — the
+// direction that withholds an allow rather than writing one a restriction
+// covers.
+function widenForOverlap(pattern: string): string {
+  if (pattern.includes("{")) {
+    return "*";
+  }
+  const widened = pattern.replaceAll("**/", "*").replaceAll("/**", "*");
+  return widened.endsWith(" *") ? `${widened.slice(0, -2)}*` : widened;
+}
+
+/**
  * Build the test an adapter applies to an `allow` pattern before writing it:
  * which restrictions it cannot write name some of the same commands? The
  * answer is the list of those restrictions — empty when the `allow` may be
@@ -144,7 +184,9 @@ export function createShadowingRestrictionsTest(
   // ran out; leave it out for a run of its own.
   const normalized = restrictions.map(({ pattern, fromAllToolsCategory }) => ({
     pattern,
-    glob: parseGlobPattern(fromAllToolsCategory ? pattern : normalizePattern(pattern)),
+    glob: parseGlobPattern(
+      widenForOverlap(fromAllToolsCategory ? pattern : normalizePattern(pattern)),
+    ),
   }));
 
   return (allowPattern) => {
@@ -156,7 +198,7 @@ export function createShadowingRestrictionsTest(
       // is walked.
       return normalized.map(({ pattern }) => pattern);
     }
-    const allowGlob = parseGlobPattern(normalizePattern(allowPattern));
+    const allowGlob = parseGlobPattern(widenForOverlap(normalizePattern(allowPattern)));
     return normalized
       .filter(
         ({ pattern, glob }) =>
@@ -167,7 +209,7 @@ export function createShadowingRestrictionsTest(
 }
 
 /** The allow/deny lists a command-only tool writes, and what was withheld. */
-export type CommandListPartition = {
+type CommandListPartition = {
   /** Patterns to auto-approve. */
   allow: string[];
   /** Patterns to block. */
@@ -464,7 +506,7 @@ export function warnAboutUnwrittenCommandRules({
 }
 
 /** The `bash` map plus allow/deny lists after all-tools `*` restrictions apply. */
-export type ResolvedShellCommandLists = {
+type ResolvedShellCommandLists = {
   allow: string[];
   deny: string[];
   /**

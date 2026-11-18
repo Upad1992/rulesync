@@ -1,5 +1,3 @@
-import { join } from "node:path";
-
 import { z } from "zod/mini";
 
 import {
@@ -8,17 +6,13 @@ import {
   FACTORYDROID_SKILLS_DIR_PATH,
 } from "../../constants/factorydroid-paths.js";
 import { SKILL_FILE_NAME } from "../../constants/general.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
 import { caseFoldIdentity } from "../../types/feature-processor.js";
-import { formatError } from "../../utils/error.js";
 import { toPosixPath } from "../../utils/file.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
 import {
-  resolveCompatibility,
   resolveDisableModelInvocation,
-  resolveLicense,
-  resolveMetadata,
+  resolveStandardSkillFields,
   resolveUserInvocable,
 } from "./skills-utils.js";
 import {
@@ -131,28 +125,8 @@ export class FactorydroidSkill extends ToolSkill {
     return result;
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (this.mainFile === undefined) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-    const result = FactorydroidSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(FactorydroidSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -170,16 +144,7 @@ export class FactorydroidSkill extends ToolSkill {
       ...(Object.keys(factorydroidBlock).length > 0 && { factorydroid: factorydroidBlock }),
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -201,18 +166,6 @@ export class FactorydroidSkill extends ToolSkill {
     });
     // The packaging fields fall back to the root-level rulesync value when the
     // section omits them; a section value keeps its untyped shape.
-    const license = resolveLicense({
-      rootFrontmatter: rulesyncFrontmatter,
-      section: factorydroidSection,
-    });
-    const compatibility = resolveCompatibility({
-      rootFrontmatter: rulesyncFrontmatter,
-      section: factorydroidSection,
-    });
-    const metadata = resolveMetadata({
-      rootFrontmatter: rulesyncFrontmatter,
-      section: factorydroidSection,
-    });
 
     // A `name`/`description` that somehow rode along in the section is dropped
     // so the canonical values keep owning those keys, which also lets them stay
@@ -228,9 +181,10 @@ export class FactorydroidSkill extends ToolSkill {
       ...section,
       // Every resolver already prefers a defined section value over the root
       // default, so overriding the spread with them never discards one.
-      ...(license !== undefined && { license }),
-      ...(compatibility !== undefined && { compatibility }),
-      ...(metadata !== undefined && { metadata }),
+      ...resolveStandardSkillFields({
+        rootFrontmatter: rulesyncFrontmatter,
+        section: factorydroidSection,
+      }),
       ...(resolvedDisableModelInvocation !== undefined && {
         "disable-model-invocation": resolvedDisableModelInvocation,
       }),
@@ -251,10 +205,7 @@ export class FactorydroidSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("factorydroid");
-  }
+  protected static override readonly toolTarget = "factorydroid";
 
   /**
    * Whether a name in `.factory/skills/` belongs to the skills feature at this
@@ -343,47 +294,12 @@ export class FactorydroidSkill extends ToolSkill {
   }
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<FactorydroidSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: FactorydroidSkill.getSettablePaths,
-    });
-
-    const result = FactorydroidSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new FactorydroidSkill({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new FactorydroidSkill(
+      await this.loadStandardSkillParams({ params, schema: FactorydroidSkillFrontmatterSchema }),
+    );
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): FactorydroidSkill {
-    const settablePaths = FactorydroidSkill.getSettablePaths({ global });
-    return new FactorydroidSkill({
-      outputRoot,
-      relativeDirPath: relativeDirPath ?? settablePaths.relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): FactorydroidSkill {
+    return new FactorydroidSkill(this.forDeletionParams(params));
   }
 }

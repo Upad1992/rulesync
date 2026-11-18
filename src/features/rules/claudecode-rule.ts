@@ -12,18 +12,22 @@ import type { SharedWritePath } from "../../lib/shared-file-derive.js";
 import { ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { ClaudecodeLanguageSettings } from "./claudecode-language-settings.js";
 import { RulesyncRule, RulesyncRuleFrontmatter } from "./rulesync-rule.js";
 import {
   ToolRule,
+  ToolRuleBuildLocalRootFileParams,
   ToolRuleForDeletionParams,
   ToolRuleFromFileParams,
   ToolRuleFromRulesyncRuleParams,
   ToolRuleParams,
   ToolRuleSettablePaths,
   ToolRuleSettablePathsGlobal,
-  buildToolPath,
 } from "./tool-rule.js";
 
 /**
@@ -70,15 +74,39 @@ export type ClaudecodeRuleSettablePathsGlobal = ToolRuleSettablePathsGlobal;
  * @see https://code.claude.com/docs/en/memory#modular-rules-with-clauderules
  */
 export class ClaudecodeRule extends ToolRule {
+  /**
+   * Build this tool's separate personal local-root file (`localRootMode:
+   * "separate-local-file"`), for generation and import. See
+   * {@link ToolRuleBuildLocalRootFileParams}.
+   */
+  static buildLocalRootFile({
+    outputRoot,
+    global,
+    fileName,
+    body,
+    relativeDirPath,
+    localRoot,
+  }: ToolRuleBuildLocalRootFileParams): ToolRule {
+    const paths = ClaudecodeRule.getSettablePaths({ global });
+    return new ClaudecodeRule({
+      outputRoot,
+      relativeDirPath: relativeDirPath ?? paths.root.relativeDirPath,
+      relativeFilePath: fileName,
+      frontmatter: {},
+      body,
+      validate: true,
+      root: true,
+      localRoot,
+    });
+  }
+
   private readonly frontmatter: ClaudecodeRuleFrontmatter;
   private readonly body: string;
 
   static getSettablePaths({
     global,
-    excludeToolDir,
   }: {
     global?: boolean;
-    excludeToolDir?: boolean;
   } = {}): ClaudecodeRuleSettablePaths | ClaudecodeRuleSettablePathsGlobal {
     if (global) {
       // Claude Code reads user-scoped modular rules from `~/.claude/rules/*.md`
@@ -86,11 +114,11 @@ export class ClaudecodeRule extends ToolRule {
       // non-root rules are generated there instead of being dropped.
       return {
         root: {
-          relativeDirPath: buildToolPath(CLAUDECODE_DIR, ".", excludeToolDir),
+          relativeDirPath: join(CLAUDECODE_DIR, "."),
           relativeFilePath: CLAUDECODE_RULE_FILE_NAME,
         },
         nonRoot: {
-          relativeDirPath: buildToolPath(CLAUDECODE_DIR, CLAUDECODE_RULES_DIR_NAME, excludeToolDir),
+          relativeDirPath: join(CLAUDECODE_DIR, CLAUDECODE_RULES_DIR_NAME),
         },
       };
     }
@@ -106,7 +134,7 @@ export class ClaudecodeRule extends ToolRule {
         },
       ],
       nonRoot: {
-        relativeDirPath: buildToolPath(CLAUDECODE_DIR, CLAUDECODE_RULES_DIR_NAME, excludeToolDir),
+        relativeDirPath: join(CLAUDECODE_DIR, CLAUDECODE_RULES_DIR_NAME),
       },
     };
   }
@@ -310,17 +338,12 @@ export class ClaudecodeRule extends ToolRule {
       return { success: true, error: null };
     }
 
-    const result = ClaudecodeRuleFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: ClaudecodeRuleFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   getFrontmatter(): ClaudecodeRuleFrontmatter {
@@ -331,10 +354,5 @@ export class ClaudecodeRule extends ToolRule {
     return this.body;
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "claudecode",
-    });
-  }
+  protected static override readonly toolTarget = "claudecode";
 }

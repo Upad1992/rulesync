@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../test-utils/mock-logger.js";
 import {
@@ -8,6 +8,7 @@ import {
   fetchPackument,
   fetchTarball,
   getPackumentVersionDist,
+  isTrustedNpmRegistry,
   logNpmAuthHints,
   NpmClientError,
   resolveNpmToken,
@@ -87,24 +88,129 @@ describe("validateNpmRegistryUrl", () => {
 });
 
 describe("resolveNpmToken", () => {
-  it("reads the variable named by tokenEnv", () => {
-    vi.stubEnv("MY_REGISTRY_TOKEN", FAKE_TOKEN);
-    expect(resolveNpmToken({ tokenEnv: "MY_REGISTRY_TOKEN" })).toBe(FAKE_TOKEN);
+  const defaultRegistry = "https://registry.npmjs.org";
+  const customRegistry = "https://npm.acme.example/api/npm/";
+
+  it.each(["ACME_NPM_TOKEN", "NODE_AUTH_TOKEN"])("reads tokenEnv %s", (tokenEnv) => {
+    vi.stubEnv(tokenEnv, FAKE_TOKEN);
+    expect(resolveNpmToken({ tokenEnv, registryUrl: defaultRegistry })).toBe(FAKE_TOKEN);
   });
 
-  it("throws when tokenEnv names an unset variable", () => {
-    vi.stubEnv("MY_REGISTRY_TOKEN", "");
-    expect(() => resolveNpmToken({ tokenEnv: "MY_REGISTRY_TOKEN" })).toThrow(/MY_REGISTRY_TOKEN/);
+  it.each(["ACME_NPM_TOKEN", "NODE_AUTH_TOKEN"])("throws when %s is unset", (tokenEnv) => {
+    vi.stubEnv(tokenEnv, "");
+    expect(() => resolveNpmToken({ tokenEnv, registryUrl: defaultRegistry })).toThrow(
+      `Environment variable "${tokenEnv}" (from tokenEnv) is not set`,
+    );
+  });
+
+  it.each([
+    "GITHUB_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "MY_REGISTRY_TOKEN",
+    "npm_token",
+    "NPM_TOKENS",
+    "ACME_NODE_AUTH_TOKEN",
+    "NODE_AUTH_TOKENS",
+    "node_auth_token",
+  ])("refuses tokenEnv %j, which is not an NPM_TOKEN variable", (tokenEnv) => {
+    vi.stubEnv(tokenEnv, FAKE_TOKEN);
+    expect(() => resolveNpmToken({ tokenEnv, registryUrl: defaultRegistry })).toThrow(
+      /is not allowed/,
+    );
   });
 
   it("falls back to NPM_TOKEN when tokenEnv is not set", () => {
     vi.stubEnv("NPM_TOKEN", FAKE_TOKEN);
-    expect(resolveNpmToken({})).toBe(FAKE_TOKEN);
+    expect(resolveNpmToken({ registryUrl: defaultRegistry })).toBe(FAKE_TOKEN);
   });
 
   it("returns undefined when no token variable is set", () => {
     vi.stubEnv("NPM_TOKEN", "");
-    expect(resolveNpmToken({})).toBeUndefined();
+    expect(resolveNpmToken({ registryUrl: defaultRegistry })).toBeUndefined();
+  });
+
+  it("does not send the NPM_TOKEN fallback to an untrusted registry", () => {
+    vi.stubEnv("NPM_TOKEN", FAKE_TOKEN);
+    vi.stubEnv("RULESYNC_NPM_TRUSTED_REGISTRIES", "");
+    const warnLogger = createMockLogger();
+    expect(resolveNpmToken({ registryUrl: customRegistry, logger: warnLogger })).toBeUndefined();
+    expect(warnLogger.warn).toHaveBeenCalledWith(expect.stringContaining("not trusted"));
+    expect(warnLogger.warn).not.toHaveBeenCalledWith(expect.stringContaining(FAKE_TOKEN));
+  });
+
+  it("warns about a trusted entry without a scheme instead of dropping it silently", () => {
+    vi.stubEnv("NPM_TOKEN", FAKE_TOKEN);
+    vi.stubEnv("RULESYNC_NPM_TRUSTED_REGISTRIES", "npm.acme.example");
+    const warnLogger = createMockLogger();
+    expect(resolveNpmToken({ registryUrl: customRegistry, logger: warnLogger })).toBeUndefined();
+    expect(warnLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Ignoring RULESYNC_NPM_TRUSTED_REGISTRIES entry "npm.acme.example"'),
+    );
+  });
+
+  it.each(["NPM_TOKEN", "NODE_AUTH_TOKEN"])("refuses %s for an untrusted registry", (tokenEnv) => {
+    vi.stubEnv(tokenEnv, FAKE_TOKEN);
+    vi.stubEnv("RULESYNC_NPM_TRUSTED_REGISTRIES", "");
+    expect(() => resolveNpmToken({ tokenEnv, registryUrl: "https://attacker.example" })).toThrow(
+      /not trusted/,
+    );
+  });
+
+  it("treats a lookalike of the default registry as untrusted", () => {
+    vi.stubEnv("NPM_TOKEN", FAKE_TOKEN);
+    vi.stubEnv("RULESYNC_NPM_TRUSTED_REGISTRIES", "");
+    expect(resolveNpmToken({ registryUrl: "http://registry.npmjs.org" })).toBeUndefined();
+    expect(resolveNpmToken({ registryUrl: "https://registry.npmjs.org.evil.example" })).toBe(
+      undefined,
+    );
+  });
+
+  it("sends the token to a registry whose origin the environment trusts", () => {
+    vi.stubEnv("ACME_NPM_TOKEN", FAKE_TOKEN);
+    vi.stubEnv(
+      "RULESYNC_NPM_TRUSTED_REGISTRIES",
+      " https://other.example , https://npm.acme.example/ignored/path",
+    );
+    expect(resolveNpmToken({ tokenEnv: "ACME_NPM_TOKEN", registryUrl: customRegistry })).toBe(
+      FAKE_TOKEN,
+    );
+  });
+});
+
+describe("isTrustedNpmRegistry", () => {
+  it("ignores malformed trusted entries", () => {
+    expect(
+      isTrustedNpmRegistry("https://npm.acme.example", {
+        RULESYNC_NPM_TRUSTED_REGISTRIES: "not a url,,",
+      }),
+    ).toBe(false);
+  });
+
+  it("warns about each trusted entry that has no origin", () => {
+    const warnLogger = createMockLogger();
+    expect(
+      isTrustedNpmRegistry(
+        "https://npm.acme.example",
+        {
+          RULESYNC_NPM_TRUSTED_REGISTRIES:
+            "npm.acme.example, npm.acme.example:8080 ,, https://npm.acme.example",
+        },
+        warnLogger,
+      ),
+    ).toBe(true);
+    expect(warnLogger.warn).toHaveBeenCalledTimes(2);
+    expect(warnLogger.warn).toHaveBeenCalledWith(expect.stringContaining('"npm.acme.example"'));
+    expect(warnLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('"npm.acme.example:8080"'),
+    );
+  });
+
+  it("does not trust an entry whose origin is opaque", () => {
+    expect(
+      isTrustedNpmRegistry("custom:registry", {
+        RULESYNC_NPM_TRUSTED_REGISTRIES: "other:entry",
+      }),
+    ).toBe(false);
   });
 });
 

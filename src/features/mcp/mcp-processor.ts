@@ -2,6 +2,7 @@ import { z } from "zod/mini";
 
 import { RULESYNC_MCP_RELATIVE_FILE_PATH } from "../../constants/rulesync-paths.js";
 import { FeatureProcessor } from "../../types/feature-processor.js";
+import type { FeatureOptions } from "../../types/features.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
 import { ToolFile } from "../../types/tool-file.js";
 import { mcpProcessorToolTargetTuple } from "../../types/tool-target-tuples.js";
@@ -20,6 +21,7 @@ import { ClaudecodeMcp } from "./claudecode-mcp.js";
 import { ClaudecodePluginMcp } from "./claudecode-plugin-mcp.js";
 import { ClineMcp } from "./cline-mcp.js";
 import { CodeartsCliMcp } from "./codearts-cli-mcp.js";
+import { CodeartsIdeMcp } from "./codearts-ide-mcp.js";
 import { CodebuddyMcp } from "./codebuddy-mcp.js";
 import { CodebuffMcp } from "./codebuff-mcp.js";
 import { CodewhaleMcp } from "./codewhale-mcp.js";
@@ -36,6 +38,7 @@ import { DevinMcp } from "./devin-mcp.js";
 import { DevinPluginMcp } from "./devin-plugin-mcp.js";
 import { DshMcp } from "./dsh-mcp.js";
 import { FactorydroidMcp } from "./factorydroid-mcp.js";
+import { FirebenderMcp } from "./firebender-mcp.js";
 import { GitlabduoMcp } from "./gitlabduo-mcp.js";
 import { GooseMcp } from "./goose-mcp.js";
 import { GrokcliMcp } from "./grokcli-mcp.js";
@@ -47,7 +50,9 @@ import { KiroMcp } from "./kiro-mcp.js";
 import { MimocodeMcp } from "./mimocode-mcp.js";
 import { MusecodeMcp } from "./musecode-mcp.js";
 import { OmpMcp } from "./omp-mcp.js";
+import { OpenclawMcp } from "./openclaw-mcp.js";
 import { OpencodeMcp } from "./opencode-mcp.js";
+import { Opencodev1Mcp } from "./opencodev1-mcp.js";
 import { PiMcp } from "./pi-mcp.js";
 import { PoolMcp } from "./pool-mcp.js";
 import { QoderMcp } from "./qoder-mcp.js";
@@ -70,6 +75,7 @@ import { VibeMcp } from "./vibe-mcp.js";
 import { VibePluginMcp } from "./vibe-plugin-mcp.js";
 import { WarpMcp } from "./warp-mcp.js";
 import { WarpcliMcp } from "./warpcli-mcp.js";
+import { XumMcp } from "./xum-mcp.js";
 import { ZcodeMcp } from "./zcode-mcp.js";
 import { ZcodePluginMcp } from "./zcode-plugin-mcp.js";
 import { ZedMcp } from "./zed-mcp.js";
@@ -163,7 +169,7 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsEnabledTools: false,
+        supportsEnabledTools: true,
         supportsDisabledTools: true,
       },
     },
@@ -175,7 +181,7 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsEnabledTools: false,
+        supportsEnabledTools: true,
         supportsDisabledTools: true,
       },
     },
@@ -187,7 +193,7 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       meta: {
         supportsProject: true,
         supportsGlobal: false,
-        supportsEnabledTools: false,
+        supportsEnabledTools: true,
         supportsDisabledTools: true,
       },
     },
@@ -310,6 +316,24 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
     },
   ],
   [
+    "codearts-ide",
+    {
+      // CodeArts Agent IDE reads the `mcpServers` block of
+      // `.codeartsdoer/mcp/mcp_settings.json`, the same file its MCP panel
+      // edits. Rules, skills, commands and subagents share the `codearts-cli`
+      // target's paths, so this target owns only the IDE MCP file. The IDE
+      // documents no user-scope path for it.
+      // https://support.huaweicloud.com/usermanual-codeartsagent/codeartsagent_ug_0010.html
+      class: CodeartsIdeMcp,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: false,
+        supportsEnabledTools: false,
+        supportsDisabledTools: false,
+      },
+    },
+  ],
+  [
     "codebuddy",
     {
       // CodeBuddy Code reads the project `.mcp.json` at the repository root and
@@ -426,9 +450,8 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
   [
     "cortexcode",
     {
-      // Cortex Code reads MCP servers only from the single GLOBAL file
-      // `~/.snowflake/cortex/mcp.json`; no project-scoped MCP location is
-      // documented.
+      // Rulesync syncs Cortex Code MCP servers in the user-scoped file
+      // `~/.snowflake/cortex/mcp.json`.
       // https://docs.snowflake.com/en/user-guide/cortex-code/extensibility#mcp-configuration
       class: CortexcodeMcp,
       meta: {
@@ -507,12 +530,31 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        // Droid documents a per-server `disabledTools` ("Tool names to exclude
-        // from this server. Excluded tools are never loaded into context") and
-        // no allowlist counterpart, so the filter is denylist-only.
-        // https://docs.factory.ai/cli/configuration/mcp
-        supportsEnabledTools: false,
+        // Droid documents both per-server filters: `enabledTools` ("When the
+        // list is non-empty, only these tools are loaded") and `disabledTools`
+        // ("Excluded tools are never loaded into context"); a tool named in both
+        // stays excluded. The adapter passes both through unchanged, except
+        // that it skips a server with an empty `enabledTools` (see
+        // `FactorydroidMcp`).
+        // https://docs.factory.com/harness/mcp
+        supportsEnabledTools: true,
         supportsDisabledTools: true,
+      },
+    },
+  ],
+  [
+    "firebender",
+    {
+      // Firebender reads the `mcpServers` key of the project-root
+      // `firebender.json` and of `~/.firebender/firebender.json`. Per-server
+      // tool filters are not part of the documented entry shape.
+      // https://docs.firebender.com/api-reference/syntax
+      class: FirebenderMcp,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsEnabledTools: false,
+        supportsDisabledTools: false,
       },
     },
   ],
@@ -577,6 +619,22 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
       // no project-scoped MCP location. Per-server tool filtering uses
       // `tools.include` and `tools.exclude`.
       class: HermesagentMcp,
+      meta: {
+        supportsProject: false,
+        supportsGlobal: true,
+        supportsEnabledTools: true,
+        supportsDisabledTools: true,
+      },
+    },
+  ],
+  [
+    "openclaw",
+    {
+      // OpenClaw reads MCP servers from `mcp.servers` of its global JSON5
+      // Gateway config `~/.openclaw/openclaw.json`; it has no project-scoped
+      // MCP location. Per-server tool filtering uses `toolFilter.include` and
+      // `toolFilter.exclude`.
+      class: OpenclawMcp,
       meta: {
         supportsProject: false,
         supportsGlobal: true,
@@ -717,6 +775,18 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
     "opencode",
     {
       class: OpencodeMcp,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsEnabledTools: true,
+        supportsDisabledTools: true,
+      },
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Mcp,
       meta: {
         supportsProject: true,
         supportsGlobal: true,
@@ -966,6 +1036,23 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
     },
   ],
   [
+    "xum",
+    {
+      // Xum reads `~/.xum/mcp.jsonc` (user) and the repo override
+      // `.xum/mcp.jsonc` (project): a `servers` map of stdio command strings
+      // or `{ transport, url, headers }` remote entries. `toolAllowlist` maps
+      // the canonical `enabledTools`; there is no per-server deny list.
+      // https://xum.cdr.dev/config/mcp-servers
+      class: XumMcp,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: true,
+        supportsEnabledTools: true,
+        supportsDisabledTools: false,
+      },
+    },
+  ],
+  [
     "devin",
     {
       class: DevinMcp,
@@ -1043,17 +1130,13 @@ export const toolMcpFactories = new Map<McpProcessorToolTarget, ToolMcpFactory>(
 ]);
 
 // Derive tool target arrays from factory metadata
-const allToolTargetKeys = [...toolMcpFactories.keys()];
+const mcpProcessorToolTargets: ToolTarget[] = [...toolMcpFactories]
+  .filter(([, factory]) => factory.meta.supportsProject)
+  .map(([target]) => target);
 
-const mcpProcessorToolTargets: ToolTarget[] = allToolTargetKeys.filter((target) => {
-  const factory = toolMcpFactories.get(target);
-  return factory?.meta.supportsProject ?? false;
-});
-
-const mcpProcessorToolTargetsGlobal: ToolTarget[] = allToolTargetKeys.filter((target) => {
-  const factory = toolMcpFactories.get(target);
-  return factory?.meta.supportsGlobal ?? false;
-});
+const mcpProcessorToolTargetsGlobal: ToolTarget[] = [...toolMcpFactories]
+  .filter(([, factory]) => factory.meta.supportsGlobal)
+  .map(([target]) => target);
 
 /**
  * Factory retrieval function type for dependency injection.
@@ -1114,7 +1197,12 @@ function warnStrippedMcpServerFields({
 export class McpProcessor extends FeatureProcessor {
   private readonly toolTarget: McpProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
   private readonly getFactory: GetFactory;
+  private readonly featureOptions?: FeatureOptions;
 
   constructor({
     outputRoot = process.cwd(),
@@ -1124,6 +1212,7 @@ export class McpProcessor extends FeatureProcessor {
     getFactory = defaultGetFactory,
     dryRun = false,
     logger,
+    featureOptions,
   }: {
     outputRoot?: string;
     inputRoots?: readonly [string, ...string[]] | readonly string[];
@@ -1132,6 +1221,7 @@ export class McpProcessor extends FeatureProcessor {
     getFactory?: GetFactory;
     dryRun?: boolean;
     logger: Logger;
+    featureOptions?: FeatureOptions;
   }) {
     super({ outputRoot, inputRoots, dryRun, logger });
     const result = McpProcessorToolTargetSchema.safeParse(toolTarget);
@@ -1143,6 +1233,7 @@ export class McpProcessor extends FeatureProcessor {
     this.toolTarget = result.data;
     this.global = global;
     this.getFactory = getFactory;
+    this.featureOptions = featureOptions;
   }
 
   /**
@@ -1225,35 +1316,32 @@ export class McpProcessor extends FeatureProcessor {
     }
 
     const factory = this.getFactory(this.toolTarget);
-    const toolMcps = await Promise.all(
-      [rulesyncMcp].map(async (mcp) => {
-        // Resolve the tool-scoped `{toolname}.mcpServers` block and the
-        // deprecated per-server `targets` filter for this target.
-        const targetedRulesyncMcp = mcp.forTarget({
-          toolTarget: this.toolTarget,
-          global: this.global,
-          logger: this.logger,
-        });
-        // Strip MCP server fields unsupported by the target tool
-        const fieldsToStrip: string[] = [];
-        if (!factory.meta.supportsEnabledTools) fieldsToStrip.push("enabledTools");
-        if (!factory.meta.supportsDisabledTools) fieldsToStrip.push("disabledTools");
-        warnStrippedMcpServerFields({
-          mcpServers: targetedRulesyncMcp.getJson().mcpServers,
-          fields: fieldsToStrip,
-          toolTarget: this.toolTarget,
-          logger: this.logger,
-        });
-        const filteredRulesyncMcp = targetedRulesyncMcp.stripMcpServerFields(fieldsToStrip);
+    // Resolve the tool-scoped `{toolname}.mcpServers` block and the
+    // deprecated per-server `targets` filter for this target.
+    const targetedRulesyncMcp = rulesyncMcp.forTarget({
+      toolTarget: this.toolTarget,
+      global: this.global,
+      logger: this.logger,
+    });
+    // Strip MCP server fields unsupported by the target tool
+    const fieldsToStrip: string[] = [];
+    if (!factory.meta.supportsEnabledTools) fieldsToStrip.push("enabledTools");
+    if (!factory.meta.supportsDisabledTools) fieldsToStrip.push("disabledTools");
+    warnStrippedMcpServerFields({
+      mcpServers: targetedRulesyncMcp.getJson().mcpServers,
+      fields: fieldsToStrip,
+      toolTarget: this.toolTarget,
+      logger: this.logger,
+    });
+    const filteredRulesyncMcp = targetedRulesyncMcp.stripMcpServerFields(fieldsToStrip);
 
-        return await factory.class.fromRulesyncMcp({
-          outputRoot: this.outputRoot,
-          rulesyncMcp: filteredRulesyncMcp,
-          global: this.global,
-          logger: this.logger,
-        });
-      }),
-    );
+    const toolMcp = await factory.class.fromRulesyncMcp({
+      outputRoot: this.outputRoot,
+      rulesyncMcp: filteredRulesyncMcp,
+      global: this.global,
+      logger: this.logger,
+      featureOptions: this.featureOptions,
+    });
 
     // The unfiltered source: an auxiliary file reads the target's own override
     // block, not the per-target server list `forTarget` resolves above.
@@ -1267,7 +1355,7 @@ export class McpProcessor extends FeatureProcessor {
       logger: this.logger,
     });
 
-    return [...toolMcps, ...(auxiliaryFiles ?? [])];
+    return [toolMcp, ...(auxiliaryFiles ?? [])];
   }
 
   /**

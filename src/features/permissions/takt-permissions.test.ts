@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -236,6 +236,169 @@ describe("TaktPermissions", () => {
       expect(toRecord(providerOptions.codex).base_url).toBe("http://127.0.0.1:8080");
       // Untouched provider preserved.
       expect(toRecord(providerOptions.claude).reasoning_effort).toBe("high");
+    });
+
+    describe("provider_options keys Takt refuses to load from config.yaml", () => {
+      const generate = async ({
+        providerOptions,
+        global = false,
+        logger,
+      }: {
+        providerOptions: Record<string, unknown>;
+        global?: boolean;
+        logger?: ReturnType<typeof createMockLogger>;
+      }) =>
+        TaktPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          global,
+          rulesyncPermissions: makeRulesyncPermissionsJson({
+            permission: { bash: { "*": "allow" } },
+            takt: { provider_options: providerOptions },
+          }),
+          ...(logger !== undefined && { logger }),
+        });
+
+      it("drops project-scope plugins, non-loopback base_url and deepseek reasoning_effort", async () => {
+        const logger = createMockLogger();
+
+        const permissions = await generate({
+          logger,
+          providerOptions: {
+            codex: { base_url: "https://proxy.example.com/v1", network_access: true },
+            claude: { base_url: "https://gateway.example.com" },
+            deepseek_harness: {
+              base_url: "http://127.0.0.1:8787/v1",
+              reasoning_effort: "high",
+              plugins: ["npm:example-plugin@1.0.0"],
+            },
+          },
+        });
+
+        const providerOptions = toRecord(
+          toRecord(load(permissions.getFileContent())).provider_options,
+        );
+        expect(providerOptions).toEqual({
+          codex: { network_access: true },
+          deepseek_harness: { base_url: "http://127.0.0.1:8787/v1" },
+        });
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+        const message = String(vi.mocked(logger.warn).mock.calls[0]?.[0]);
+        for (const key of [
+          "provider_options.codex.base_url",
+          "provider_options.claude.base_url",
+          "provider_options.deepseek_harness.reasoning_effort",
+          "provider_options.deepseek_harness.plugins",
+        ]) {
+          expect(message).toContain(`"${key}"`);
+        }
+      });
+
+      it("keeps loopback base URLs and an empty plugins list at project scope", async () => {
+        const logger = createMockLogger();
+        const providerOptions = {
+          codex: { base_url: "http://localhost:8080/v1" },
+          claude: { base_url: "http://[::1]:8787" },
+          deepseek_harness: { base_url: "http://api.localhost/v1", plugins: [] },
+        };
+
+        const permissions = await generate({ logger, providerOptions });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toEqual(
+          providerOptions,
+        );
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        "http://127.0.0.1@evil.com",
+        "http://[::ffff:127.0.0.1]",
+        "http://127.0.0.1.evil.com",
+        "not a url",
+      ])("drops the look-alike or unparseable base_url %s at project scope", async (baseUrl) => {
+        const logger = createMockLogger();
+
+        const permissions = await generate({
+          logger,
+          providerOptions: { codex: { base_url: baseUrl, network_access: true } },
+        });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toEqual({
+          codex: { network_access: true },
+        });
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('"provider_options.codex.base_url"'),
+        );
+      });
+
+      it("keeps the shorthand loopback base_url http://127.1 at project scope", async () => {
+        const logger = createMockLogger();
+
+        const permissions = await generate({
+          logger,
+          providerOptions: { codex: { base_url: "http://127.1" } },
+        });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toEqual({
+          codex: { base_url: "http://127.1" },
+        });
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it("drops a non-array plugins and a non-string base_url at project scope", async () => {
+        const logger = createMockLogger();
+
+        const permissions = await generate({
+          logger,
+          providerOptions: {
+            claude: { base_url: 8080, effort: "high" },
+            deepseek_harness: { plugins: "npm:example-plugin@1.0.0", base_url: null },
+          },
+        });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toEqual({
+          claude: { effort: "high" },
+        });
+        const message = String(vi.mocked(logger.warn).mock.calls[0]?.[0]);
+        for (const key of [
+          "provider_options.claude.base_url",
+          "provider_options.deepseek_harness.plugins",
+          "provider_options.deepseek_harness.base_url",
+        ]) {
+          expect(message).toContain(`"${key}"`);
+        }
+      });
+
+      it("keeps plugins and remote base_url at global scope but still drops reasoning_effort", async () => {
+        const logger = createMockLogger();
+
+        const permissions = await generate({
+          global: true,
+          logger,
+          providerOptions: {
+            codex: { base_url: "https://proxy.example.com/v1" },
+            deepseek_harness: {
+              reasoning_effort: "high",
+              plugins: ["npm:example-plugin@1.0.0"],
+            },
+          },
+        });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toEqual({
+          codex: { base_url: "https://proxy.example.com/v1" },
+          deepseek_harness: { plugins: ["npm:example-plugin@1.0.0"] },
+        });
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('"provider_options.deepseek_harness.reasoning_effort"'),
+        );
+      });
+
+      it("omits provider_options entirely when every authored key is dropped", async () => {
+        const permissions = await generate({
+          providerOptions: { deepseek_harness: { plugins: ["npm:example-plugin@1.0.0"] } },
+        });
+
+        expect(toRecord(load(permissions.getFileContent())).provider_options).toBeUndefined();
+      });
     });
 
     it("round-trips the override through export then import", async () => {
@@ -867,6 +1030,7 @@ describe("TaktPermissions", () => {
             workflow_arpeggio: { custom_merge_files: true, custom_merge_inline_js: false },
             workflow_runtime_prepare: { custom_scripts: true },
             workflow_command_gates: { custom_scripts: true },
+            workflow_system_commands: { custom_scripts: true },
             sync_conflict_resolver: { auto_approve_tools: false },
             allow_git_hooks: true,
             allow_git_filters: false,
@@ -881,6 +1045,7 @@ describe("TaktPermissions", () => {
       });
       expect(parsed.workflow_runtime_prepare).toEqual({ custom_scripts: true });
       expect(parsed.workflow_command_gates).toEqual({ custom_scripts: true });
+      expect(parsed.workflow_system_commands).toEqual({ custom_scripts: true });
       expect(parsed.sync_conflict_resolver).toEqual({ auto_approve_tools: false });
       expect(parsed.allow_git_hooks).toBe(true);
       expect(parsed.allow_git_filters).toBe(false);
@@ -1063,6 +1228,8 @@ describe("TaktPermissions", () => {
           "allow_git_hooks: true",
           "workflow_runtime_prepare:",
           "  custom_scripts: true",
+          "workflow_system_commands:",
+          "  custom_scripts: true",
           "",
         ].join("\n"),
       });
@@ -1071,7 +1238,47 @@ describe("TaktPermissions", () => {
       expect(imported.takt).toEqual({
         allow_git_hooks: true,
         workflow_runtime_prepare: { custom_scripts: true },
+        workflow_system_commands: { custom_scripts: true },
       });
+    });
+
+    it("revokes workflow_system_commands when the source no longer states it", async () => {
+      await writeFileContent(
+        join(testDir, ".takt", "config.yaml"),
+        ["workflow_system_commands:", "  custom_scripts: true", ""].join("\n"),
+      );
+      const mockLogger = createMockLogger();
+
+      const permissions = await TaktPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissionsJson({ permission: {}, takt: {} }),
+        logger: mockLogger,
+      });
+
+      const parsed = toRecord(load(permissions.getFileContent()));
+      expect(parsed.workflow_system_commands).toBeUndefined();
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('removing "workflow_system_commands"'),
+      );
+    });
+
+    it("drops an unknown workflow_system_commands sub-key with a warning", async () => {
+      const mockLogger = createMockLogger();
+
+      const permissions = await TaktPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: makeRulesyncPermissionsJson({
+          permission: {},
+          takt: { workflow_system_commands: { custom_script: true, custom_scripts: false } },
+        }),
+        logger: mockLogger,
+      });
+
+      const parsed = toRecord(load(permissions.getFileContent()));
+      expect(parsed.workflow_system_commands).toEqual({ custom_scripts: false });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('"workflow_system_commands.custom_script"'),
+      );
     });
   });
 
@@ -1184,17 +1391,6 @@ describe("TaktPermissions", () => {
       const json = JSON.parse(tool.toRulesyncPermissions().getFileContent());
       // No mode set -> safe readonly projection.
       expect(json.permission.bash["*"]).toBe("deny");
-    });
-  });
-
-  describe("isDeletable", () => {
-    it("never deletes the shared config", () => {
-      const tool = TaktPermissions.forDeletion({
-        outputRoot: testDir,
-        relativeDirPath: ".takt",
-        relativeFilePath: "config.yaml",
-      });
-      expect(tool.isDeletable()).toBe(false);
     });
   });
 });

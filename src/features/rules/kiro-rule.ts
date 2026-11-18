@@ -6,12 +6,9 @@ import {
   KIRO_STEERING_DIR_NAME,
 } from "../../constants/kiro-paths.js";
 import { ValidationResult } from "../../types/ai-file.js";
+import { ToolTarget } from "../../types/tool-targets.js";
 import { readFileContent, toPosixPath } from "../../utils/file.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
-import {
-  NESTED_SCAN_EXCLUDED_DIRS_ANY_DEPTH,
-  NESTED_SCAN_EXCLUDED_ROOT_DIRS,
-} from "./nested-scan-exclusions.js";
 import { RulesyncRule } from "./rulesync-rule.js";
 import {
   ToolRule,
@@ -21,7 +18,6 @@ import {
   ToolRuleNestedFilePatterns,
   ToolRuleSettablePaths,
   ToolRuleSettablePathsGlobal,
-  buildToolPath,
 } from "./tool-rule.js";
 
 /**
@@ -139,10 +135,9 @@ export class KiroRule extends ToolRule {
   static getSettablePaths(
     options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): KiroRuleSettablePaths {
-    const steeringDirPath = buildToolPath(KIRO_DIR, KIRO_STEERING_DIR_NAME, options.excludeToolDir);
+    const steeringDirPath = join(KIRO_DIR, KIRO_STEERING_DIR_NAME);
 
     // In global scope Kiro does not read `~/AGENTS.md`, so the root rule is
     // written alongside the non-root steering files as
@@ -178,7 +173,7 @@ export class KiroRule extends ToolRule {
     // A nested `AGENTS.md` discovered by `getNestedFilePatterns`: the processor
     // passes its directory, which is outside the steering directory.
     const steeringDirPath =
-      paths.nonRoot?.relativeDirPath ?? buildToolPath(KIRO_DIR, KIRO_STEERING_DIR_NAME);
+      paths.nonRoot?.relativeDirPath ?? join(KIRO_DIR, KIRO_STEERING_DIR_NAME);
     if (
       overrideDirPath !== undefined &&
       overrideDirPath !== steeringDirPath &&
@@ -198,7 +193,7 @@ export class KiroRule extends ToolRule {
     // directory as the non-root files; treat it as the root rule on import.
     const isRoot = "root" in paths && relativeFilePath === paths.root.relativeFilePath;
     const relativeDirPath =
-      paths.nonRoot?.relativeDirPath ?? buildToolPath(KIRO_DIR, KIRO_STEERING_DIR_NAME);
+      paths.nonRoot?.relativeDirPath ?? join(KIRO_DIR, KIRO_STEERING_DIR_NAME);
     const fileContent = await readFileContent(join(outputRoot, relativeDirPath, relativeFilePath));
 
     return new KiroRule({
@@ -364,20 +359,12 @@ export class KiroRule extends ToolRule {
    * steering context alongside `.kiro/steering/`. Import-only, like every other
    * nested scan: these are hand-authored files outside a rulesync-owned
    * directory, so enumerating them for `--delete` would sweep away work rulesync
-   * never wrote.
+   * never wrote. The workspace-root file is another target's root rule, not a
+   * nested one, so it is left out.
    * @see https://kiro.dev/docs/steering/
    */
   static getNestedFilePatterns(): ToolRuleNestedFilePatterns {
-    return {
-      include: [`**/${KIRO_NESTED_STEERING_FILE_NAME}`],
-      ignore: [
-        // The workspace-root file is another target's root rule, not a nested one.
-        KIRO_NESTED_STEERING_FILE_NAME,
-        "**/.*/**",
-        ...NESTED_SCAN_EXCLUDED_DIRS_ANY_DEPTH.map((dir) => `**/${dir}/**`),
-        ...NESTED_SCAN_EXCLUDED_ROOT_DIRS.map((dir) => `${dir}/**`),
-      ],
-    };
+    return this.buildNestedFilePatterns({ fileName: KIRO_NESTED_STEERING_FILE_NAME });
   }
 
   static forDeletion({
@@ -395,10 +382,5 @@ export class KiroRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "kiro",
-    });
-  }
+  protected static override readonly toolTarget: ToolTarget = "kiro";
 }

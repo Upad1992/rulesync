@@ -8,9 +8,7 @@ import {
   REASONIX_SKILLS_DIR_PATH,
   REASONIX_SUBAGENT_RUN_AS,
 } from "../../constants/reasonix-paths.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
 import { parseFrontmatterWithYamlRepair } from "../../utils/frontmatter.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
@@ -47,7 +45,7 @@ import {
 // so an imported file carrying extra keys still parses.
 // https://github.com/esengine/DeepSeek-Reasonix/blob/v2.31.0/internal/ext/skill/invocation_flags.go
 // https://github.com/esengine/DeepSeek-Reasonix/blob/v1.39.8/internal/skill/skill.go
-export const ReasonixSkillFrontmatterSchema = z.looseObject({
+const ReasonixSkillFrontmatterSchema = z.looseObject({
   name: z.string(),
   description: z.string(),
   invocation: z.optional(z.unknown()),
@@ -122,28 +120,8 @@ export class ReasonixSkill extends ToolSkill {
     return ReasonixSkillFrontmatterSchema.parse(this.requireMainFileFrontmatter());
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (this.mainFile === undefined) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-    const result = ReasonixSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(ReasonixSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -176,16 +154,7 @@ export class ReasonixSkill extends ToolSkill {
       ...(Object.keys(reasonixSection).length > 0 && { reasonix: reasonixSection }),
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -245,36 +214,12 @@ export class ReasonixSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const frontmatter = rulesyncSkill.getFrontmatter();
-    const targets = frontmatter.targets;
-    return targets.includes("*") || targets.includes("reasonix");
-  }
+  protected static override readonly toolTarget = "reasonix";
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<ReasonixSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: ReasonixSkill.getSettablePaths,
-    });
-
-    const result = ReasonixSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new ReasonixSkill({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new ReasonixSkill(
+      await this.loadStandardSkillParams({ params, schema: ReasonixSkillFrontmatterSchema }),
+    );
   }
 
   /**
@@ -311,22 +256,8 @@ export class ReasonixSkill extends ToolSkill {
     }
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): ReasonixSkill {
-    return new ReasonixSkill({
-      outputRoot,
-      relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): ReasonixSkill {
+    return new ReasonixSkill(this.forDeletionParams(params));
   }
 }
 

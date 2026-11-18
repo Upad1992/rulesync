@@ -5,9 +5,14 @@ import { z } from "zod/mini";
 import { COPILOT_DIR, COPILOT_RULE_FILE_NAME, GITHUB_DIR } from "../../constants/copilot-paths.js";
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-file.js";
+import { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent, toPosixPath } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncRule, RulesyncRuleFrontmatter } from "./rulesync-rule.js";
 import {
   ToolRule,
@@ -17,7 +22,6 @@ import {
   ToolRuleParams,
   ToolRuleSettablePaths,
   ToolRuleSettablePathsGlobal,
-  buildToolPath,
 } from "./tool-rule.js";
 
 // looseObject preserves unknown keys during parsing, so a hand-written
@@ -94,27 +98,26 @@ export class CopilotRule extends ToolRule {
   static getSettablePaths(
     options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): CopilotRuleSettablePaths | CopilotRuleSettablePathsGlobal {
     if (options.global) {
       return {
         root: {
-          relativeDirPath: buildToolPath(COPILOT_DIR, ".", options.excludeToolDir),
+          relativeDirPath: join(COPILOT_DIR, "."),
           relativeFilePath: COPILOT_RULE_FILE_NAME,
         },
         nonRoot: {
-          relativeDirPath: buildToolPath(COPILOT_DIR, "instructions", options.excludeToolDir),
+          relativeDirPath: join(COPILOT_DIR, "instructions"),
         },
       };
     }
     return {
       root: {
-        relativeDirPath: buildToolPath(GITHUB_DIR, ".", options.excludeToolDir),
+        relativeDirPath: join(GITHUB_DIR, "."),
         relativeFilePath: COPILOT_RULE_FILE_NAME,
       },
       nonRoot: {
-        relativeDirPath: buildToolPath(GITHUB_DIR, "instructions", options.excludeToolDir),
+        relativeDirPath: join(GITHUB_DIR, "instructions"),
       },
     };
   }
@@ -328,17 +331,12 @@ export class CopilotRule extends ToolRule {
       return { success: true, error: null };
     }
 
-    const result = CopilotRuleFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: CopilotRuleFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   getFrontmatter(): CopilotRuleFrontmatter {
@@ -349,10 +347,5 @@ export class CopilotRule extends ToolRule {
     return this.body;
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "copilot",
-    });
-  }
+  protected static override readonly toolTarget: ToolTarget = "copilot";
 }

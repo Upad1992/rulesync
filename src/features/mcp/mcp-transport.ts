@@ -48,6 +48,28 @@ export function resolveRemoteMcpUrl(serverConfig: McpServerConfig): string | und
 }
 
 /**
+ * The remote transport a tool that accepts `http` (streamable HTTP) and `sse`
+ * reads a `url` server as. The canonical `streamable-http` spelling is folded
+ * into `http`, and a server stating no transport defaults to `http` unless its
+ * URL is `ws://`/`wss://`. A WebSocket URL or any other stated transport has
+ * no equivalent there, so `undefined` tells the caller to skip the server.
+ */
+export function resolveHttpOrSseRemoteType({
+  stated,
+  url,
+}: {
+  stated: string | undefined;
+  url: string;
+}): "http" | "sse" | undefined {
+  if (stated === "sse") return "sse";
+  if (stated === "http" || stated === "streamable-http") return "http";
+  if (stated === undefined) {
+    return /^wss?:\/\//i.test(url) ? undefined : "http";
+  }
+  return undefined;
+}
+
+/**
  * The `command` array a `local` server is spawned with, `args` merged in. An
  * entry carrying `args` but no `command` comes back empty rather than with
  * `args[0]` promoted to its program: every adapter writes element 0 back out
@@ -92,6 +114,56 @@ export function warnAndSkipMcpServer({
     `${toolName} MCP: skipping ${quoteValueForWarning(serverName)} because it declares ${reason}.`,
   );
   return null;
+}
+
+/**
+ * Drops every server whose `enabledTools` allowlist is empty, warning about
+ * each one, for a tool that reads an empty (or missing) allowlist as "no
+ * filter". Canonically an empty allowlist allows no tools at all, so emitting
+ * the server unfiltered would expose every tool it reports. With
+ * `ignoreBlankNames`, blank entries count as absent, for a tool that drops
+ * them before applying the list. `productName` names the tool in the reason
+ * when it differs from the `toolName` the warning starts with.
+ */
+export function skipServersWithEmptyEnabledTools<TServer extends { enabledTools?: unknown }>({
+  mcpServers,
+  toolName,
+  logger,
+  ignoreBlankNames = false,
+  productName = toolName,
+}: {
+  mcpServers: Record<string, TServer>;
+  toolName: string;
+  logger?: Logger;
+  ignoreBlankNames?: boolean;
+  productName?: string;
+}): Record<string, TServer> {
+  const kept: Record<string, TServer> = {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const { enabledTools } = server;
+    if (Array.isArray(enabledTools)) {
+      const names = ignoreBlankNames
+        ? enabledTools.filter((tool) => typeof tool !== "string" || tool.trim() !== "")
+        : enabledTools;
+      if (names.length === 0) {
+        warnAndSkipMcpServer({
+          toolName,
+          serverName: name,
+          reason: `an empty enabledTools list, which allows no tools at all but which ${productName} treats as no filter`,
+          logger,
+        });
+        continue;
+      }
+    }
+    // Defined rather than assigned, so a server named `__proto__` stays a key.
+    Object.defineProperty(kept, name, {
+      value: server,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return kept;
 }
 
 /**

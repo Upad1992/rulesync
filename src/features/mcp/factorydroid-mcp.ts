@@ -4,8 +4,8 @@ import {
   FACTORYDROID_DIR,
   FACTORYDROID_MCP_FILE_NAME,
 } from "../../constants/factorydroid-paths.js";
-import { ValidationResult } from "../../types/ai-file.js";
 import { readFileContent } from "../../utils/file.js";
+import { skipServersWithEmptyEnabledTools } from "./mcp-transport.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
 import {
   ToolMcp,
@@ -15,6 +15,8 @@ import {
   ToolMcpParams,
   ToolMcpSettablePaths,
 } from "./tool-mcp.js";
+
+const TOOL_NAME = "factorydroid";
 
 export class FactorydroidMcp extends ToolMcp {
   private readonly json: Record<string, unknown>;
@@ -60,11 +62,17 @@ export class FactorydroidMcp extends ToolMcp {
     outputRoot = process.cwd(),
     rulesyncMcp,
     validate = true,
+    logger,
   }: ToolMcpFromRulesyncMcpParams): FactorydroidMcp {
     // Use getMcpServers() (not getJson()) so rulesync-only fields and
     // codex-only fields (`envVars`) are stripped before writing the
     // Factory Droid config.
-    const mcpServers = rulesyncMcp.getMcpServers();
+    const mcpServers = skipServersWithEmptyEnabledTools({
+      mcpServers: rulesyncMcp.getMcpServers(),
+      toolName: TOOL_NAME,
+      productName: "Factory Droid",
+      logger,
+    });
 
     // Factory Droid uses standard MCP format without transformations
     const factorydroidConfig = {
@@ -84,10 +92,6 @@ export class FactorydroidMcp extends ToolMcp {
 
   toRulesyncMcp(): RulesyncMcp {
     return this.toRulesyncMcpDefault();
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

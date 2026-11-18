@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -118,7 +118,10 @@ describe("CursorPermissions", () => {
       });
 
       const parsed = JSON.parse(cursorPermissions.getFileContent());
-      expect(parsed.permissions.allow).toContain("Shell(git *)");
+      // The catch-all ask covers `git *`, and Cursor prompts for anything it
+      // does not auto-approve, so the allow is withheld rather than answering
+      // the prompt the ask asks for.
+      expect(parsed.permissions.allow).toEqual([]);
       expect(JSON.stringify(parsed.permissions.allow)).not.toContain("ask");
       expect(JSON.stringify(parsed.permissions.deny ?? [])).not.toContain("ask");
       expect(logger.warn).toHaveBeenCalledWith(
@@ -709,18 +712,6 @@ describe("CursorPermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("should return a CursorPermissions with empty permissions block", () => {
-      const instance = CursorPermissions.forDeletion({
-        outputRoot: testDir,
-        relativeDirPath: ".cursor",
-        relativeFilePath: "cli.json",
-      });
-      expect(instance).toBeInstanceOf(CursorPermissions);
-      expect(JSON.parse(instance.getFileContent())).toEqual({ permissions: {} });
-    });
-  });
-
   describe("edit/write category merging", () => {
     it("should merge rulesync 'edit' and 'write' rules into a single Cursor Write entry", async () => {
       const logger = createMockLogger();
@@ -943,6 +934,34 @@ describe("CursorPermissions", () => {
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining("contains a non-string entry"),
       );
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("generates and imports a category named like a prototype member as itself", async () => {
+      const cursorPermissions = await CursorPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { toString: { "*": "allow", x: "deny" } } }),
+        }),
+        logger: createMockLogger(),
+      });
+
+      const parsed = JSON.parse(cursorPermissions.getFileContent());
+      expect(parsed.permissions.allow).toEqual(["toString"]);
+      expect(parsed.permissions.deny).toEqual(["toString(x)"]);
+
+      const imported = new CursorPermissions({
+        relativeDirPath: ".cursor",
+        relativeFilePath: "cli.json",
+        fileContent: cursorPermissions.getFileContent(),
+      });
+      // Cursor lowercases a type it does not know on import.
+      expect(imported.toRulesyncPermissions().getJson().permission).toEqual({
+        tostring: { "*": "allow", x: "deny" },
+      });
     });
   });
 });

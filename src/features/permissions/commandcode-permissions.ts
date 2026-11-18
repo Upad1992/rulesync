@@ -6,11 +6,12 @@ import {
   COMMANDCODE_DIR,
   COMMANDCODE_SETTINGS_FILE_NAME,
 } from "../../constants/commandcode-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { fallbackLogger, type Logger } from "../../utils/logger.js";
+import { getOrCreateOwn, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { isRecord } from "../../utils/type-guards.js";
 import {
@@ -19,10 +20,15 @@ import {
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { ALL_TOOLS_PERMISSION_CATEGORY, honorAllToolsOnBash } from "./shell-command-categories.js";
+import { honorAllToolsRestrictions, restatesAsCategoryRule } from "./shadowed-allows.js";
+import {
+  ALL_TOOLS_PERMISSION_CATEGORY,
+  CATCH_ALL_PATTERN,
+  MCP_CATEGORY_PREFIX,
+} from "./shell-command-categories.js";
+import { isStricterAction } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -31,8 +37,6 @@ import {
 /** Top-level key of `.commandcode/settings.json` that rulesync owns. */
 const COMMANDCODE_PERMISSIONS_KEY = "permissions";
 
-const CATCH_ALL_PATTERN = "*";
-const MCP_CANONICAL_PREFIX = "mcp__";
 const COMMANDCODE_ALL_MCP_RULE = "mcp__*";
 
 // Canonical category ⇒ Command Code friendly tool name. `Shell` is the
@@ -87,21 +91,6 @@ const COMMANDCODE_TOOL_TO_CATEGORY: Record<string, string> = {
   web_search: "websearch",
 };
 
-// Command Code's documented precedence: deny wins, then ask, then allow. Used
-// when two canonical rules collapse onto one entry.
-const ACTION_RANK: Record<PermissionAction, number> = { allow: 0, ask: 1, deny: 2 };
-
-/** Whether `action` outranks `existing` (deny > ask > allow). */
-function isStricterAction({
-  action,
-  existing,
-}: {
-  action: PermissionAction;
-  existing: PermissionAction | undefined;
-}): boolean {
-  return existing === undefined || ACTION_RANK[action] > ACTION_RANK[existing];
-}
-
 /**
  * Why a padded `Shell( * )` cannot stand in for the bare `Shell` in `allow`:
  * the whitespace makes it a pattern rule, and a shell pattern grants only
@@ -135,23 +124,23 @@ type ParsedCommandcodeRule = { category: string; pattern: string; notInAllow: bo
  * server or tool). A pattern on an MCP category is still written as the
  * `(specifier)` here; `writableCommandcodeRule` decides what to do with it,
  * because Command Code ignores it. The all-tools `*` category is only
- * written for its catch-all pattern; narrower `*` patterns are shell
- * restrictions and reach the `Shell` entries through `honorAllToolsOnBash`.
+ * written for its catch-all pattern; a narrower `*` pattern reaches the `Shell`
+ * entries through `honorAllToolsRestrictions`, which also withholds every allow
+ * it overlaps in the other categories — a `{"*": "allow"}` included, even for a
+ * shell-only pattern such as `git push *`.
  */
 function buildCommandcodeRule(category: string, pattern: string): string | null {
   const catchAll = pattern === CATCH_ALL_PATTERN || pattern === "";
-  if (category.startsWith(MCP_CANONICAL_PREFIX)) {
+  if (category.startsWith(MCP_CATEGORY_PREFIX)) {
     return catchAll ? category : `${category}(${pattern})`;
   }
   if (category === "mcp") {
-    return catchAll ? COMMANDCODE_ALL_MCP_RULE : `${MCP_CANONICAL_PREFIX}${pattern}`;
+    return catchAll ? COMMANDCODE_ALL_MCP_RULE : `${MCP_CATEGORY_PREFIX}${pattern}`;
   }
   if (category === ALL_TOOLS_PERMISSION_CATEGORY) {
     return catchAll ? CATCH_ALL_PATTERN : null;
   }
-  const tool = Object.hasOwn(CATEGORY_TO_COMMANDCODE_TOOL, category)
-    ? CATEGORY_TO_COMMANDCODE_TOOL[category]
-    : undefined;
+  const tool = lookupOwn({ record: CATEGORY_TO_COMMANDCODE_TOOL, key: category });
   if (tool === undefined) {
     return null;
   }
@@ -222,7 +211,7 @@ function parseMcpCommandcodeRule({
   tool: string;
   inner: string;
 }): ParsedCommandcodeRule | null {
-  const remainder = tool.slice(MCP_CANONICAL_PREFIX.length);
+  const remainder = tool.slice(MCP_CATEGORY_PREFIX.length);
   const separator = remainder.indexOf("__");
   const server = separator === -1 ? remainder : remainder.slice(0, separator);
   const rest = separator === -1 ? "" : remainder.slice(separator + 2);
@@ -230,7 +219,7 @@ function parseMcpCommandcodeRule({
     return null;
   }
   const everyServer = { category: "mcp", pattern: CATCH_ALL_PATTERN, notInAllow: true };
-  if (tool.startsWith(MCP_CANONICAL_PREFIX)) {
+  if (tool.startsWith(MCP_CATEGORY_PREFIX)) {
     if (server === CATCH_ALL_PATTERN) {
       return everyServer;
     }
@@ -241,11 +230,11 @@ function parseMcpCommandcodeRule({
     }
     const wholeServer = rest === "" || rest === CATCH_ALL_PATTERN;
     const category = wholeServer
-      ? `${MCP_CANONICAL_PREFIX}${server}`
-      : `${MCP_CANONICAL_PREFIX}${remainder}`;
+      ? `${MCP_CATEGORY_PREFIX}${server}`
+      : `${MCP_CATEGORY_PREFIX}${remainder}`;
     return { category, pattern: CATCH_ALL_PATTERN, notInAllow: false };
   }
-  const category = `${MCP_CANONICAL_PREFIX}${remainder}`;
+  const category = `${MCP_CATEGORY_PREFIX}${remainder}`;
   const namesTool = separator !== -1 && rest.length > 0 && !remainder.includes(CATCH_ALL_PATTERN);
   if (!isCatchAllSpecifier(inner)) {
     return namesTool ? { category, pattern: inner, notInAllow: true } : null;
@@ -257,7 +246,7 @@ function parseMcpCommandcodeRule({
     // `MCP__<server>__*` matches every tool of that server by name, which is
     // the whole server — the same thing the exact-prefix `mcp__<server>` says.
     return {
-      category: `${MCP_CANONICAL_PREFIX}${server}`,
+      category: `${MCP_CATEGORY_PREFIX}${server}`,
       pattern: CATCH_ALL_PATTERN,
       notInAllow: true,
     };
@@ -328,12 +317,10 @@ function parseCommandcodeRule(rule: string): ParsedCommandcodeRule | null {
       : null;
   }
   const lowered = tool.toLowerCase();
-  if (lowered.startsWith(MCP_CANONICAL_PREFIX)) {
+  if (lowered.startsWith(MCP_CATEGORY_PREFIX)) {
     return parseMcpCommandcodeRule({ tool, inner });
   }
-  const category = Object.hasOwn(COMMANDCODE_TOOL_TO_CATEGORY, lowered)
-    ? COMMANDCODE_TOOL_TO_CATEGORY[lowered]
-    : undefined;
+  const category = lookupOwn({ record: COMMANDCODE_TOOL_TO_CATEGORY, key: lowered });
   if (category === undefined) {
     return null;
   }
@@ -347,13 +334,13 @@ function parseCommandcodeRule(rule: string): ParsedCommandcodeRule | null {
  */
 function isFoldedMcpToolNameRule({ rule, category }: { rule: string; category: string }): boolean {
   const { tool } = splitCommandcodeRule(rule);
-  return category.startsWith(MCP_CANONICAL_PREFIX) && !tool.startsWith(MCP_CANONICAL_PREFIX);
+  return category.startsWith(MCP_CATEGORY_PREFIX) && !tool.startsWith(MCP_CATEGORY_PREFIX);
 }
 
 /** The `Tool` half of `Tool(specifier)`, when the rule is an exact-prefix MCP rule with a specifier. */
 function scopedMcpRuleTool(rule: string): string | null {
   const { tool, inner } = splitCommandcodeRule(rule);
-  return !isCatchAllSpecifier(inner) && tool.startsWith(MCP_CANONICAL_PREFIX) ? tool : null;
+  return !isCatchAllSpecifier(inner) && tool.startsWith(MCP_CATEGORY_PREFIX) ? tool : null;
 }
 
 /**
@@ -539,7 +526,15 @@ function buildCommandcodeRuleLists({
   existingPermissions: Record<string, unknown>;
   logger?: Logger;
 }): { allow: string[]; ask: string[]; deny: string[] } {
-  const permission = honorAllToolsOnBash(config.permission);
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Command Code",
+    logger,
+    // The default for an input with no rule may auto-approve it (reads), so a
+    // `*` path or URL restriction is also written as a rule of each category.
+    restateAs: restatesAsCategoryRule(),
+    writesAllToolsCatchAll: true,
+  });
   const ranked = new Map<string, PermissionAction>();
   const managedCategories = new Set<string>();
   for (const [category, rules] of Object.entries(permission)) {
@@ -553,7 +548,7 @@ function buildCommandcodeRuleLists({
       const emitted = rule === null ? null : parseCommandcodeRule(rule);
       if (rule === null || emitted === null) {
         // A narrower `*` pattern next to a `bash` category was already
-        // honored as a `Shell(...)` entry by `honorAllToolsOnBash`.
+        // honored as a `Shell(...)` entry by `honorAllToolsRestrictions`.
         const honoredOnShell =
           category === ALL_TOOLS_PERMISSION_CATEGORY && permission.bash !== undefined;
         if (action === "deny" && !honoredOnShell) {
@@ -607,7 +602,7 @@ function skippedAllowImportMessage({ rule, category }: { rule: string; category:
       `cannot import without widening the grant to every command, so it was not imported.`
     );
   }
-  if (tool.startsWith(MCP_CANONICAL_PREFIX) || isCatchAllSpecifier(inner)) {
+  if (tool.startsWith(MCP_CATEGORY_PREFIX) || isCatchAllSpecifier(inner)) {
     return `Command Code ignores '${rule}' in "allow" (an allow rule must name what it grants), so it was not imported.`;
   }
   return (
@@ -687,8 +682,8 @@ function parseCommandcodeRuleLists(
             `as written; spell the rule the way the tool is registered if they differ.`,
         );
       }
-      const rules = (permission[category] ??= {});
-      if (isStricterAction({ action, existing: rules[pattern] })) {
+      const rules = getOrCreateOwn({ record: permission, key: category, create: () => ({}) });
+      if (isStricterAction({ action, existing: lookupOwn({ record: rules, key: pattern }) })) {
         rules[pattern] = action;
       }
     }
@@ -728,14 +723,6 @@ export class CommandcodePermissions extends ToolPermissions {
       ...params,
       fileContent: params.fileContent ?? "{}",
     });
-  }
-
-  /**
-   * `settings.json` holds hooks and other user settings, so it is never
-   * deleted; clearing permissions happens via an in-place merge.
-   */
-  override isDeletable(): boolean {
-    return false;
   }
 
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
@@ -827,26 +814,6 @@ export class CommandcodePermissions extends ToolPermissions {
       : {};
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify({ permission: parseCommandcodeRuleLists(permissions) }, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolPermissionsForDeletionParams): CommandcodePermissions {
-    return new CommandcodePermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
-      global,
     });
   }
 }

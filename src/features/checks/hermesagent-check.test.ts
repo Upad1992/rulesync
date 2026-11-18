@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -46,6 +46,41 @@ describe("HermesagentCheck", () => {
     expect(init?.getFileContent()).toContain(
       'ctx.register_hook("pre_verify", require_rulesync_checks)',
     );
+  });
+
+  it.each([
+    { slug: "../../notes/OPERATOR", expected: "notes-operator.md" },
+    { slug: "..", expected: "evil.md" },
+    { slug: "a\\b", expected: "a-b.md" },
+    { slug: "ok\u001b[2K", expected: "ok-2k.md" },
+    { slug: "a:b", expected: "a-b.md" },
+    { slug: "a|b", expected: "a-b.md" },
+    { slug: "x.", expected: "x.md" },
+    { slug: "x ", expected: "x.md" },
+    { slug: "NUL", expected: "nul-check.md" },
+    { slug: "CONIN$", expected: "conin.md" },
+    { slug: "nul .x", expected: "nul-x.md" },
+  ])("keeps an imported slug $slug inside .rulesync/checks", ({ slug, expected }) => {
+    const check = new HermesagentCheck({
+      relativeDirPath: ".hermes/plugins/rulesync-checks/checks",
+      relativeFilePath: "evil.json",
+      fileContent: JSON.stringify({ slug, body: "Body" }),
+    });
+
+    const result = check.toRulesyncCheck();
+
+    expect(result.getRelativeDirPath()).toBe(".rulesync/checks");
+    expect(result.getRelativeFilePath()).toBe(expected);
+  });
+
+  it("keeps a plain slug as written on import", () => {
+    const check = new HermesagentCheck({
+      relativeDirPath: ".hermes/plugins/rulesync-checks/checks",
+      relativeFilePath: "x.json",
+      fileContent: JSON.stringify({ slug: "My Check", body: "Body" }),
+    });
+
+    expect(check.toRulesyncCheck().getRelativeFilePath()).toBe("My Check.md");
   });
 
   it("round-trips a Hermes check spec", () => {

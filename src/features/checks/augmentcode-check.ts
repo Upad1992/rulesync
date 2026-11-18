@@ -1,4 +1,4 @@
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { dump } from "js-yaml";
 import { z } from "zod/mini";
@@ -8,19 +8,14 @@ import {
   AUGMENTCODE_DIR,
 } from "../../constants/augmentcode-paths.js";
 import { RULESYNC_CHECKS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { fileExists, readFileContentOrNull } from "../../utils/file.js";
-import type { Logger } from "../../utils/logger.js";
 import { isPlainObject } from "../../utils/type-guards.js";
 import { loadYaml } from "../../utils/yaml.js";
-import { slugifyCheckName } from "./check-slug.js";
+import { checkStem, parseCheckOverride, slugifyCheckName, uniqueCheckName } from "./check-slug.js";
 import { RulesyncCheck } from "./rulesync-check.js";
+import { SingleFileToolCheck } from "./single-file-tool-check.js";
 import {
-  ToolCheck,
-  type ToolCheckForDeletionParams,
-  type ToolCheckFromFileParams,
-  type ToolCheckFromRulesyncCheckParams,
   type ToolCheckFromRulesyncChecksParams,
   type ToolCheckSettablePaths,
 } from "./tool-check.js";
@@ -78,45 +73,6 @@ type AugmentcodeCheckOverride = z.infer<typeof AugmentcodeCheckOverrideSchema>;
 
 type AugmentcodeRule = { id: string; description: string; severity: AugmentcodeSeverity };
 
-function parseOverride(raw: unknown, filePath: string, logger?: Logger): AugmentcodeCheckOverride {
-  if (raw === undefined) {
-    return {};
-  }
-  if (!isPlainObject(raw)) {
-    logger?.warn(`Ignoring the \`augmentcode\` block in ${filePath}: expected a mapping.`);
-    return {};
-  }
-  const result = AugmentcodeCheckOverrideSchema.safeParse(raw);
-  if (!result.success) {
-    throw new Error(`Invalid \`augmentcode\` block in ${filePath}: ${result.error.message}`, {
-      cause: result.error,
-    });
-  }
-  return result.data;
-}
-
-function stemOf(rulesyncCheck: RulesyncCheck): string {
-  // basename, so a check in a subdirectory does not name its area `dir/name`.
-  return basename(rulesyncCheck.getRelativeFilePath(), ".md");
-}
-
-/**
- * Disambiguate a name against the ones already taken. Used for rule ids on
- * generate (two same-named checks in different subdirectories) and for check
- * file names on import (one rule id repeated across two areas), since a
- * collision in either direction silently loses one of the pair.
- */
-function uniqueName(preferred: string, used: Set<string>): string {
-  let name = preferred;
-  let suffix = 2;
-  while (used.has(name)) {
-    name = `${preferred}-${suffix}`;
-    suffix += 1;
-  }
-  used.add(name);
-  return name;
-}
-
 /**
  * A rule's `description` is the whole instruction Augment acts on, so the check
  * body is preferred; the frontmatter `description` is a summary, used only when
@@ -128,7 +84,7 @@ function toRuleDescription(rulesyncCheck: RulesyncCheck): string {
   if (body.length > 0) {
     return body;
   }
-  return rulesyncCheck.getFrontmatter().description?.trim() || stemOf(rulesyncCheck);
+  return rulesyncCheck.getFrontmatter().description?.trim() || checkStem(rulesyncCheck);
 }
 
 function toRule(
@@ -140,7 +96,10 @@ function toRule(
   return {
     // Two checks of the same name in different subdirectories would otherwise
     // both claim one id, and Augment reports findings by it.
-    id: uniqueName(override.id ?? slugifyCheckName(stemOf(rulesyncCheck)), usedRuleIds),
+    id: uniqueCheckName({
+      preferred: override.id ?? slugifyCheckName(checkStem(rulesyncCheck)),
+      used: usedRuleIds,
+    }),
     description: toRuleDescription(rulesyncCheck),
     severity: severity
       ? (CANONICAL_TO_AUGMENTCODE_SEVERITY[severity] ?? DEFAULT_AUGMENTCODE_SEVERITY)
@@ -157,7 +116,7 @@ function toRule(
  * become a legal area key from an arbitrary file name.
  */
 function areaKeyFor(rulesyncCheck: RulesyncCheck, override: AugmentcodeCheckOverride): string {
-  return override.area ?? slugifyCheckName(stemOf(rulesyncCheck));
+  return override.area ?? slugifyCheckName(checkStem(rulesyncCheck));
 }
 
 /** Rule ids belonging to areas this generate preserves rather than rewrites. */
@@ -208,7 +167,7 @@ function buildAreas({
       description:
         override.areaDescription ||
         rulesyncCheck.getFrontmatter().description?.trim() ||
-        stemOf(rulesyncCheck),
+        checkStem(rulesyncCheck),
       // `?? `, not `|| `: an authored empty list is an area matching nothing,
       // which is a narrower thing to say than the default catch-all, not an
       // absent value.
@@ -315,7 +274,7 @@ function readRule(
  *
  * @see https://docs.augmentcode.com/codereview/review-guidelines
  */
-export class AugmentcodeCheck extends ToolCheck {
+export class AugmentcodeCheck extends SingleFileToolCheck {
   static getSettablePaths(_options: { global?: boolean } = {}): ToolCheckSettablePaths {
     // Naming the file keeps consumers that would otherwise claim the whole
     // `.augment/` tree — the gitignore derivation, for one — narrowed to the one
@@ -339,20 +298,12 @@ export class AugmentcodeCheck extends ToolCheck {
    * no way to prove otherwise.
    */
   static async canDeleteAuxiliaryFiles({ outputRoot }: { outputRoot: string }): Promise<boolean> {
-    const paths = AugmentcodeCheck.getSettablePaths();
-    const filePath = join(
-      outputRoot,
-      paths.relativeDirPath,
-      paths.relativeFilePath ?? AUGMENTCODE_CODE_REVIEW_GUIDELINES_FILE_NAME,
-    );
+    const { filePath } = this.getSingleFilePath({ outputRoot });
     return !(await fileExists(filePath));
   }
 
-  static override fromRulesyncCheck(_params: ToolCheckFromRulesyncCheckParams): AugmentcodeCheck {
-    // Areas share one file, so they are only ever built as a set.
-    throw new Error(
-      "AugmentCode checks are built from all checks at once; use fromRulesyncChecks.",
-    );
+  protected static override getDisplayName(): string {
+    return "AugmentCode";
   }
 
   static async fromRulesyncChecks({
@@ -361,9 +312,10 @@ export class AugmentcodeCheck extends ToolCheck {
     global = false,
     logger,
   }: ToolCheckFromRulesyncChecksParams): Promise<AugmentcodeCheck[]> {
-    const paths = AugmentcodeCheck.getSettablePaths({ global });
-    const relativeFilePath = paths.relativeFilePath ?? AUGMENTCODE_CODE_REVIEW_GUIDELINES_FILE_NAME;
-    const filePath = join(outputRoot, paths.relativeDirPath, relativeFilePath);
+    const { relativeDirPath, relativeFilePath, filePath } = this.getSingleFilePath({
+      outputRoot,
+      global,
+    });
     // Read without initializing so a dry-run does not create the user's
     // guidelines file as a side effect.
     const existingContent = (await readFileContentOrNull(filePath)) ?? "";
@@ -383,11 +335,13 @@ export class AugmentcodeCheck extends ToolCheck {
 
     const entries = rulesyncChecks.map((rulesyncCheck) => ({
       rulesyncCheck,
-      override: parseOverride(
-        rulesyncCheck.getFrontmatter().augmentcode,
-        join(RULESYNC_CHECKS_RELATIVE_DIR_PATH, rulesyncCheck.getRelativeFilePath()),
+      override: parseCheckOverride({
+        raw: rulesyncCheck.getFrontmatter().augmentcode,
+        filePath: join(RULESYNC_CHECKS_RELATIVE_DIR_PATH, rulesyncCheck.getRelativeFilePath()),
+        section: "augmentcode",
+        schema: AugmentcodeCheckOverrideSchema,
         logger,
-      ),
+      }),
     }));
 
     // A generated id must not land on one a hand-written area already uses:
@@ -413,48 +367,12 @@ export class AugmentcodeCheck extends ToolCheck {
     return [
       new AugmentcodeCheck({
         outputRoot,
-        relativeDirPath: paths.relativeDirPath,
+        relativeDirPath,
         relativeFilePath,
         fileContent,
         global,
       }),
     ];
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    global = false,
-  }: ToolCheckFromFileParams): Promise<AugmentcodeCheck> {
-    const paths = AugmentcodeCheck.getSettablePaths({ global });
-    const relativeFilePath = paths.relativeFilePath ?? AUGMENTCODE_CODE_REVIEW_GUIDELINES_FILE_NAME;
-    const filePath = join(outputRoot, paths.relativeDirPath, relativeFilePath);
-    return new AugmentcodeCheck({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath,
-      fileContent: (await readFileContentOrNull(filePath)) ?? "",
-      global,
-    });
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolCheckForDeletionParams): AugmentcodeCheck {
-    return new AugmentcodeCheck({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global,
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   toRulesyncCheck(): RulesyncCheck {
@@ -491,10 +409,10 @@ export class AugmentcodeCheck extends ToolCheck {
         const rule = readRule(rawRule);
         if (!rule) continue;
 
-        const name = uniqueName(
-          slugifyCheckName(rule.id) || slugifyCheckName(areaKey) || "check",
-          usedNames,
-        );
+        const name = uniqueCheckName({
+          preferred: slugifyCheckName(rule.id) || slugifyCheckName(areaKey) || "check",
+          used: usedNames,
+        });
 
         checks.push(
           new RulesyncCheck({

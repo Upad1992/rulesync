@@ -1,7 +1,5 @@
 import { dirname, join, relative, resolve } from "node:path";
 
-import { RULESYNC_RELATIVE_DIR_PATH } from "../constants/rulesync-paths.js";
-import type { DeletedPath } from "../lib/orphan-sweep.js";
 import {
   companionFileContentsEquivalent,
   fileContentsEquivalent,
@@ -33,6 +31,7 @@ import {
   caseFoldIdentity,
   refusesAnyWriteOutsideRoot,
   refusesDirWriteOntoRoot,
+  sweepRefusalReason,
 } from "./feature-processor.js";
 import { RulesyncSourceConsumer } from "./rulesync-source-consumer.js";
 import { ToolTarget } from "./tool-targets.js";
@@ -80,33 +79,11 @@ function locateInOwnRoot(params: { aiDir: AiDir; dirPath: string; outputRoot: st
 }
 
 export abstract class DirFeatureProcessor extends RulesyncSourceConsumer {
-  protected readonly outputRoot: string;
-  /**
-   * Ordered, non-empty list of rulesync source-tree directories. Each entry
-   * is a source tree itself — the directory that directly contains
-   * feature subdirectories (`rules/`, `skills/`, …) and single-file
-   * features (`mcp.jsonc`, `hooks.jsonc`, …). Later entries take precedence
-   * when two trees supply the same relative path. Defaults to
-   * `[join(process.cwd(), ".rulesync")]`.
-   *
-   * The singular user-facing alias (`inputRoot` in `rulesync.jsonc` / the
-   * `--input-root` CLI flag / `GenerateOptions.inputRoot`) is deprecated
-   * and collapsed into `[join(inputRoot, ".rulesync")]` before it ever
-   * reaches a processor.
-   */
-  protected readonly inputRoots: readonly [string, ...string[]];
-  protected readonly dryRun: boolean;
   protected readonly avoidBlockScalars: boolean;
-  protected readonly logger: Logger;
-  /**
-   * Paths the orphan sweeps deleted (or, under `--dry-run`, would delete),
-   * relative to the output root like the paths `writeAiDirs` reports.
-   */
-  private readonly removedPaths: DeletedPath[] = [];
   constructor({
-    outputRoot = process.cwd(),
+    outputRoot,
     inputRoots,
-    dryRun = false,
+    dryRun,
     avoidBlockScalars = false,
     logger,
   }: {
@@ -116,18 +93,9 @@ export abstract class DirFeatureProcessor extends RulesyncSourceConsumer {
     avoidBlockScalars?: boolean;
     logger: Logger;
   }) {
-    super();
+    super({ outputRoot, inputRoots, dryRun, logger });
 
-    this.outputRoot = outputRoot;
-
-    this.inputRoots =
-      inputRoots !== undefined && inputRoots.length > 0
-        ? [inputRoots[0]!, ...inputRoots.slice(1)]
-        : [join(process.cwd(), RULESYNC_RELATIVE_DIR_PATH)];
-
-    this.dryRun = dryRun;
     this.avoidBlockScalars = avoidBlockScalars;
-    this.logger = logger;
   }
 
   abstract loadRulesyncDirs(): Promise<AiDir[]>;
@@ -557,6 +525,17 @@ export abstract class DirFeatureProcessor extends RulesyncSourceConsumer {
         );
         continue;
       }
+      // The checks above look at the deepest existing path only; a link
+      // further up (a committed `.cursor -> .claude`) is the flat sweep's rule.
+      const sweepRefusal = await sweepRefusalReason({
+        rootPath: this.outputRoot,
+        dirPath,
+        allowInRootLinks: this.sweepsThroughInRootLinks(),
+      });
+      if (sweepRefusal !== null) {
+        this.logger.warn(`Refusing to sweep ${quotedDirPath}: ${sweepRefusal}`);
+        continue;
+      }
 
       const generatedNames = new Set<string>();
       const mainFile = aiDir.getMainFile();
@@ -648,15 +627,6 @@ export abstract class DirFeatureProcessor extends RulesyncSourceConsumer {
     }
 
     return paths.size;
-  }
-
-  /**
-   * The paths the orphan sweeps deleted, or would have deleted under
-   * `--dry-run`, so a preview and the run it previews report the same list.
-   * A deleted directory is listed once, by its own path.
-   */
-  getRemovedPaths(): readonly DeletedPath[] {
-    return this.removedPaths;
   }
 
   /**

@@ -1,6 +1,6 @@
 import { join, relative } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -101,6 +101,12 @@ describe("TraeRule", () => {
       root: false,
       globs: ["**/*"],
     });
+  });
+
+  it("should import unquoted globs under an explicit yaml fence", async () => {
+    expect(await importFile("---yaml\nalwaysApply: false\nglobs: *.py\n---\nBody\n")).toMatchObject(
+      { globs: ["*.py"] },
+    );
   });
 
   it("should import unquoted and list globs and an empty globs line", async () => {

@@ -5,9 +5,7 @@ import { z } from "zod/mini";
 import { AGENTSMD_SKILLS_DIR_PATH } from "../../constants/agentsmd-paths.js";
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { JUNIE_SKILLS_DIR_PATH } from "../../constants/junie-paths.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
-import { formatError } from "../../utils/error.js";
 import { isRecord } from "../../utils/type-guards.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
 import {
@@ -142,38 +140,8 @@ export class JunieSkill extends ToolSkill {
     return result;
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (!this.mainFile) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-
-    const result = JunieSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    if (result.data.name !== this.getDirName()) {
-      return {
-        success: false,
-        error: new Error(
-          `${this.getDirPath()}: frontmatter name (${result.data.name}) must match directory name (${this.getDirName()})`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatterAndDirName(JunieSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -184,16 +152,7 @@ export class JunieSkill extends ToolSkill {
       targets: ["*"],
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -222,10 +181,7 @@ export class JunieSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("junie");
-  }
+  protected static override readonly toolTarget = "junie";
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<JunieSkill> {
     const loaded = await this.loadSkillDirContent({
@@ -251,31 +207,16 @@ export class JunieSkill extends ToolSkill {
       frontmatter = { ...frontmatter, description: derived };
     }
 
-    const result = JunieSkillFrontmatterSchema.safeParse(frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    if (result.data.name !== loaded.dirName) {
-      const skillFilePath = join(
-        loaded.outputRoot,
-        loaded.relativeDirPath,
-        loaded.dirName,
-        SKILL_FILE_NAME,
-      );
-      throw new Error(
-        `Frontmatter name (${result.data.name}) must match directory name (${loaded.dirName}) in ${skillFilePath}`,
-      );
-    }
+    const parsedFrontmatter = this.parseLoadedFrontmatterMatchingDirName({
+      schema: JunieSkillFrontmatterSchema,
+      loaded: { ...loaded, frontmatter },
+    });
 
     return new JunieSkill({
       outputRoot: loaded.outputRoot,
       relativeDirPath: loaded.relativeDirPath,
       dirName: loaded.dirName,
-      frontmatter: result.data,
+      frontmatter: parsedFrontmatter,
       body: loaded.body,
       otherFiles: loaded.otherFiles,
       validate: true,
@@ -283,22 +224,7 @@ export class JunieSkill extends ToolSkill {
     });
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): JunieSkill {
-    const settablePaths = JunieSkill.getSettablePaths({ global });
-    return new JunieSkill({
-      outputRoot,
-      relativeDirPath: relativeDirPath ?? settablePaths.relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): JunieSkill {
+    return new JunieSkill(this.forDeletionParams(params));
   }
 }

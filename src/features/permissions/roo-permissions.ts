@@ -6,25 +6,31 @@ import {
   ROO_VSCODE_SETTINGS_DIR,
   ROO_VSCODE_SETTINGS_FILE_NAME,
 } from "../../constants/roo-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
-import type { PermissionAction } from "../../types/permissions.js";
+import type { AiFileParams } from "../../types/ai-file.js";
+import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
+import { type Logger, warnWithFallback } from "../../utils/logger.js";
+import { toStringArray } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
   sharedConfigFileKey,
 } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
-import { resolveShellCommandLists } from "./shell-command-categories.js";
+import {
+  collectShellCommandRules,
+  partitionCommandRules,
+  warnAboutUnwrittenCommandRules,
+  widenToPrefixGlob,
+} from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
 } from "./tool-permissions.js";
-import { buildVscodeCommandLists } from "./vscode-command-lists.js";
+import { buildVscodeCommandLists, importVscodeCommandLists } from "./vscode-command-lists.js";
 
 /**
  * The canonical category Roo Code's command lists correspond to. Roo Code gates
@@ -34,14 +40,110 @@ import { buildVscodeCommandLists } from "./vscode-command-lists.js";
  */
 const COMMAND_CATEGORY = "bash";
 
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
+/**
+ * Split the canonical `bash` rules — plus the restricting rules of the
+ * all-tools `*` category, which cover shell commands too — into the two prefix
+ * lists. `ask` has no list of its own: the extension prompts for whatever it
+ * does not auto-approve, so an `ask` is honored by withholding every allow it
+ * overlaps, compared at prefix width so a bare `git` allow is withheld by a
+ * `git push` ask instead of auto-approving `git push`.
+ */
+function buildRooCommandLists({
+  permission,
+  toolLabel,
+  surfaceLabel,
+  logger,
+}: {
+  permission: PermissionsConfig["permission"];
+  toolLabel: string;
+  surfaceLabel: string;
+  logger?: Logger | undefined;
+}): { allowed: string[]; denied: string[] | undefined } {
+  const { rules, foreignRestrictingCategories, ignoredAllToolsAllowPatterns } =
+    collectShellCommandRules(permission);
+  const partition = partitionCommandRules({
+    rules,
+    writesAllToolsDeny: true,
+    normalizePattern: widenToPrefixGlob,
+  });
+  warnAboutUnwrittenCommandRules({
+    toolLabel,
+    surfaceLabel,
+    foreignRestrictingCategories,
+    shadowedAllowPatterns: partition.shadowedAllowPatterns,
+    unenforcedAllToolsDenyPatterns: partition.unenforcedAllToolsDenyPatterns,
+    unenforcedAllToolsAskPatterns: partition.unenforcedAllToolsAskPatterns,
+    ignoredAllToolsAllowPatterns,
+    intersectionBudgetExhausted: partition.intersectionBudgetExhausted,
+    logger,
+  });
+
+  const lists: Record<string, PermissionAction> = {};
+  for (const pattern of partition.allow) {
+    lists[pattern] = "allow";
   }
-  return value.filter((entry): entry is string => typeof entry === "string");
+  for (const pattern of partition.deny) {
+    lists[pattern] = "deny";
+  }
+  const { allowed, denied } = buildVscodeCommandLists({ rules: lists, toolLabel, logger });
+  return {
+    allowed: withholdAllowsOutrankingDenies({ allowed, denied, toolLabel, logger }),
+    denied,
+  };
 }
 
-export type RooPermissionsParams = AiFileParams & {
+/**
+ * The extension resolves a command matching both lists by the longer match, so
+ * an allow entry that extends a denied prefix (`git push` allowed, `git`
+ * denied) auto-approves the commands it covers despite the deny — and so does
+ * any allow beside a bare `*` deny, the extension's wildcard. Canonically the
+ * deny wins whatever its width, so such an allow is withheld: the command then
+ * hits the deny. A bare `*` allow never outranks a literal deny, so it is kept.
+ */
+function withholdAllowsOutrankingDenies({
+  allowed,
+  denied,
+  toolLabel,
+  logger,
+}: {
+  allowed: string[];
+  denied: string[] | undefined;
+  toolLabel: string;
+  logger?: Logger | undefined;
+}): string[] {
+  if (denied === undefined) {
+    return allowed;
+  }
+  const withheld: string[] = [];
+  const kept = allowed.filter((allow) => {
+    // Compared lowercased, as the extension does. A bare `*` deny is the
+    // wildcard too, and any literal allow is a longer match than it.
+    const loweredAllow = allow.toLowerCase();
+    const outranks =
+      allow !== "*" &&
+      denied.some((deny) => {
+        const loweredDeny = deny.toLowerCase();
+        return (
+          loweredDeny !== loweredAllow && (deny === "*" || loweredAllow.startsWith(loweredDeny))
+        );
+      });
+    if (outranks) {
+      withheld.push(allow);
+    }
+    return !outranks;
+  });
+  if (withheld.length > 0) {
+    warnWithFallback(
+      logger,
+      `${toolLabel}: the allow rule(s) for ${withheld.join(", ")} extend a denied command ` +
+        `prefix, and a longer allowed match wins over a shorter denied one, so they were ` +
+        `withheld rather than auto-approve commands the deny covers.`,
+    );
+  }
+  return kept;
+}
+
+type RooPermissionsParams = AiFileParams & {
   /** See {@link RooPermissions.shouldSkipCreationWhenPayloadEmpty}. */
   ownsCommandKeys?: boolean | undefined;
 };
@@ -124,14 +226,6 @@ export class RooPermissions extends ToolPermissions {
     return this.ownsCommandKeys ? false : super.shouldSkipCreationWhenPayloadEmpty();
   }
 
-  /**
-   * `.vscode/settings.json` is a user-managed workspace file with unrelated
-   * settings, so it must not be deleted.
-   */
-  override isDeletable(): boolean {
-    return false;
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
     // Project scope only. VS Code's user settings.json is at a platform-specific
     // path outside rulesync's home-relative global model.
@@ -186,16 +280,10 @@ export class RooPermissions extends ToolPermissions {
     const bashStated = permission[COMMAND_CATEGORY] !== undefined;
     const patch: Record<string, unknown> = {};
     if (bashStated) {
-      const { bash } = resolveShellCommandLists({
+      const { allowed, denied } = buildRooCommandLists({
         permission,
-        writesAllToolsDeny: true,
         toolLabel: this.getToolLabel(),
         surfaceLabel: `${this.getAllowedCommandsKey()}/${this.getDeniedCommandsKey()}`,
-        logger,
-      });
-      const { allowed, denied } = buildVscodeCommandLists({
-        rules: bash,
-        toolLabel: this.getToolLabel(),
         logger,
       });
       patch[this.getAllowedCommandsKey()] = allowed;
@@ -218,7 +306,7 @@ export class RooPermissions extends ToolPermissions {
     });
   }
 
-  toRulesyncPermissions(): RulesyncPermissions {
+  toRulesyncPermissions({ logger }: { logger?: Logger } = {}): RulesyncPermissions {
     const constructor = this.constructor as typeof RooPermissions;
     let settings: Record<string, unknown>;
     try {
@@ -240,17 +328,14 @@ export class RooPermissions extends ToolPermissions {
       );
     }
 
-    const rules: Record<string, PermissionAction> = {};
-    for (const pattern of asStringArray(settings[constructor.getAllowedCommandsKey()])) {
-      rules[pattern] = "allow";
-    }
-    // Applied second so a pattern listed in both lists imports as `deny`,
-    // matching the extension's own precedence: with identical prefixes the
-    // denied match is not shorter than the allowed one, and auto-approval
-    // requires a strictly longer allowed match.
-    for (const pattern of asStringArray(settings[constructor.getDeniedCommandsKey()])) {
-      rules[pattern] = "deny";
-    }
+    // Native entries are command prefixes; see `importVscodeCommandLists` for
+    // how they are lowered into canonical globs without changing their reach.
+    const rules = importVscodeCommandLists({
+      allowed: toStringArray(settings[constructor.getAllowedCommandsKey()]),
+      denied: toStringArray(settings[constructor.getDeniedCommandsKey()]),
+      toolLabel: constructor.getToolLabel(),
+      logger,
+    });
 
     const permission: Record<string, Record<string, PermissionAction>> = {};
     if (Object.keys(rules).length > 0) {
@@ -259,24 +344,6 @@ export class RooPermissions extends ToolPermissions {
 
     return this.toRulesyncPermissionsDefault({
       fileContent: JSON.stringify({ permission }, null, 2),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): RooPermissions {
-    return new this({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
     });
   }
 }

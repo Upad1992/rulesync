@@ -48,7 +48,7 @@ const VIBE_PLUGIN_AGENT_FILE_STEM_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 const VIBE_PLUGIN_AGENT_DESCRIPTION_MAX_LENGTH = 300;
 
-export const VibePluginAgentTomlSchema = z.looseObject({
+const VibePluginAgentTomlSchema = z.looseObject({
   schema_version: z.literal(1),
   agent_type: z.literal("subagent"),
   display_name: z.optional(z.string()),
@@ -224,6 +224,9 @@ export class VibePluginSubagent extends ToolSubagent {
       logger,
     });
     const fileStem = basename(relativeFilePath, ".toml");
+    // No reserved-`main` check here, unlike `VibeSubagent`: Vibe names a plugin agent
+    // `<namespace>:<stem>` and builds it without `AgentProfile.from_toml`, so it cannot be `main`.
+    // https://github.com/mistralai/mistral-vibe/blob/v3.0.3/vibe/core/plugins/_native.py
     if (!VIBE_PLUGIN_AGENT_FILE_STEM_PATTERN.test(fileStem)) {
       logger?.warn(
         `vibe-plugin subagent ${relativeFilePath}: Vibe requires a lowercase kebab-case ` +

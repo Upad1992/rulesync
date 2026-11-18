@@ -9,6 +9,7 @@ import { RulesyncTargetsSchema } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { fileExists, readFileContent } from "../../utils/file.js";
 import { parseFrontmatterWithYamlRepair } from "../../utils/frontmatter.js";
+import { type LoadedRulesyncSkill, loadRulesyncSkillOnce } from "./rulesync-skill-cache.js";
 
 /**
  * Several targets use a skill's `name` verbatim as the directory name they write
@@ -48,10 +49,11 @@ const piSkillSectionSchema = z.looseObject({
 
 const antigravitySkillSectionSchema = z.looseObject({
   "disable-slash-command": z.optional(z.boolean()),
+  "disable-model-invocation": z.optional(z.boolean()),
   metadata: z.optional(z.looseObject({})),
 });
 
-const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
+export const RulesyncSkillFrontmatterSchema = z.looseObject({
   name: z.string().check(
     z.refine((name) => !isUnsafeSkillDirName(name), {
       message:
@@ -62,14 +64,19 @@ const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
   targets: z._default(RulesyncTargetsSchema, ["*"]),
   // Default for tools that support the flag (claudecode, codebuddy, copilot, copilotcli, crush,
   // cursor, zed, pi, omp, qwencode, vibe, grokcli, factorydroid, dsh, reasonix, commandcode,
-  // lettacode, opencode, mimocode).
+  // lettacode, opencode, opencodev1, mimocode, xum).
   // A target-section value of the same key overrides this default.
   // `devin` also consumes this root value (mapping `true` onto a user-only
   // `triggers` list); it has no section key of the same name, but a
   // `devin.triggers` section value overrides it.
+  // `codexcli` writes this root value into `SKILL.md` as-is and also maps
+  // `true` onto `policy.allow_implicit_invocation: false` in `agents/openai.yaml`.
+  // The Antigravity targets (antigravity-ide, antigravity-cli, antigravity-plugin)
+  // also write this root value into `SKILL.md`; their section value overrides it.
   "disable-model-invocation": z.optional(z.boolean()),
   // Default for tools that support the flag (claudecode, codebuddy, copilot, copilotcli,
-  // crush, cursor, qwencode, vibe, grokcli, factorydroid, dsh, reasonix, commandcode, lettacode).
+  // crush, cursor, qwencode, vibe, grokcli, factorydroid, dsh, reasonix, commandcode, lettacode,
+  // xum).
   // A target-section value of the same key overrides this default.
   // `devin` also consumes this root value (mapping `false` onto a model-only
   // `triggers` list); it has no section key of the same name, but a
@@ -157,6 +164,16 @@ const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
       // `metadata` at all, so it never validates or rejects them. Left
       // untyped so rulesync never aborts on a value the tool itself
       // tolerates. See https://opencode.ai/docs/skills/
+      license: z.optional(z.unknown()),
+      compatibility: z.optional(z.unknown()),
+      metadata: z.optional(z.unknown()),
+      "disable-model-invocation": z.optional(z.boolean()),
+    }),
+  ),
+  // OpenCode V1 reads the same SKILL.md fields as OpenCode (V2).
+  opencodev1: z.optional(
+    z.looseObject({
+      "allowed-tools": z.optional(z.array(z.string())),
       license: z.optional(z.unknown()),
       compatibility: z.optional(z.unknown()),
       metadata: z.optional(z.unknown()),
@@ -395,6 +412,9 @@ const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
       compatibility: z.optional(z.union([z.string(), z.looseObject({})])),
       metadata: z.optional(z.looseObject({})),
       "allowed-tools": z.optional(z.union([z.string(), z.array(z.string())])),
+      // Opt-in: not part of the Agent Skills spec (`skills-ref validate`
+      // rejects it), but honored by clients reading `.agents/skills/`.
+      "disable-model-invocation": z.optional(z.boolean()),
     }),
   ),
   hermesagent: z.optional(z.looseObject({})),
@@ -467,6 +487,32 @@ const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
       metadata: z.optional(z.looseObject({})),
     }),
   ),
+  // Meta Muse Code reads the Agent Skills packaging fields: `skills inspect`
+  // reports `license` (1.4.0) and `metadata.display-name` renames the skill in
+  // the UI (1.4.7). https://dev.meta.ai/docs/muse-code/changelog
+  musecode: z.optional(
+    z.looseObject({
+      license: z.optional(z.string()),
+      compatibility: z.optional(z.union([z.string(), z.looseObject({})])),
+      metadata: z.optional(z.looseObject({})),
+    }),
+  ),
+  // Xum reads these keys on top of the Agent Skills standard fields; the
+  // section is written into SKILL.md verbatim. `advertise: false` is Xum's
+  // alias for `disable-model-invocation: true`, and `paths` (a list or a
+  // comma-separated string of globs) makes the skill path-scoped.
+  // https://xum.cdr.dev/agents/agent-skills
+  xum: z.optional(
+    z.looseObject({
+      "disable-model-invocation": z.optional(z.boolean()),
+      advertise: z.optional(z.boolean()),
+      "user-invocable": z.optional(z.boolean()),
+      "argument-hint": z.optional(z.string()),
+      when_to_use: z.optional(z.string()),
+      "when-to-use": z.optional(z.string()),
+      paths: z.optional(z.union([z.string(), z.array(z.string())])),
+    }),
+  ),
   // ZCode's "Skill SKILL.md Field Reference" allowlists exactly five keys:
   // required `name`/`description` plus optional `when_to_use`, `license` and
   // `metadata`. There is no `compatibility` field, so it is not offered here.
@@ -483,278 +529,18 @@ const RulesyncSkillFrontmatterSchemaInternal = z.looseObject({
   "antigravity-cli": z.optional(antigravitySkillSectionSchema),
 });
 
-// Export schema with targets optional for input but guaranteed in output
-export const RulesyncSkillFrontmatterSchema = RulesyncSkillFrontmatterSchemaInternal;
-
 // Type for input (targets is optional)
-export type RulesyncSkillFrontmatterInput = {
-  name: string;
-  description: string;
-  targets?: ("*" | string)[];
-  "disable-model-invocation"?: boolean;
-  "user-invocable"?: boolean;
-  license?: string;
-  compatibility?: string | Record<string, unknown>;
-  metadata?: Record<string, unknown>;
-  claudecode?: {
-    when_to_use?: string;
-    "allowed-tools"?: string | string[];
-    "disallowed-tools"?: string | string[];
-    model?: string;
-    effort?: string;
-    "argument-hint"?: string;
-    arguments?: string | string[];
-    context?: string;
-    agent?: string;
-    background?: boolean;
-    hooks?: Record<string, unknown>;
-    shell?: string;
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-    "scheduled-task"?: boolean;
-    paths?: string | string[];
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  grokcli?: {
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-    paths?: string | string[];
-    "when-to-use"?: string;
-    when_to_use?: string;
-    "allowed-tools"?: string | string[];
-    "argument-hint"?: string;
-    model?: string;
-    effort?: string;
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  dsh?: {
-    whenToUse?: string;
-    metadata?: Record<string, unknown>;
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-  };
-  reasonix?: {
-    invocation?: string;
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-  };
-  codexcli?: {
-    "short-description"?: string;
-    interface?: {
-      display_name?: string;
-      short_description?: string;
-      icon_small?: string;
-      icon_large?: string;
-      brand_color?: string;
-      default_prompt?: string;
-    };
-    policy?: {
-      allow_implicit_invocation?: boolean;
-    };
-    dependencies?: {
-      tools?: Array<{
-        type?: string;
-        value?: string;
-        description?: string;
-        transport?: string;
-        url?: string;
-      }>;
-    };
-  };
-  opencode?: {
-    "allowed-tools"?: string[];
-    license?: unknown;
-    compatibility?: unknown;
-    metadata?: unknown;
-    "disable-model-invocation"?: boolean;
-  };
-  mimocode?: {
-    "allowed-tools"?: string[];
-    license?: unknown;
-    compatibility?: unknown;
-    metadata?: unknown;
-    "disable-model-invocation"?: boolean;
-  };
-  kilo?: {
-    "allowed-tools"?: string[];
-    license?: unknown;
-    compatibility?: unknown;
-    metadata?: unknown;
-  };
-  kiro?: {
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  deepagents?: {
-    "allowed-tools"?: string[];
-    license?: unknown;
-    compatibility?: unknown;
-    metadata?: unknown;
-  };
-  copilot?: {
-    license?: string;
-    "allowed-tools"?: string | string[];
-    "argument-hint"?: string;
-    "user-invocable"?: boolean;
-    "disable-model-invocation"?: boolean;
-    context?: string;
-  };
-  copilotcli?: {
-    license?: string;
-    "allowed-tools"?: string | string[];
-    "argument-hint"?: string;
-    "user-invocable"?: boolean;
-    "disable-model-invocation"?: boolean;
-  };
-  pi?: {
-    "allowed-tools"?: string | string[];
-    "disable-model-invocation"?: boolean;
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  omp?: {
-    "allowed-tools"?: string | string[];
-    "disable-model-invocation"?: boolean;
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  zed?: {
-    "disable-model-invocation"?: boolean;
-  };
-  replit?: {
-    "allowed-tools"?: string | string[];
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  roo?: Record<string, unknown>;
-  bob?: Record<string, unknown>;
-  cline?: Record<string, unknown>;
-  amp?: Record<string, unknown>;
-  devin?: {
-    "argument-hint"?: string;
-    model?: string;
-    subagent?: string | boolean;
-    agent?: string;
-    "allowed-tools"?: string | string[];
-    permissions?: Record<string, unknown>;
-    triggers?: ("user" | "model")[];
-  };
-  qwencode?: {
-    priority?: number;
-    paths?: string | string[];
-    "user-invocable"?: boolean;
-    "disable-model-invocation"?: boolean;
-    allowedTools?: string[];
-    model?: string;
-    hooks?: Record<string, unknown>;
-    when_to_use?: string;
-    "argument-hint"?: string;
-  };
-  rovodev?: {
-    "allowed-tools"?: string | string[];
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  cursor?: {
-    paths?: string | string[];
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-    icon?: string;
-    color?: string;
-    metadata?: Record<string, unknown>;
-  };
-  factorydroid?: {
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-    enabled?: boolean;
-    "allowed-tools"?: string | string[];
-    license?: unknown;
-    compatibility?: unknown;
-    metadata?: unknown;
-    version?: unknown;
-  };
-  "kimi-code"?: {
-    type?: "prompt" | "inline" | "flow";
-    whenToUse?: string;
-    disableModelInvocation?: boolean;
-    arguments?: string | string[];
-  };
-  agentsskills?: {
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    "allowed-tools"?: string | string[];
-  };
-  hermesagent?: Record<string, unknown>;
-  vibe?: {
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    "user-invocable"?: boolean;
-    "disable-model-invocation"?: boolean;
-    "allowed-tools"?: string | string[];
-  };
-  commandcode?: Record<string, unknown>;
-  lettacode?: {
-    when_to_use?: string;
-    "argument-hint"?: string;
-    category?: string;
-    tags?: string | string[];
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-  };
-  cortexcode?: Record<string, unknown>;
-  codebuddy?: Record<string, unknown> & {
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-  };
-  codewhale?: Record<string, unknown>;
-  continue?: Record<string, unknown>;
-  tabnine?: Record<string, unknown>;
-  takt?: {
-    name?: string;
-    extends?: string;
-  };
-  crush?: {
-    "disable-model-invocation"?: boolean;
-    "user-invocable"?: boolean;
-    license?: string;
-    compatibility?: string | Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-  };
-  zcode?: {
-    when_to_use?: string;
-    license?: string;
-    metadata?: Record<string, unknown>;
-  };
-  "antigravity-ide"?: AntigravitySkillSectionInput;
-  "antigravity-cli"?: AntigravitySkillSectionInput;
-};
-
-type AntigravitySkillSectionInput = {
-  "disable-slash-command"?: boolean;
-  metadata?: Record<string, unknown>;
-  [key: string]: unknown;
-};
+export type RulesyncSkillFrontmatterInput = z.input<typeof RulesyncSkillFrontmatterSchema>;
 
 // Type for output/validated data (targets is always present after validation)
-export type RulesyncSkillFrontmatter = z.infer<typeof RulesyncSkillFrontmatterSchemaInternal>;
+export type RulesyncSkillFrontmatter = z.infer<typeof RulesyncSkillFrontmatterSchema>;
 
 /**
  * Type alias for AiDirFile, specific to skill files
  */
 export type SkillFile = AiDirFile;
 
-export type RulesyncSkillParams = {
+type RulesyncSkillParams = {
   outputRoot?: string;
   relativeDirPath?: string;
   dirName: string;
@@ -765,11 +551,11 @@ export type RulesyncSkillParams = {
   global?: boolean;
 };
 
-export type RulesyncSkillSettablePaths = {
+type RulesyncSkillSettablePaths = {
   relativeDirPath: string;
 };
 
-export type RulesyncSkillFromDirParams = {
+type RulesyncSkillFromDirParams = {
   outputRoot?: string;
   relativeDirPath?: string;
   dirName: string;
@@ -855,6 +641,36 @@ export class RulesyncSkill extends AiDir {
     global = false,
   }: RulesyncSkillFromDirParams): Promise<RulesyncSkill> {
     const skillDirPath = join(outputRoot, relativeDirPath, dirName);
+    const loaded = await loadRulesyncSkillOnce({
+      skillDirPath,
+      load: () => this.loadSkillDir({ outputRoot, relativeDirPath, dirName }),
+    });
+
+    // Each caller gets its own frontmatter and file list, so nothing one target
+    // does with its skill can reach the copy another target reuses. The file
+    // buffers themselves are shared: nothing in rulesync writes into one.
+    return new RulesyncSkill({
+      outputRoot,
+      relativeDirPath,
+      dirName,
+      frontmatter: structuredClone(loaded.frontmatter) as RulesyncSkillFrontmatter,
+      body: loaded.body,
+      otherFiles: loaded.otherFiles.map((file) => ({ ...file })),
+      validate: true,
+      global,
+    });
+  }
+
+  private static async loadSkillDir({
+    outputRoot,
+    relativeDirPath,
+    dirName,
+  }: {
+    outputRoot: string;
+    relativeDirPath: string;
+    dirName: string;
+  }): Promise<LoadedRulesyncSkill> {
+    const skillDirPath = join(outputRoot, relativeDirPath, dirName);
     const skillFilePath = join(skillDirPath, SKILL_FILE_NAME);
 
     if (!(await fileExists(skillFilePath))) {
@@ -885,15 +701,6 @@ export class RulesyncSkill extends AiDir {
       SKILL_FILE_NAME,
     );
 
-    return new RulesyncSkill({
-      outputRoot,
-      relativeDirPath,
-      dirName,
-      frontmatter: result.data,
-      body: content.trim(),
-      otherFiles,
-      validate: true,
-      global,
-    });
+    return { frontmatter: result.data, body: content.trim(), otherFiles };
   }
 }

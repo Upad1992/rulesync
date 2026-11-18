@@ -1,6 +1,6 @@
 import { basename, join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_MCP_FILE_NAME,
@@ -416,6 +416,38 @@ describe("RulesyncMcp", () => {
 
       expect(result.success).toBe(true);
       expect(result.error).toBeNull();
+    });
+
+    it("should accept non-negative integer Kimi Code reconnect delays", () => {
+      const rulesyncMcp = new RulesyncMcp({
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: basename(RULESYNC_MCP_RELATIVE_FILE_PATH),
+        fileContent: JSON.stringify({
+          mcpServers: {},
+          "kimi-code": { reconnectInitialDelayMs: 0, reconnectMaxDelayMs: 300000 },
+        }),
+        validate: false,
+      });
+
+      expect(rulesyncMcp.validate()).toEqual({ success: true, error: null });
+    });
+
+    it.each([
+      { name: "a negative", value: -1 },
+      { name: "a fractional", value: 1.5 },
+      { name: "a string", value: "5000" },
+    ])("should reject $name Kimi Code reconnect delay", ({ value }) => {
+      const rulesyncMcp = new RulesyncMcp({
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: basename(RULESYNC_MCP_RELATIVE_FILE_PATH),
+        fileContent: JSON.stringify({
+          mcpServers: {},
+          "kimi-code": { reconnectMaxDelayMs: value },
+        }),
+        validate: false,
+      });
+
+      expect(rulesyncMcp.validate().success).toBe(false);
     });
 
     it("should validate an AI Assistant tool-scoped block", () => {
@@ -1548,7 +1580,7 @@ describe("RulesyncMcp", () => {
       expect((rulesyncMcp.getJson().mcpServers.pal as any).musecodeMode).toBe("optional");
     });
 
-    it("should strip the crush-only OAuth and sessionless keys from getMcpServers output", () => {
+    it("should strip the crush-only OAuth, sessionless and channel keys from getMcpServers output", () => {
       // The crush generator re-merges them from getJson(); the client secret
       // in particular must not be copied into every other tool's config. Both
       // the `crush*` authoring keys and the raw Crush spellings are stripped.
@@ -1564,6 +1596,8 @@ describe("RulesyncMcp", () => {
               crushOauthClientSecret: "client-secret-value",
               crushOauthCallbackPort: 8765,
               crushSessionless: true,
+              crushChannelEnabled: true,
+              crushChannelReply: { user: { tool: "reply", target_param: "user_id" } },
             },
             raw: {
               url: "https://example.com/mcp",
@@ -1571,6 +1605,8 @@ describe("RulesyncMcp", () => {
               oauth_client_secret: "client-secret-value",
               oauth_callback_port: 8765,
               sessionless: true,
+              channel_enabled: true,
+              channel_reply: { user: { tool: "reply", target_param: "user_id" } },
             },
           },
         }),

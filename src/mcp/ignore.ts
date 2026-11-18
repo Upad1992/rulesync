@@ -1,13 +1,13 @@
 import { join } from "node:path";
 
-import { z } from "zod/mini";
-
 import {
   RULESYNC_AIIGNORE_RELATIVE_FILE_PATH,
   RULESYNC_IGNORE_RELATIVE_FILE_PATH,
+  RULESYNC_RELATIVE_DIR_PATH,
 } from "../constants/rulesync-paths.js";
 import { formatError } from "../utils/error.js";
 import { ensureDir, readFileContent, removeFile, writeFileContent } from "../utils/file.js";
+import { assertNoSymlinkInFeaturePath } from "./feature-symlinks.js";
 
 const maxIgnoreFileSizeBytes = 100 * 1024; // 100KB
 
@@ -21,6 +21,10 @@ async function getIgnoreFile(): Promise<{
   const ignoreFilePath = join(process.cwd(), RULESYNC_AIIGNORE_RELATIVE_FILE_PATH);
 
   try {
+    await assertNoSymlinkInFeaturePath({
+      featureDirPath: join(process.cwd(), RULESYNC_RELATIVE_DIR_PATH),
+      targetPath: ignoreFilePath,
+    });
     const content = await readFileContent(ignoreFilePath);
 
     return {
@@ -58,7 +62,11 @@ async function putIgnoreFile({ content }: { content: string }): Promise<{
     // Ensure parent directory exists (should be cwd, but just to be safe)
     await ensureDir(process.cwd());
 
-    // Write the file
+    // Write the file, never through a symbolic link a cloned repository planted
+    await assertNoSymlinkInFeaturePath({
+      featureDirPath: join(process.cwd(), RULESYNC_RELATIVE_DIR_PATH),
+      targetPath: ignoreFilePath,
+    });
     await writeFileContent(ignoreFilePath, content);
 
     return {
@@ -106,43 +114,22 @@ async function deleteIgnoreFile(): Promise<{
 }
 
 /**
- * Schema for ignore-related tool parameters
- */
-const ignoreToolSchemas = {
-  getIgnoreFile: z.object({}),
-  putIgnoreFile: z.object({
-    content: z.string(),
-  }),
-  deleteIgnoreFile: z.object({}),
-} as const;
-
-/**
  * Tool definitions for ignore-related operations
  */
 export const ignoreTools = {
   getIgnoreFile: {
-    name: "getIgnoreFile",
-    description: "Get the content of the .rulesyncignore file from the project root.",
-    parameters: ignoreToolSchemas.getIgnoreFile,
     execute: async () => {
       const result = await getIgnoreFile();
       return JSON.stringify(result, null, 2);
     },
   },
   putIgnoreFile: {
-    name: "putIgnoreFile",
-    description:
-      "Create or update the .rulesync/.aiignore file (upsert operation). content parameter is required.",
-    parameters: ignoreToolSchemas.putIgnoreFile,
     execute: async (args: { content: string }) => {
       const result = await putIgnoreFile({ content: args.content });
       return JSON.stringify(result, null, 2);
     },
   },
   deleteIgnoreFile: {
-    name: "deleteIgnoreFile",
-    description: "Delete the .rulesyncignore and .rulesync/.aiignore files.",
-    parameters: ignoreToolSchemas.deleteIgnoreFile,
     execute: async () => {
       const result = await deleteIgnoreFile();
       return JSON.stringify(result, null, 2);

@@ -19,7 +19,7 @@ import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
-import { HOOKS_OWNERSHIP_LOCK_FILE_NAME, parseHooksOwnershipLock } from "./hooks-ownership-lock.js";
+import { readPreviouslyOwnedHooks } from "./hooks-ownership-lock.js";
 import { mergeGeneratedHookLists } from "./preserve-unowned-hook-commands.js";
 import type { RulesyncHooks } from "./rulesync-hooks.js";
 import type { ToolHooksConverterConfig } from "./tool-hooks-converter.js";
@@ -30,14 +30,11 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
-  type ToolHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
 
-const CODEXCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const CODEXCLI_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedEvents: CODEXCLI_HOOK_EVENTS,
   canonicalToToolEventNames: CANONICAL_TO_CODEXCLI_EVENT_NAMES,
   toolToCanonicalEventNames: CODEXCLI_TO_CANONICAL_EVENT_NAMES,
@@ -247,13 +244,6 @@ export class CodexcliConfigToml extends ToolFile {
 }
 
 export class CodexcliHooks extends ToolHooks {
-  constructor(params: ToolHooksParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolHooksSettablePaths {
     return { relativeDirPath: CODEXCLI_DIR, relativeFilePath: CODEXCLI_HOOKS_FILE_NAME };
   }
@@ -262,23 +252,6 @@ export class CodexcliHooks extends ToolHooks {
   // and permissions features share. Declared here because it is not a settable path.
   static getExtraSharedWritePaths(): SharedWritePath[] {
     return [{ relativeDirPath: CODEXCLI_DIR, relativeFilePath: CODEXCLI_MCP_FILE_NAME }];
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<CodexcliHooks> {
-    const paths = CodexcliHooks.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new CodexcliHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -306,11 +279,7 @@ export class CodexcliHooks extends ToolHooks {
       logger,
     });
     const previouslyOwned = preserveUnowned
-      ? parseHooksOwnershipLock(
-          await readFileContentOrNull(
-            join(outputRoot, paths.relativeDirPath, HOOKS_OWNERSHIP_LOCK_FILE_NAME),
-          ),
-        )
+      ? await readPreviouslyOwnedHooks({ outputRoot, relativeDirPath: paths.relativeDirPath })
       : undefined;
     const merged = mergeGeneratedHookLists({
       existingContent,
@@ -333,17 +302,10 @@ export class CodexcliHooks extends ToolHooks {
   }
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
-    let parsed: { hooks?: unknown };
-    try {
-      parsed = JSON.parse(this.getFileContent());
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Codex CLI hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const parsed: { hooks?: unknown } = this.parseFileContentOrThrow({
+      displayName: "Codex CLI",
+      parse: (fileContent) => JSON.parse(fileContent),
+    });
     const hooks = toolHooksToCanonical({
       hooks: parsed.hooks,
       converterConfig: CODEXCLI_CONVERTER_CONFIG,
@@ -358,40 +320,22 @@ export class CodexcliHooks extends ToolHooks {
     });
   }
 
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): CodexcliHooks {
-    return new CodexcliHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
-    });
-  }
-
   static override supportsPreserveUnowned(): boolean {
     return true;
   }
 
-  static override async getAuxiliaryFiles({
-    outputRoot = process.cwd(),
-    toolHooks,
-  }: {
-    outputRoot?: string;
-    global?: boolean;
-    toolHooks?: ToolHooks;
-    logger?: Logger;
-  } = {}): Promise<ToolFile[]> {
+  static override async getAuxiliaryFiles(
+    params: {
+      outputRoot?: string;
+      global?: boolean;
+      toolHooks?: ToolHooks;
+      logger?: Logger;
+    } = {},
+  ): Promise<ToolFile[]> {
+    const { outputRoot = process.cwd() } = params;
     return [
       await CodexcliConfigToml.fromOutputRoot({ outputRoot }),
-      ...(toolHooks instanceof CodexcliHooks ? toolHooks.getOwnershipLockFiles() : []),
+      ...(await super.getAuxiliaryFiles(params)),
     ];
   }
 }

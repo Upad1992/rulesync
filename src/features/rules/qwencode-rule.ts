@@ -11,12 +11,12 @@ import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.
 import { RulesyncRule } from "./rulesync-rule.js";
 import {
   ToolRule,
+  ToolRuleBuildLocalRootFileParams,
   ToolRuleForDeletionParams,
   ToolRuleFromFileParams,
   ToolRuleFromRulesyncRuleParams,
   ToolRuleParams,
   ToolRuleSettablePaths,
-  buildToolPath,
 } from "./tool-rule.js";
 
 /**
@@ -104,6 +104,31 @@ function normalizePaths(paths: string[] | string | undefined): string[] {
  * non-root surface; each rule is emitted to exactly one location.
  */
 export class QwencodeRule extends ToolRule {
+  /**
+   * Build this tool's separate personal local-root file (`localRootMode:
+   * "separate-local-file"`), for generation and import. See
+   * {@link ToolRuleBuildLocalRootFileParams}.
+   */
+  static buildLocalRootFile({
+    outputRoot,
+    fileName,
+    body,
+    relativeDirPath,
+    localRoot,
+  }: ToolRuleBuildLocalRootFileParams): ToolRule {
+    // Qwen Code reads the personal local file from its tool directory
+    // (`.qwen/QWEN.local.md`), not the project root (project scope only).
+    return new QwencodeRule({
+      outputRoot,
+      relativeDirPath: relativeDirPath ?? QWENCODE_DIR,
+      relativeFilePath: fileName,
+      fileContent: body,
+      validate: true,
+      root: true,
+      localRoot,
+    });
+  }
+
   private readonly frontmatter: QwencodeRuleFrontmatter | undefined;
   private readonly body: string | undefined;
 
@@ -157,7 +182,6 @@ export class QwencodeRule extends ToolRule {
   static getSettablePaths(
     _options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): QwencodeRuleSettablePaths {
     // Global scope: the root memory file lives under `~/.qwen/QWEN.md`, and
@@ -165,11 +189,11 @@ export class QwencodeRule extends ToolRule {
     if (_options.global) {
       return {
         root: {
-          relativeDirPath: buildToolPath(QWENCODE_DIR, ".", _options.excludeToolDir),
+          relativeDirPath: join(QWENCODE_DIR, "."),
           relativeFilePath: QWENCODE_RULE_FILE_NAME,
         },
         nonRoot: {
-          relativeDirPath: buildToolPath(QWENCODE_DIR, "rules", _options.excludeToolDir),
+          relativeDirPath: join(QWENCODE_DIR, "rules"),
         },
       };
     }
@@ -179,7 +203,7 @@ export class QwencodeRule extends ToolRule {
         relativeFilePath: QWENCODE_RULE_FILE_NAME,
       },
       nonRoot: {
-        relativeDirPath: buildToolPath(QWENCODE_DIR, "rules", _options.excludeToolDir),
+        relativeDirPath: join(QWENCODE_DIR, "rules"),
       },
     };
   }
@@ -344,12 +368,7 @@ export class QwencodeRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "qwencode",
-    });
-  }
+  protected static override readonly toolTarget = "qwencode";
 
   /**
    * The personal local context file lives under `.qwen/`, not at the project

@@ -7,10 +7,15 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import type { Logger } from "../../utils/logger.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -167,15 +172,15 @@ export class ClaudecodeSubagent extends ToolSubagent {
     };
 
     // Validate with ClaudecodeSubagentFrontmatterSchema (validates model if present)
-    const result = ClaudecodeSubagentFrontmatterSchema.safeParse(rawClaudecodeFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid claudecode subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
+    const parsedFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: ClaudecodeSubagentFrontmatterSchema,
+      frontmatter: rawClaudecodeFrontmatter,
+      toolTarget: "claudecode",
+      rulesyncSubagent,
+    });
 
     const claudecodeFrontmatter = this.sanitizeFrontmatter({
-      frontmatter: result.data,
+      frontmatter: parsedFrontmatter,
       relativeFilePath: rulesyncSubagent.getRelativeFilePath(),
       logger,
     });
@@ -203,17 +208,12 @@ export class ClaudecodeSubagent extends ToolSubagent {
       return { success: true, error: null };
     }
 
-    const result = ClaudecodeSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: ClaudecodeSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

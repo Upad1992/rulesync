@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -155,7 +155,6 @@ describe("ReasonixCommand", () => {
           description: "Sync test command",
         },
         body: "Sync command body",
-        fileContent: "",
       });
 
       const reasonixCommand = ReasonixCommand.fromRulesyncCommand({
@@ -185,7 +184,6 @@ describe("ReasonixCommand", () => {
           },
         },
         body: "Test body",
-        fileContent: "",
       });
 
       const reasonixCommand = ReasonixCommand.fromRulesyncCommand({
@@ -208,7 +206,6 @@ describe("ReasonixCommand", () => {
           description: "Global test command",
         },
         body: "Global command body",
-        fileContent: "",
       });
 
       const reasonixCommand = ReasonixCommand.fromRulesyncCommand({
@@ -342,7 +339,6 @@ Commit command body`;
         relativeFilePath: "test.md",
         frontmatter: { targets: ["*"], description: "Test" },
         body: "Body",
-        fileContent: "",
       });
 
       expect(ReasonixCommand.isTargetedByRulesyncCommand(rulesyncCommand)).toBe(true);
@@ -354,7 +350,6 @@ Commit command body`;
         relativeFilePath: "test.md",
         frontmatter: { targets: ["reasonix"], description: "Test" },
         body: "Body",
-        fileContent: "",
       });
 
       expect(ReasonixCommand.isTargetedByRulesyncCommand(rulesyncCommand)).toBe(true);
@@ -366,7 +361,6 @@ Commit command body`;
         relativeFilePath: "test.md",
         frontmatter: { targets: ["cursor"], description: "Test" },
         body: "Body",
-        fileContent: "",
       });
 
       expect(ReasonixCommand.isTargetedByRulesyncCommand(rulesyncCommand)).toBe(false);

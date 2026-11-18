@@ -1,7 +1,7 @@
 import { chmod, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_CURATED_SKILLS_RELATIVE_DIR_PATH,
@@ -21,13 +21,13 @@ import {
 import { AgentsSkillsSkill } from "./agentsskills-skill.js";
 import { ClaudecodeSkill } from "./claudecode-skill.js";
 import { JunieSkill } from "./junie-skill.js";
+import { QwencodeSkill } from "./qwencode-skill.js";
 import { RovodevSkill } from "./rovodev-skill.js";
 import { RulesyncSkill } from "./rulesync-skill.js";
 import {
   SkillsProcessor,
   SkillsProcessorToolTarget,
   SkillsProcessorToolTargetSchema,
-  skillsProcessorToolTargetsGlobal,
 } from "./skills-processor.js";
 import { TaktSkill } from "./takt-skill.js";
 import { WarpSkill } from "./warp-skill.js";
@@ -127,8 +127,202 @@ describe("SkillsProcessor", () => {
     });
   });
 
+  describe("Amp global skill discovery", () => {
+    it("skips malformed Amp-only global skills and imports the valid skills", async () => {
+      const home = await setupTestDirectory({ home: true });
+      try {
+        const base = join(".config", "amp", "skills");
+        await writeSkill({ testDir: home.testDir, base, dirName: "valid", body: "Valid skill" });
+        const badDir = join(home.testDir, base, "bad");
+        await ensureDir(badDir);
+        await writeFileContent(
+          join(badDir, "SKILL.md"),
+          "---\nname: bad\n---\nMissing description",
+        );
+        const logger = createMockLogger();
+        const processor = new SkillsProcessor({
+          logger,
+          outputRoot: home.testDir,
+          toolTarget: "amp",
+          global: true,
+        });
+
+        const skills = await processor.loadToolDirs();
+        expect(skills.map((skill) => skill.getDirName())).toEqual(["valid"]);
+        // Match the path by its segments, not `join(base, "bad")`: the quoted
+        // path may carry escaped or POSIX separators depending on the platform.
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringMatching(/^Skipping ".*amp[\\/]+skills[\\/]+bad": /),
+        );
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Invalid frontmatter"));
+        expect(await processor.loadToolDirsToDelete()).toEqual([]);
+      } finally {
+        await home.cleanup();
+      }
+    });
+
+    it("imports the Amp-only root after the shared roots without managing it for deletion", async () => {
+      const home = await setupTestDirectory({ home: true });
+      try {
+        const roots = [
+          join(".config", "agents", "skills"),
+          join(".agents", "skills"),
+          join(".config", "amp", "skills"),
+        ];
+        for (const [index, base] of roots.entries()) {
+          await writeSkill({ testDir: home.testDir, base, dirName: `skill-${index}`, body: base });
+          await writeSkill({ testDir: home.testDir, base, dirName: "shared", body: base });
+        }
+        const processor = new SkillsProcessor({
+          logger: createMockLogger(),
+          outputRoot: home.testDir,
+          toolTarget: "amp",
+          global: true,
+        });
+
+        const skills = await processor.loadToolDirs();
+        expect(skills.map((skill) => skill.getDirName())).toEqual([
+          "shared",
+          "skill-0",
+          "skill-1",
+          "skill-2",
+        ]);
+        expect(skills.find((skill) => skill.getDirName() === "shared")?.getRelativeDirPath()).toBe(
+          roots[0],
+        );
+        expect(skills.find((skill) => skill.getDirName() === "skill-2")?.getMainFile()?.body).toBe(
+          roots[2],
+        );
+        const deletionCandidates = await processor.loadToolDirsToDelete();
+        expect(deletionCandidates).toHaveLength(2);
+        expect(deletionCandidates.every((skill) => skill.getRelativeDirPath() === roots[0])).toBe(
+          true,
+        );
+      } finally {
+        await home.cleanup();
+      }
+    });
+
+    it("imports Amp-only skills when the shared global roots are absent", async () => {
+      const home = await setupTestDirectory({ home: true });
+      try {
+        await writeSkill({
+          testDir: home.testDir,
+          base: join(".config", "amp", "skills"),
+          dirName: "native-only",
+          body: "Native skill",
+        });
+        const processor = new SkillsProcessor({
+          logger: createMockLogger(),
+          outputRoot: home.testDir,
+          toolTarget: "amp",
+          global: true,
+        });
+        const skills = await processor.loadToolDirs();
+        expect(skills.map((skill) => skill.getDirName())).toEqual(["native-only"]);
+        expect(skills[0]?.getMainFile()?.body).toBe("Native skill");
+        expect(await processor.loadToolDirsToDelete()).toEqual([]);
+      } finally {
+        await home.cleanup();
+      }
+    });
+
+    it("does not scan the Amp-only global root in project mode", async () => {
+      await writeSkill({
+        testDir,
+        base: join(".config", "amp", "skills"),
+        dirName: "global-only",
+        body: "Global",
+      });
+      const processor = new SkillsProcessor({
+        logger: createMockLogger(),
+        outputRoot: testDir,
+        toolTarget: "amp",
+      });
+      expect(await processor.loadToolDirs()).toEqual([]);
+    });
+  });
+
   describe("convertRulesyncDirsToToolDirs", () => {
     let processor: SkillsProcessor;
+
+    describe("Amp amp.skills.disableGlobalAgentsSkills warning", () => {
+      const makeSkill = () =>
+        new RulesyncSkill({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+          dirName: "my-skill",
+          frontmatter: { name: "my-skill", description: "Does a thing" },
+          body: "body",
+          validate: false,
+        });
+
+      const run = async ({
+        global = true,
+        settings,
+        skills = [makeSkill()],
+      }: {
+        global?: boolean;
+        settings?: { fileName: string; content: string };
+        skills?: RulesyncSkill[];
+      }) => {
+        if (settings) {
+          await writeFileContent(
+            join(testDir, ".config", "amp", settings.fileName),
+            settings.content,
+          );
+        }
+        const logger = createMockLogger();
+        const ampProcessor = new SkillsProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "amp",
+          global,
+        });
+        await ampProcessor.convertRulesyncDirsToToolDirs(skills);
+        return logger;
+      };
+
+      it.each(["settings.json", "settings.jsonc"])(
+        "warns when the setting is true in %s",
+        async (fileName) => {
+          const logger = await run({
+            settings: {
+              fileName,
+              content: '{\n  // c\n  "amp.skills.disableGlobalAgentsSkills": true,\n}',
+            },
+          });
+          expect(logger.warn).toHaveBeenCalledTimes(1);
+          expect(logger.warn.mock.calls[0]?.[0]).toContain(
+            "'amp.skills.disableGlobalAgentsSkills' is true",
+          );
+          expect(logger.warn.mock.calls[0]?.[0]).toContain(fileName);
+        },
+      );
+
+      it.each([
+        ["false", '{ "amp.skills.disableGlobalAgentsSkills": false }'],
+        ["absent", '{ "amp.tools.disable": ["Bash"] }'],
+        ["malformed", "{ not json"],
+      ])("does not warn when the setting is %s", async (_label, content) => {
+        const logger = await run({ settings: { fileName: "settings.json", content } });
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it("does not warn when there is no settings file", async () => {
+        const logger = await run({});
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it("does not warn in project mode or when no skill is generated", async () => {
+        const settings = {
+          fileName: "settings.json",
+          content: '{ "amp.skills.disableGlobalAgentsSkills": true }',
+        };
+        expect((await run({ global: false, settings })).warn).not.toHaveBeenCalled();
+        expect((await run({ settings, skills: [] })).warn).not.toHaveBeenCalled();
+      });
+    });
 
     beforeEach(() => {
       processor = new SkillsProcessor({
@@ -1086,6 +1280,47 @@ Skill body`,
         ]),
       );
       expect(byName.get("dup-skill")).toEqual([join(".junie", "skills"), "from-junie"]);
+      expect(byName.get("shared-only")).toEqual([join(".agents", "skills"), "from-agents"]);
+    });
+
+    it("should prefer .qwen/skills over the import-only .agents/skills for the same skill name", async () => {
+      // qwencode declares `.agents/skills` under `importOnlySkillRoots`. Qwen
+      // Code documents that the `.qwen/skills/` copy wins a name clash, and the
+      // shared tree only fills in names the Qwen-specific root does not cover.
+      const processor = new SkillsProcessor({
+        logger: createMockLogger(),
+        outputRoot: testDir,
+        toolTarget: "qwencode",
+      });
+      await writeSkill({
+        testDir,
+        base: join(".qwen", "skills"),
+        dirName: "dup-skill",
+        body: "from-qwen",
+      });
+      await writeSkill({
+        testDir,
+        base: join(".agents", "skills"),
+        dirName: "dup-skill",
+        body: "from-agents",
+      });
+      await writeSkill({
+        testDir,
+        base: join(".agents", "skills"),
+        dirName: "shared-only",
+        body: "from-agents",
+      });
+
+      const toolDirs = await processor.loadToolDirs();
+
+      expect(toolDirs).toHaveLength(2);
+      const byName = new Map(
+        toolDirs.map((toolDir) => [
+          toolDir.getDirName(),
+          [(toolDir as QwencodeSkill).getRelativeDirPath(), (toolDir as QwencodeSkill).getBody()],
+        ]),
+      );
+      expect(byName.get("dup-skill")).toEqual([join(".qwen", "skills"), "from-qwen"]);
       expect(byName.get("shared-only")).toEqual([join(".agents", "skills"), "from-agents"]);
     });
 
@@ -2313,6 +2548,30 @@ Test skill content`;
     });
 
     it.skipIf(process.platform === "win32")(
+      "should skip a project skills root reached through a linked parent directory",
+      async () => {
+        // A committed `.claude -> other` would otherwise let this target's sweep
+        // treat the skills under `other/skills` as its own orphans.
+        const logger = createMockLogger();
+        const processor = new SkillsProcessor({
+          logger,
+          outputRoot: testDir,
+          toolTarget: "claudecode",
+        });
+        await writeFileContent(
+          join(testDir, "other", "skills", "mine", "SKILL.md"),
+          "---\nname: mine\ndescription: Test skill\n---\nContent",
+        );
+        await symlink(join(testDir, "other"), join(testDir, ".claude"));
+
+        expect(await processor.loadToolDirsToDelete()).toEqual([]);
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining("it is reached through a symbolic link"),
+        );
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
       "should warn and skip a skills root that is a symbolic link, even one inside the output root",
       async () => {
         // A dotfiles checkout linked from inside the home directory. Sweeping
@@ -2340,9 +2599,10 @@ Test skill content`;
       },
     );
 
-    it("should not sweep a committed project skills root (gitlabduo)", async () => {
-      // GitLab Duo reads project skills from the repository-root `skills/`,
-      // which routinely holds hand-authored skills rulesync never generated.
+    it("should sweep gitlabduo's .agents/skills but never its import-only skills/ root", async () => {
+      // GitLab Duo also reads the repository-root `skills/`, which routinely
+      // holds hand-authored skills rulesync never generated, so only the
+      // `.agents/skills/` root rulesync writes is swept.
       const processor = new SkillsProcessor({
         logger: createMockLogger(),
         outputRoot: testDir,
@@ -2352,8 +2612,16 @@ Test skill content`;
         join(testDir, "skills", "hand-authored", "SKILL.md"),
         "---\nname: hand-authored\ndescription: Test skill\n---\nContent",
       );
+      await writeFileContent(
+        join(testDir, ".agents", "skills", "orphan", "SKILL.md"),
+        "---\nname: orphan\ndescription: Test skill\n---\nContent",
+      );
 
-      expect(await processor.loadToolDirsToDelete()).toEqual([]);
+      const dirsToDelete = await processor.loadToolDirsToDelete();
+
+      expect(dirsToDelete.map((dir) => dir.getRelativePathFromCwd())).toEqual([
+        ".agents/skills/orphan",
+      ]);
     });
 
     it("should not sweep a cursor category folder without SKILL.md", async () => {
@@ -2714,6 +2982,27 @@ Content that would fail parsing`;
       expect(dirsToDelete.map((d) => d.getRelativeDirPath())).toEqual([join(".warp", "skills")]);
       expect(dirsToDelete.map((d) => d.getDirName())).toEqual(["own-skill"]);
     });
+    it("should never list the import-only .agents/skills root for qwencode deletion", async () => {
+      // Like warp, qwencode reads the shared `.agents/skills/` tree (and
+      // `~/.agents/skills/` in global mode) but `--delete` must only ever prune
+      // `.qwen/skills/`.
+      const processor = new SkillsProcessor({
+        logger: createMockLogger(),
+        outputRoot: testDir,
+        toolTarget: "qwencode",
+      });
+      const qwenDir = join(testDir, ".qwen", "skills", "own-skill");
+      const sharedDir = join(testDir, ".agents", "skills", "foreign-skill");
+      await ensureDir(qwenDir);
+      await ensureDir(sharedDir);
+      await writeFileContent(join(qwenDir, "SKILL.md"), "x");
+      await writeFileContent(join(sharedDir, "SKILL.md"), "y");
+
+      const dirsToDelete = await processor.loadToolDirsToDelete();
+
+      expect(dirsToDelete.map((d) => d.getRelativeDirPath())).toEqual([join(".qwen", "skills")]);
+      expect(dirsToDelete.map((d) => d.getDirName())).toEqual(["own-skill"]);
+    });
   });
 
   describe("getToolTargets", () => {
@@ -2723,6 +3012,7 @@ Content that would fail parsing`;
         new Set([
           "agentsskills",
           "aiassistant",
+          "androidstudio",
           "amp",
           "antigravity-cli",
           "antigravity-ide",
@@ -2747,6 +3037,7 @@ Content that would fail parsing`;
           "cursor",
           "deepagents",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -2762,6 +3053,7 @@ Content that would fail parsing`;
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "pool",
           "qoder",
@@ -2777,6 +3069,7 @@ Content that would fail parsing`;
           "vibe",
           "vibe-plugin",
           "warp",
+          "xum",
           "devin",
           "devin-plugin",
           "zed",
@@ -2794,6 +3087,7 @@ Content that would fail parsing`;
           "agentsmd",
           "agentsskills",
           "aiassistant",
+          "androidstudio",
           "amp",
           "antigravity-cli",
           "antigravity-ide",
@@ -2818,6 +3112,7 @@ Content that would fail parsing`;
           "cursor",
           "deepagents",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -2833,6 +3128,7 @@ Content that would fail parsing`;
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "pool",
           "qoder",
@@ -2848,6 +3144,7 @@ Content that would fail parsing`;
           "vibe",
           "vibe-plugin",
           "warp",
+          "xum",
           "devin",
           "devin-plugin",
           "zed",
@@ -2864,6 +3161,7 @@ Content that would fail parsing`;
         new Set([
           "agentsskills",
           "aiassistant",
+          "androidstudio",
           "amp",
           "antigravity-cli",
           "antigravity-ide",
@@ -2888,6 +3186,7 @@ Content that would fail parsing`;
           "cursor",
           "deepagents",
           "factorydroid",
+          "firebender",
           "goose",
           "gitlabduo",
           "grokcli",
@@ -2903,6 +3202,7 @@ Content that would fail parsing`;
           "mimocode",
           "omp",
           "opencode",
+          "opencodev1",
           "pi",
           "pool",
           "qoder",
@@ -2918,6 +3218,7 @@ Content that would fail parsing`;
           "vibe",
           "vibe-plugin",
           "warp",
+          "xum",
           "devin",
           "devin-plugin",
           "zed",
@@ -2940,74 +3241,12 @@ Content that would fail parsing`;
     });
   });
 
-  describe("getToolTargetsGlobal", () => {
-    it("should return global targets in global mode", () => {
-      const targets = SkillsProcessor.getToolTargetsGlobal();
-      expect(targets).toEqual([
-        "agentsskills",
-        "amp",
-        "antigravity-cli",
-        "antigravity-ide",
-        "augmentcode",
-        "bob",
-        "claudecode",
-        "claudecode-legacy",
-        "cline",
-        "codearts-cli",
-        "codebuddy",
-        "codewhale",
-        "codexcli",
-        "commandcode",
-        "continue",
-        "copilot",
-        "copilotcli",
-        "cortexcode",
-        "crush",
-        "cursor",
-        "deepagents",
-        "factorydroid",
-        "goose",
-        "hermesagent",
-        "gitlabduo",
-        "grokcli",
-        "junie",
-        "kilo",
-        "lettacode",
-        "kimi-code",
-        "kiro-cli",
-        "kiro-ide",
-        "mimocode",
-        "musecode",
-        "omp",
-        "opencode",
-        "pi",
-        "pool",
-        "qoder",
-        "qwencode",
-        "reasonix",
-        "replit",
-        "roo",
-        "zoocode",
-        "rovodev",
-        "tabnine",
-        "takt",
-        "trae",
-        "vibe",
-        "warp",
-        "devin",
-        "zcode",
-        "zed",
-        "dsh",
-      ]);
-      expect(targets).toEqual(skillsProcessorToolTargetsGlobal);
-    });
-  });
-
   describe("getToolTargets with global: true", () => {
     it("should return global targets when global option is true", () => {
       const targets = SkillsProcessor.getToolTargets({ global: true });
       expect(targets).toEqual([
         "agentsskills",
+        "androidstudio",
         "amp",
         "antigravity-cli",
         "antigravity-ide",
@@ -3029,6 +3268,7 @@ Content that would fail parsing`;
         "cursor",
         "deepagents",
         "factorydroid",
+        "firebender",
         "goose",
         "hermesagent",
         "gitlabduo",
@@ -3043,6 +3283,7 @@ Content that would fail parsing`;
         "musecode",
         "omp",
         "opencode",
+        "opencodev1",
         "pi",
         "pool",
         "qoder",
@@ -3057,12 +3298,12 @@ Content that would fail parsing`;
         "trae",
         "vibe",
         "warp",
+        "xum",
         "devin",
         "zcode",
         "zed",
         "dsh",
       ]);
-      expect(targets).toEqual(skillsProcessorToolTargetsGlobal);
     });
 
     it("should be callable without instance", () => {

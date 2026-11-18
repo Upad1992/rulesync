@@ -14,13 +14,24 @@ import type { ToolSubagentSettablePaths } from "./tool-subagent.js";
  */
 const PLUGIN_FORBIDDEN_FIELDS = ["hooks", "mcpServers", "permissionMode"] as const;
 
+/**
+ * Claude Code ignores these for plugin-shipped agents without any security
+ * rationale. They are dropped with a separate warning so the output does not
+ * suggest a behavior the plugin agent never gets.
+ *
+ * @see https://code.claude.com/docs/en/sub-agents#supported-frontmatter-fields
+ */
+const PLUGIN_IGNORED_FIELDS = ["initialPrompt"] as const;
+
 /** The only `isolation` value plugin agents accept. */
 const PLUGIN_ISOLATION_VALUE = "worktree";
 
 export class ClaudecodePluginSubagent extends ClaudecodeSubagent {
   static override isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {
-    const targets = rulesyncSubagent.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("claudecode-plugin");
+    return this.isTargetedByRulesyncSubagentDefault({
+      rulesyncSubagent,
+      toolTarget: "claudecode-plugin",
+    });
   }
 
   static override getSettablePaths(): ToolSubagentSettablePaths {
@@ -48,6 +59,17 @@ export class ClaudecodePluginSubagent extends ClaudecodeSubagent {
       logger?.warn(
         `Dropping ${dropped.join(", ")} from claudecode-plugin subagent ${relativeFilePath}: ` +
           `Claude Code does not support these fields for plugin-shipped agents.`,
+      );
+    }
+
+    const ignored = PLUGIN_IGNORED_FIELDS.filter((field) => sanitized[field] !== undefined);
+    for (const field of PLUGIN_IGNORED_FIELDS) {
+      delete sanitized[field];
+    }
+    if (ignored.length > 0) {
+      logger?.warn(
+        `Dropping ${ignored.join(", ")} from claudecode-plugin subagent ${relativeFilePath}: ` +
+          `Claude Code ignores these fields for plugin-shipped agents.`,
       );
     }
 

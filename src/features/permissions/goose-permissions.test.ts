@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { dump, load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -161,6 +161,60 @@ describe("GoosePermissions", () => {
   });
 
   describe("fromRulesyncPermissions", () => {
+    it("raises a category catch-all allow to a stricter all-tools catch-all", async () => {
+      const perms = await GoosePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "*": "ask" },
+          edit: { "*": "allow" },
+        }),
+        global: true,
+      });
+
+      const user = userPermissionOf(perms.getFileContent());
+      expect(user.always_allow).toEqual([]);
+      expect(user.ask_before).toContain("edit");
+    });
+
+    it("lists a catch-all allow under ask_before when the all-tools category restricts a pattern", async () => {
+      const perms = await GoosePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "secrets/**": "deny" },
+          read: { "*": "allow" },
+        }),
+        global: true,
+      });
+
+      const user = userPermissionOf(perms.getFileContent());
+      expect(user.always_allow).not.toContain("read");
+      expect(user.ask_before).toContain("read");
+    });
+
+    it("lists a catch-all allow under ask_before when a narrower deny or ask is skipped", async () => {
+      const mockLogger = createMockLogger();
+      const perms = await GoosePermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          bash: { "*": "allow", "rm -rf *": "deny" },
+          edit: { "*": "allow", "src/**": "ask" },
+          webfetch: { "*": "allow", "evil.example": "deny" },
+          read: { "*": "allow", "docs/**": "allow" },
+        }),
+        global: true,
+        logger: mockLogger,
+      });
+
+      const user = userPermissionOf(perms.getFileContent());
+      // A narrower `allow` restricts nothing, so `read` stays auto-approved.
+      expect(user.always_allow).toEqual(["read"]);
+      expect(user.ask_before).toEqual(["edit", "shell", "webfetch"]);
+      expect(user.never_allow).toEqual([]);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("will not be auto-approved"),
+      );
+    });
+
     it("maps allow/ask/deny catch-alls onto always_allow/ask_before/never_allow", async () => {
       const perms = await GoosePermissions.fromRulesyncPermissions({
         outputRoot: testDir,
@@ -379,14 +433,31 @@ describe("GoosePermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("is not deletable", () => {
-      const perms = GoosePermissions.forDeletion({
+  describe("tool names that match Object.prototype members", () => {
+    it("generates a category named like a prototype member as its own tool name", async () => {
+      const perms = await GoosePermissions.fromRulesyncPermissions({
         outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({ toString: { "*": "ask" } }),
+        global: true,
+      });
+
+      expect(userPermissionOf(perms.getFileContent()).ask_before).toEqual(["toString"]);
+    });
+
+    it("imports a native tool named like a prototype member as its own category", () => {
+      const perms = new GoosePermissions({
         relativeDirPath: join(".config", "goose"),
         relativeFilePath: "permission.yaml",
+        fileContent: dump({
+          user: { always_allow: [], ask_before: ["toString"], never_allow: [] },
+        }),
+        validate: false,
       });
-      expect(perms.isDeletable()).toBe(false);
+
+      expect(perms.toRulesyncPermissions().getJson().permission).toEqual({
+        toString: { "*": "ask" },
+      });
+      expect(Object.hasOwn(Object.prototype.toString, "*")).toBe(false);
     });
   });
 });

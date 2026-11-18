@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { CLAUDECODE_SETTINGS_SCHEMA_URL } from "../../constants/claudecode-paths.js";
 import { deriveSharedFileWriters } from "../../lib/shared-file-derive.js";
@@ -16,6 +16,7 @@ import {
   diffSharedConfigOwnedKeys,
   HERMES_CONFIG_SHARED_FILE_KEY,
   isReadDenyEntry,
+  Json5EditRefusedError,
   MAX_SHARED_CONFIG_DEPTH,
   MAX_SHARED_CONFIG_STRING_CHARS,
   MAX_SHARED_CONFIG_VALUES,
@@ -27,6 +28,7 @@ import {
   SHARED_CONFIG_OWNERSHIP,
   stringifySharedConfig,
   TAKT_CONFIG_SHARED_FILE_KEY,
+  VIBE_CONFIG_SHARED_FILE_KEY,
 } from "./shared-config-gateway.js";
 
 /**
@@ -242,6 +244,84 @@ plugins:
     });
 
     expect((config as { released: unknown }).released).toBeInstanceOf(Date);
+  });
+});
+
+describe("json5 format", () => {
+  it("parses JSON5 syntax jsonc-parser rejects and drops pollution keys", () => {
+    expect(
+      parseSharedConfig({
+        format: "json5",
+        fileContent:
+          "{ // c\n  mcp: { servers: { a: { command: 'x' } } }, __proto__: { p: 1 }, n: 0x10, }",
+      }),
+    ).toEqual({ mcp: { servers: { a: { command: "x" } } }, n: 16 });
+    expect(parseSharedConfig({ format: "json5", fileContent: "" })).toEqual({});
+  });
+
+  it("wraps a JSON5 syntax error with the file path", () => {
+    expect(() =>
+      parseSharedConfig({ format: "json5", fileContent: "{ a: }", filePath: "openclaw.json" }),
+    ).toThrow("Failed to parse shared config at openclaw.json: SyntaxError: JSON5: unexpected");
+  });
+
+  it("edits a JSONC-compatible file in place, keeping its comments", () => {
+    const existingContent = '{\n  // keep\n  "a": 1\n}\n';
+    const result = serializeSharedConfig({
+      format: "json5",
+      document: { a: 1, b: 2 },
+      existingContent,
+    });
+    expect(result).toContain("// keep");
+    expect(parseSharedConfig({ format: "json5", fileContent: result })).toEqual({ a: 1, b: 2 });
+  });
+
+  it.each([
+    ["unquoted keys", "{ // keep\n  a: 1 }"],
+    ["single quotes", "{ \"a\": 'x' }"],
+    ["Infinity", '{ "a": Infinity }'],
+    ["hex numbers", '{ "a": 0x10 }'],
+  ])("refuses to rewrite a file using %s whole, writing nothing", (_label, existingContent) => {
+    const logger = createMockLogger();
+    expect(() =>
+      serializeSharedConfig({
+        format: "json5",
+        document: { a: 1, b: 2 },
+        existingContent,
+        filePath: "openclaw.json",
+        logger,
+      }),
+    ).toThrow(Json5EditRefusedError);
+    expect(wholeRewriteWarnings(logger)).toEqual([]);
+  });
+
+  it("names the file, the reason and the way out in the refusal", () => {
+    expect(() =>
+      serializeSharedConfig({
+        format: "json5",
+        document: { a: 1 },
+        existingContent: "{ a: 1 }",
+        filePath: "openclaw.json",
+      }),
+    ).toThrow(
+      /Refusing to update .*openclaw\.json.*JSON5-only syntax.*Convert it to JSONC-compatible syntax/s,
+    );
+  });
+
+  it("refuses the other whole-rewrite fallbacks too, such as a duplicate key", () => {
+    expect(() =>
+      serializeSharedConfig({
+        format: "json5",
+        document: { a: 2 },
+        existingContent: '{ "a": 1, "a": 1 }',
+      }),
+    ).toThrow("states the key");
+  });
+
+  it("writes a new file as JSON", () => {
+    expect(
+      serializeSharedConfig({ format: "json5", document: { a: 1 }, existingContent: "" }),
+    ).toBe('{\n  "a": 1\n}');
   });
 });
 
@@ -1803,6 +1883,23 @@ describe("diffSharedConfigOwnedKeys", () => {
         fileKey: CODEXCLI_CONFIG_SHARED_FILE_KEY,
         existingContent: 'model = "gpt-5"\n\n[mcp_servers.foo]\ncommand = "foo"\n',
         newContent: 'model = "gpt-5"\n',
+      }),
+    ).toEqual([{ action: "delete", key: "mcp_servers" }]);
+  });
+
+  it("should report a retracted servers key in .vscode/mcp.json and mcp_servers in .vibe/config.toml as deletions", () => {
+    expect(
+      diffSharedConfigOwnedKeys({
+        fileKey: ".vscode/mcp.json",
+        existingContent: JSON.stringify({ inputs: [], servers: { foo: { command: "foo" } } }),
+        newContent: JSON.stringify({ inputs: [] }),
+      }),
+    ).toEqual([{ action: "delete", key: "servers" }]);
+    expect(
+      diffSharedConfigOwnedKeys({
+        fileKey: VIBE_CONFIG_SHARED_FILE_KEY,
+        existingContent: ['active_model = "a"', "mcp_servers = []", ""].join("\n"),
+        newContent: 'active_model = "a"\n',
       }),
     ).toEqual([{ action: "delete", key: "mcp_servers" }]);
   });

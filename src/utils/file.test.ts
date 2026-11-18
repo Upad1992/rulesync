@@ -1,43 +1,42 @@
 import { chmod, realpath, stat, symlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
-import {
-  RULESYNC_RELATIVE_DIR_PATH,
-  RULESYNC_RULES_RELATIVE_DIR_PATH,
-} from "../constants/rulesync-paths.js";
+import { RULESYNC_RELATIVE_DIR_PATH } from "../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../test-utils/test-directories.js";
 import {
   addTrailingNewline,
   applyFileMode,
   assertDirectoryIfExists,
+  assertLandingOutsideVcsMetadata,
+  assertNoSymlinkBelowRoot,
   assertTreeContainsNoSymlinks,
+  assertPathResolvesInsideRoot,
   assertWritablePathInsideRoot,
   checkPathTraversal,
-  createPathResolver,
   directoryExists,
   directoryExistsStrict,
   ensureDir,
   fileExists,
   fileExistsStrict,
   filterOutPathsInGitIgnoredDirectories,
-  findFiles,
   findFilesByGlobs,
-  findRuleFiles,
   getFileSizeAndExecutableBit,
   getHomeDirectory,
   isFileNotFoundError,
   isFileSystemError,
   isPresentButUnresolvable,
+  landingEntersVcsMetadata,
   listDirectoryEntryNames,
   listFileNames,
   listFilePathsRecursively,
   listSubdirectoryNames,
+  PathOutsideRootError,
   posixRelativePathEscapesRoot,
   readFileBufferOrNull,
+  readFileContentOrNull,
   readFileContent,
-  readJsonFile,
   relativeWriteLanding,
   removeDirectory,
   removeFile,
@@ -49,13 +48,14 @@ import {
   restoreMissingExecutableBit,
   runWithDirectoryRollback,
   sharedTrailingSegments,
+  SymlinkRefusedError,
   toKebabCaseFilename,
   toPosixPath,
   validateOutputRoot,
   writeFileBuffer,
   writeFileContent,
-  writeJsonFile,
 } from "./file.js";
+import { withWriteLandingCache } from "./write-landing-cache.js";
 
 describe("file utilities", () => {
   let testDir: string;
@@ -158,6 +158,189 @@ describe("file utilities", () => {
   });
 
   describe.skipIf(process.platform === "win32")("safe writable paths", () => {
+    describe("assertNoSymlinkBelowRoot", () => {
+      it("should accept a path that does not exist yet", async () => {
+        await expect(
+          assertNoSymlinkBelowRoot({
+            rootPath: testDir,
+            targetPath: join(testDir, "a", "b", "c.md"),
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should accept an existing regular file", async () => {
+        await writeFileContent(join(testDir, "a", "b.md"), "x");
+        await expect(
+          assertNoSymlinkBelowRoot({ rootPath: testDir, targetPath: join(testDir, "a", "b.md") }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should accept a root that is itself a symbolic link", async () => {
+        const realRoot = join(testDir, "real");
+        await ensureDir(realRoot);
+        await symlink(realRoot, join(testDir, "linked"));
+        await expect(
+          assertNoSymlinkBelowRoot({
+            rootPath: join(testDir, "linked"),
+            targetPath: join(testDir, "linked", "a", "b.md"),
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should refuse a target that is a symbolic link staying inside the root", async () => {
+        await writeFileContent(join(testDir, ".git", "config"), "[core]");
+        await ensureDir(join(testDir, "skills", "s"));
+        await symlink("../../.git/config", join(testDir, "skills", "s", "config"));
+        await expect(
+          assertNoSymlinkBelowRoot({
+            rootPath: testDir,
+            targetPath: join(testDir, "skills", "s", "config"),
+          }),
+        ).rejects.toThrow(SymlinkRefusedError);
+      });
+
+      it("should refuse a symlinked directory on the way to the target", async () => {
+        await ensureDir(join(testDir, ".git"));
+        await symlink(".git", join(testDir, "skills"));
+        await expect(
+          assertNoSymlinkBelowRoot({
+            rootPath: testDir,
+            targetPath: join(testDir, "skills", "s", "SKILL.md"),
+          }),
+        ).rejects.toThrow(/Refusing to follow a symbolic link/);
+      });
+
+      it("should refuse a dangling symbolic link", async () => {
+        await symlink("missing", join(testDir, "dangling"));
+        await expect(
+          assertNoSymlinkBelowRoot({ rootPath: testDir, targetPath: join(testDir, "dangling") }),
+        ).rejects.toThrow(PathOutsideRootError);
+      });
+
+      it("should refuse a target outside the root or the root itself", async () => {
+        await expect(
+          assertNoSymlinkBelowRoot({ rootPath: testDir, targetPath: join(testDir, "..", "x") }),
+        ).rejects.toThrow(PathOutsideRootError);
+        await expect(
+          assertNoSymlinkBelowRoot({ rootPath: testDir, targetPath: testDir }),
+        ).rejects.toThrow(PathOutsideRootError);
+      });
+    });
+
+    describe("assertPathResolvesInsideRoot", () => {
+      it("should accept a path that does not exist yet", async () => {
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: testDir,
+            targetPath: join(testDir, "a", "b", "c.md"),
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should accept any path under a root that does not exist yet", async () => {
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: join(testDir, "missing-root"),
+            targetPath: join(testDir, "missing-root", "a", "b.md"),
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should reject a root that is a dangling symbolic link", async () => {
+        const linkedRoot = join(testDir, "linked-root");
+        await symlink(join(testDir, "missing", "target"), linkedRoot);
+
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: linkedRoot,
+            targetPath: join(linkedRoot, "a.md"),
+          }),
+        ).rejects.toThrow("dangling symbolic link");
+      });
+
+      it("should accept a symbolic link that resolves inside the root", async () => {
+        const sharedDir = join(testDir, "shared");
+        await ensureDir(sharedDir);
+        await symlink(sharedDir, join(testDir, "linked"));
+
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: testDir,
+            targetPath: join(testDir, "linked", "nested", "file.md"),
+          }),
+        ).resolves.toBeUndefined();
+      });
+
+      it("should reject an ancestor symbolic link that resolves outside the root", async () => {
+        const rootDir = join(testDir, "project");
+        const outsideDir = join(testDir, "outside");
+        await ensureDir(rootDir);
+        await ensureDir(outsideDir);
+        await symlink(outsideDir, join(rootDir, "linked"));
+
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: rootDir,
+            targetPath: join(rootDir, "linked", "nested", "file.md"),
+          }),
+        ).rejects.toThrow("resolves outside");
+      });
+
+      it("should reject an existing file link that resolves outside the root", async () => {
+        const rootDir = join(testDir, "project");
+        const outsideFile = join(testDir, "outside.md");
+        await ensureDir(rootDir);
+        await writeFileContent(outsideFile, "secret");
+        await symlink(outsideFile, join(rootDir, "linked.md"));
+
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: rootDir,
+            targetPath: join(rootDir, "linked.md"),
+          }),
+        ).rejects.toThrow("resolves outside");
+      });
+
+      it("should reject a dangling symbolic link", async () => {
+        const rootDir = join(testDir, "project");
+        await ensureDir(rootDir);
+        await symlink(join(testDir, "missing", "dir"), join(rootDir, "dangling"));
+
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: rootDir,
+            targetPath: join(rootDir, "dangling", "file.md"),
+          }),
+        ).rejects.toThrow("dangling symbolic link");
+      });
+
+      it("should throw PathOutsideRootError only for a link that escapes the root", async () => {
+        const rootDir = join(testDir, "project");
+        const outsideDir = join(testDir, "outside");
+        await ensureDir(rootDir);
+        await ensureDir(outsideDir);
+        await symlink(outsideDir, join(rootDir, "linked"));
+        await symlink(join(testDir, "missing"), join(rootDir, "dangling"));
+        await symlink("loop", join(rootDir, "loop"));
+
+        await expect(
+          assertPathResolvesInsideRoot({ rootPath: rootDir, targetPath: join(rootDir, "linked") }),
+        ).rejects.toBeInstanceOf(PathOutsideRootError);
+        await expect(
+          assertPathResolvesInsideRoot({
+            rootPath: rootDir,
+            targetPath: join(rootDir, "dangling", "file.md"),
+          }),
+        ).rejects.toBeInstanceOf(PathOutsideRootError);
+        const loopError = await assertPathResolvesInsideRoot({
+          rootPath: rootDir,
+          targetPath: join(rootDir, "loop", "file.md"),
+        }).catch((error: unknown) => error);
+        expect(loopError).not.toBeInstanceOf(PathOutsideRootError);
+        expect(loopError).toMatchObject({ code: "ELOOP" });
+      });
+    });
+
     it("should reject a curated directory that is a symbolic link", async () => {
       const actualDir = join(testDir, "actual");
       const linkedDir = join(testDir, "linked");
@@ -367,90 +550,6 @@ describe("file utilities", () => {
     });
   });
 
-  describe("createPathResolver", () => {
-    it("should create a resolver function bound to outputRoot", () => {
-      const resolver = createPathResolver(testDir);
-      const resolved = resolver("subdir/file.txt");
-      expect(resolved).toBe(resolve(testDir, "subdir/file.txt"));
-    });
-
-    it("should work without outputRoot", () => {
-      const resolver = createPathResolver();
-      const path = "some/path";
-      expect(resolver(path)).toBe(path);
-    });
-  });
-
-  describe("JSON file operations", () => {
-    let testJsonPath: string;
-    const testData = { name: "test", value: 42, nested: { array: [1, 2, 3] } };
-
-    beforeEach(() => {
-      testJsonPath = join(testDir, "test.json");
-    });
-
-    describe("writeJsonFile", () => {
-      it("should write JSON file with default formatting", async () => {
-        await writeJsonFile(testJsonPath, testData);
-
-        const content = await readFileContent(testJsonPath);
-        expect(content).toContain('"name": "test"');
-        expect(JSON.parse(content)).toEqual(testData);
-      });
-
-      it("should write JSON file with custom indentation", async () => {
-        await writeJsonFile(testJsonPath, testData, 4);
-
-        const content = await readFileContent(testJsonPath);
-        expect(content).toContain('    "name": "test"');
-      });
-    });
-
-    describe("readJsonFile", () => {
-      beforeEach(async () => {
-        await writeJsonFile(testJsonPath, testData);
-      });
-
-      it("should read and parse JSON file correctly", async () => {
-        const result = await readJsonFile(testJsonPath);
-        expect(result).toEqual(testData);
-      });
-
-      it("should return typed result", async () => {
-        type TestType = {
-          name: string;
-          value: number;
-        };
-
-        const result = await readJsonFile<TestType>(testJsonPath);
-        expect(result.name).toBe("test");
-        expect(result.value).toBe(42);
-      });
-
-      it("should return default value when file doesn't exist", async () => {
-        const defaultValue = { default: true };
-        const result = await readJsonFile("nonexistent.json", defaultValue);
-        expect(result).toEqual(defaultValue);
-      });
-
-      it("should throw error when file doesn't exist and no default provided", async () => {
-        await expect(readJsonFile("nonexistent.json")).rejects.toThrow();
-      });
-
-      it("should throw error for invalid JSON", async () => {
-        await writeFileContent(testJsonPath, "invalid json content");
-        await expect(readJsonFile(testJsonPath)).rejects.toThrow();
-      });
-
-      it("should return default for invalid JSON when default provided", async () => {
-        await writeFileContent(testJsonPath, "invalid json content");
-        const defaultValue = { error: "fallback" };
-        const result = await readJsonFile(testJsonPath, defaultValue);
-        expect(result).toEqual(defaultValue);
-      });
-    });
-  });
-
   describe("directoryExists", () => {
     it("should return true for existing directory", async () => {
       expect(await directoryExists(testDir)).toBe(true);
@@ -506,6 +605,47 @@ describe("file utilities", () => {
 
         expect(result).not.toBeNull();
         expect(result?.equals(fileBuffer)).toBe(true);
+      });
+
+      it("should return null when an ancestor of the path is a file", async () => {
+        const filePath = join(testDir, "plain.txt");
+        await writeFileContent(filePath, "content");
+
+        expect(await readFileBufferOrNull(join(filePath, "child.bin"))).toBeNull();
+      });
+
+      it("should throw the read error when the path is a directory", async () => {
+        await ensureDir(join(testDir, "a-directory"));
+
+        await expect(readFileBufferOrNull(join(testDir, "a-directory"))).rejects.toThrow(/EISDIR/);
+      });
+    });
+
+    describe("readFileContentOrNull", () => {
+      it("should return null when the file does not exist", async () => {
+        expect(await readFileContentOrNull(join(testDir, "missing", "file.md"))).toBeNull();
+      });
+
+      it("should return the content of an existing file", async () => {
+        const filePath = join(testDir, "existing.md");
+        await writeFileContent(filePath, "# Title\n");
+
+        expect(await readFileContentOrNull(filePath)).toBe("# Title\n");
+      });
+
+      it("should return null when an ancestor of the path is a file", async () => {
+        const filePath = join(testDir, "plain.md");
+        await writeFileContent(filePath, "content");
+
+        expect(await readFileContentOrNull(join(filePath, "child.md"))).toBeNull();
+      });
+
+      it("should throw the read error when the path is a directory", async () => {
+        await ensureDir(join(testDir, "another-directory"));
+
+        await expect(readFileContentOrNull(join(testDir, "another-directory"))).rejects.toThrow(
+          /EISDIR/,
+        );
       });
     });
 
@@ -643,34 +783,6 @@ describe("file utilities", () => {
 
       it("should return empty array for non-existent directory", async () => {
         const files = await listDirectoryEntryNames(join(testDir, "nonexistent"));
-        expect(files).toEqual([]);
-      });
-    });
-
-    describe("findFiles", () => {
-      beforeEach(async () => {
-        await writeFileContent(join(testDir, "file1.md"), "content1");
-        await writeFileContent(join(testDir, "file2.txt"), "content2");
-        await writeFileContent(join(testDir, "file3.md"), "content3");
-      });
-
-      it("should find files with default extension (.md)", async () => {
-        const files = await findFiles(testDir);
-
-        expect(files).toHaveLength(2);
-        expect(files).toContain(join(testDir, "file1.md"));
-        expect(files).toContain(join(testDir, "file3.md"));
-      });
-
-      it("should find files with custom extension", async () => {
-        const files = await findFiles(testDir, ".txt");
-
-        expect(files).toHaveLength(1);
-        expect(files).toContain(join(testDir, "file2.txt"));
-      });
-
-      it("should return empty array for non-existent directory", async () => {
-        const files = await findFiles(join(testDir, "nonexistent"));
         expect(files).toEqual([]);
       });
     });
@@ -1336,6 +1448,75 @@ describe("file utilities", () => {
       });
     });
 
+    describe("withWriteLandingCache", () => {
+      it.skipIf(process.platform === "win32")(
+        "should follow a link planted where the scope only saw a missing entry",
+        async () => {
+          const root = join(testDir, "root");
+          const outside = join(testDir, "outside");
+          await ensureDir(root);
+          await ensureDir(outside);
+
+          await withWriteLandingCache(async () => {
+            const targetPath = join(root, "new", "file.md");
+            expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(false);
+
+            await symlink(outside, join(root, "new"));
+
+            expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(true);
+          });
+        },
+      );
+
+      it.skipIf(process.platform === "win32")(
+        "should follow a link on every walk, not only the first",
+        async () => {
+          const root = join(testDir, "root");
+          const outside = join(testDir, "outside");
+          await ensureDir(root);
+          await ensureDir(outside);
+          await symlink(outside, join(root, "link"));
+
+          await withWriteLandingCache(async () => {
+            const targetPath = join(root, "link", "file.md");
+            expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(true);
+            expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(true);
+          });
+        },
+      );
+
+      it.skipIf(process.platform === "win32")(
+        "should look every segment up again outside a scope",
+        async () => {
+          const root = join(testDir, "root");
+          const outside = join(testDir, "outside");
+          await ensureDir(join(root, "dir"));
+          await ensureDir(outside);
+          const targetPath = join(root, "dir", "file.md");
+          expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(false);
+
+          await removeDirectory(join(root, "dir"));
+          await symlink(outside, join(root, "dir"));
+
+          expect(await writablePathEscapesRoot({ rootPath: root, targetPath })).toBe(true);
+        },
+      );
+
+      it("should give the same landing as an unscoped walk", async () => {
+        const root = join(testDir, "root");
+        await ensureDir(join(root, "skills", "foo"));
+        const targetPath = join(root, "skills", "foo", "SKILL.md");
+
+        const unscoped = await relativeWriteLanding({ rootPath: root, targetPath });
+        const scoped = await withWriteLandingCache(async () => [
+          await relativeWriteLanding({ rootPath: root, targetPath }),
+          await relativeWriteLanding({ rootPath: root, targetPath }),
+        ]);
+
+        expect(scoped).toEqual([unscoped, unscoped]);
+      });
+    });
+
     describe("resolvedRelativePath", () => {
       it("should give the path from the root to a directory really under it", async () => {
         const root = join(testDir, "root");
@@ -1863,40 +2044,6 @@ describe("file utilities", () => {
     });
   });
 
-  describe("findRuleFiles", () => {
-    it("should only return files from the rules directory", async () => {
-      const aiRulesDir = join(testDir, RULESYNC_RELATIVE_DIR_PATH);
-      const rulesDir = join(testDir, RULESYNC_RULES_RELATIVE_DIR_PATH);
-
-      await writeFileContent(join(aiRulesDir, "common.md"), "legacy content");
-      await writeFileContent(join(rulesDir, "common.md"), "new content");
-      await writeFileContent(join(rulesDir, "new-only.md"), "new only");
-
-      const ruleFiles = await findRuleFiles(aiRulesDir);
-
-      expect(ruleFiles).toEqual([join(rulesDir, "common.md"), join(rulesDir, "new-only.md")]);
-    });
-
-    it("should handle missing directories gracefully", async () => {
-      const aiRulesDir = join(testDir, "nonexistent");
-      const ruleFiles = await findRuleFiles(aiRulesDir);
-      expect(ruleFiles).toEqual([]);
-    });
-
-    it("should return only new location files when legacy is empty", async () => {
-      const aiRulesDir = join(testDir, RULESYNC_RELATIVE_DIR_PATH);
-      const rulesDir = join(testDir, RULESYNC_RULES_RELATIVE_DIR_PATH);
-
-      await writeFileContent(join(rulesDir, "rule1.md"), "content1");
-      await writeFileContent(join(rulesDir, "rule2.md"), "content2");
-
-      const ruleFiles = await findRuleFiles(aiRulesDir);
-
-      expect(ruleFiles).toHaveLength(2);
-      expect(ruleFiles.every((f) => f.includes("/rules/"))).toBe(true);
-    });
-  });
-
   describe("file removal", () => {
     describe("removeFile", () => {
       it("should remove existing file", async () => {
@@ -2345,5 +2492,88 @@ describe("file utilities", () => {
         );
       },
     );
+  });
+});
+
+describe("landingEntersVcsMetadata", () => {
+  const root = resolve("/project");
+
+  it.each([".git", ".GIT", ".hg", ".svn", ".jj", ".git.", ".git ", ".git::$DATA", "GIT~1"])(
+    "reports a landing in %s that the spelling does not name",
+    (dir) => {
+      expect(
+        landingEntersVcsMetadata({
+          rootPath: root,
+          targetPath: join(root, "CLAUDE.md"),
+          relativeLanding: join(dir, "config"),
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("allows a path spelled into .git", () => {
+    expect(
+      landingEntersVcsMetadata({
+        rootPath: root,
+        targetPath: join(root, ".git", "info", "exclude"),
+        relativeLanding: join(".git", "info", "exclude"),
+      }),
+    ).toBe(false);
+  });
+
+  it("allows a landing elsewhere in the root", () => {
+    expect(
+      landingEntersVcsMetadata({
+        rootPath: root,
+        targetPath: join(root, "CLAUDE.md"),
+        relativeLanding: join("docs", ".gitkeep"),
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("assertLandingOutsideVcsMetadata", () => {
+  let testDir: string;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    ({ testDir, cleanup } = await setupTestDirectory());
+  });
+
+  afterEach(async () => {
+    await cleanup();
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a dangling link into .git/hooks", async () => {
+    await ensureDir(join(testDir, ".git", "hooks"));
+    await symlink(join(".git", "hooks", "pre-commit"), join(testDir, "AGENTS.md"));
+
+    await expect(
+      assertLandingOutsideVcsMetadata({
+        rootPath: testDir,
+        targetPath: join(testDir, "AGENTS.md"),
+      }),
+    ).rejects.toThrow(PathOutsideRootError);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link cycle", async () => {
+    await symlink("b", join(testDir, "a"));
+    await symlink("a", join(testDir, "b"));
+
+    await expect(
+      assertLandingOutsideVcsMetadata({ rootPath: testDir, targetPath: join(testDir, "a", "x") }),
+    ).rejects.toThrow("link cycle");
+  });
+
+  it.skipIf(process.platform === "win32")("allows a link that stays outside .git", async () => {
+    await ensureDir(join(testDir, "shared"));
+    await symlink("shared", join(testDir, "linked"));
+
+    await expect(
+      assertLandingOutsideVcsMetadata({
+        rootPath: testDir,
+        targetPath: join(testDir, "linked", "SKILL.md"),
+      }),
+    ).resolves.toBeUndefined();
   });
 });

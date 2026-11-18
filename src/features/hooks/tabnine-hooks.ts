@@ -6,14 +6,12 @@ import {
   TABNINE_AGENT_DIR_PATH,
   TABNINE_SETTINGS_FILE_NAME,
 } from "../../constants/tabnine-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import type { HooksConfig } from "../../types/hooks.js";
 import {
   CANONICAL_TO_TABNINE_EVENT_NAMES,
   TABNINE_HOOK_EVENTS,
   TABNINE_TO_CANONICAL_EVENT_NAMES,
 } from "../../types/hooks.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { compact } from "../../utils/object.js";
@@ -27,8 +25,6 @@ import type { RulesyncHooks } from "./rulesync-hooks.js";
 import { buildImportedHooksConfig, isSafeEnvEntry } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
@@ -278,13 +274,6 @@ function parseTabnineSettings(fileContent: string, filePath?: string): Record<st
  * @see https://docs.tabnine.com/main/getting-started/tabnine-cli/features/hooks/configuration
  */
 export class TabnineHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   override isDeletable(): boolean {
     // settings.json carries user-managed settings beyond hooks, so it must
     // never be removed wholesale; clearing hooks happens via an in-place merge.
@@ -298,23 +287,6 @@ export class TabnineHooks extends ToolHooks {
       relativeDirPath: TABNINE_AGENT_DIR_PATH,
       relativeFilePath: TABNINE_SETTINGS_FILE_NAME,
     };
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<TabnineHooks> {
-    const paths = TabnineHooks.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new TabnineHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -352,15 +324,10 @@ export class TabnineHooks extends ToolHooks {
 
   toRulesyncHooks(): RulesyncHooks {
     const configPath = join(this.getRelativeDirPath(), this.getRelativeFilePath());
-    let settings: Record<string, unknown>;
-    try {
-      settings = parseTabnineSettings(this.getFileContent(), configPath);
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Tabnine CLI hooks content in ${configPath}: ${formatError(error)}`,
-        { cause: error },
-      );
-    }
+    const settings: Record<string, unknown> = this.parseFileContentOrThrow({
+      displayName: "Tabnine CLI",
+      parse: (fileContent) => parseTabnineSettings(fileContent, configPath),
+    });
     const hooks = tabnineHooksToCanonical(settings.hooks);
     return this.toRulesyncHooksDefault({
       fileContent: JSON.stringify(
@@ -368,24 +335,6 @@ export class TabnineHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): TabnineHooks {
-    return new TabnineHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

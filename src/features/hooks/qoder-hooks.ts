@@ -42,6 +42,23 @@ const QODER_CONVERTER_CONFIG: ToolHooksConverterConfig = {
     { canonical: "statusMessage", tool: "statusMessage" },
     // Command hooks: the interpreter, `"bash"` or `"powershell"`.
     { canonical: "shell", tool: "shell", commandOnly: true },
+    // Command hooks with `asyncRewake`: the prefix of the injected system
+    // message and the one-line summary, which Qoder caps at 300 characters.
+    // Both apply to `asyncRewake` hooks only, so a value without it warns.
+    {
+      canonical: "rewakeMessage",
+      tool: "rewakeMessage",
+      commandOnly: true,
+      onlyWithFlag: "asyncRewake",
+    },
+    {
+      canonical: "rewakeSummary",
+      tool: "rewakeSummary",
+      commandOnly: true,
+      maxLength: 300,
+      collapseWhitespaceForLength: true,
+      onlyWithFlag: "asyncRewake",
+    },
   ],
   booleanPassthroughFields: [
     { canonical: "once", tool: "once" },

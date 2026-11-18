@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod/mini";
 
 import {
+  findFrontmatterBlockBounds,
+  FRONTMATTER_PARSE_OPTIONS,
   MAX_FRONTMATTER_DEPTH,
   MAX_FRONTMATTER_RAW_CHARS,
   MAX_FRONTMATTER_STRING_CHARS,
@@ -8,6 +13,7 @@ import {
   parseFrontmatter,
   parseFrontmatterWithYamlRepair,
   stringifyFrontmatter,
+  validateFrontmatterSchema,
 } from "./frontmatter.js";
 import { fallbackLogger } from "./logger.js";
 
@@ -768,6 +774,156 @@ const code = "preserved";
     });
   });
 
+  describe("executable frontmatter languages", () => {
+    const globals = globalThis as { __RULESYNC_FRONTMATTER_PWNED__?: unknown };
+
+    beforeEach(() => {
+      delete globals.__RULESYNC_FRONTMATTER_PWNED__;
+    });
+
+    afterEach(() => {
+      delete globals.__RULESYNC_FRONTMATTER_PWNED__;
+    });
+
+    it.each([
+      "---js",
+      "---javascript",
+      "---JS",
+      "--- js ",
+      "---coffee",
+      "---coffeescript",
+      "---cson",
+      "---json",
+    ])("should refuse a %j fence without evaluating the block", (fence) => {
+      const content = `${fence}\n{ name: (globalThis.__RULESYNC_FRONTMATTER_PWNED__ = 1, "x") }\n---\nBody`;
+
+      expect(() => parseFrontmatter(content, "skills/evil/SKILL.md")).toThrow(
+        /Failed to parse frontmatter in skills\/evil\/SKILL\.md: .*Unsupported frontmatter language/,
+      );
+      expect(globals.__RULESYNC_FRONTMATTER_PWNED__).toBeUndefined();
+    });
+
+    it("should refuse a JavaScript fence with a byte order mark and CRLF line endings", () => {
+      const content =
+        '\uFEFF---js\r\n{ name: (globalThis.__RULESYNC_FRONTMATTER_PWNED__ = 1, "x") }\r\n---\r\nBody';
+
+      expect(() => parseFrontmatter(content)).toThrow(/Unsupported frontmatter language/);
+      expect(globals.__RULESYNC_FRONTMATTER_PWNED__).toBeUndefined();
+    });
+
+    it("should refuse a JavaScript fence through the YAML repair path", () => {
+      const content =
+        '---js\n{ name: (globalThis.__RULESYNC_FRONTMATTER_PWNED__ = 1, "x") }\n---\nBody';
+
+      expect(() => parseFrontmatterWithYamlRepair(content)).toThrow(
+        /Unsupported frontmatter language/,
+      );
+      expect(globals.__RULESYNC_FRONTMATTER_PWNED__).toBeUndefined();
+    });
+
+    it("should keep the patched gray-matter free of its eval-based JavaScript engine", async () => {
+      const actualModule = await vi.importActual<typeof import("gray-matter")>("gray-matter");
+      const actualMatter =
+        (actualModule as unknown as { default: typeof actualModule }).default || actualModule;
+
+      // gray-matter's typings do not declare the `engines` export.
+      const { engines } = actualMatter as unknown as { engines: Record<string, unknown> };
+      expect(Object.hasOwn(engines, "javascript")).toBe(false);
+      expect(() =>
+        actualMatter(
+          '---js\n{ name: (globalThis.__RULESYNC_FRONTMATTER_PWNED__ = 1, "x") }\n---\n',
+          {},
+        ),
+      ).toThrow(/engine "js" is not registered/);
+      expect(globals.__RULESYNC_FRONTMATTER_PWNED__).toBeUndefined();
+    });
+
+    it.each(["---yaml", "---yml", "--- YAML "])(
+      "should still parse an explicit %j fence",
+      (fence) => {
+        const result = parseFrontmatter(`${fence}\nname: test\n---\nBody`);
+
+        expect(result.frontmatter).toEqual({ name: "test" });
+        expect(result.body).toBe("Body");
+      },
+    );
+
+    it.each(["---\r\r\n", "---yaml\r\r\n", "--- \r\n"])(
+      "should apply the size guard to a %j fence line gray-matter accepts",
+      (fence) => {
+        const content = `${fence}description: "${"a".repeat(MAX_FRONTMATTER_RAW_CHARS)}"\n---\nBody`;
+
+        expect(() => parseFrontmatter(content)).toThrow(/Frontmatter block is larger than/);
+      },
+    );
+
+    it.each(["---\n---\n", "---yaml\n---\n", "--- \r\n---\r\n"])(
+      "should read an empty %j block followed by a long body",
+      (fences) => {
+        const body = "x".repeat(MAX_FRONTMATTER_RAW_CHARS + 1);
+
+        const result = parseFrontmatter(`${fences}${body}`);
+
+        expect(result.frontmatter).toEqual({});
+        expect(result.body).toBe(body);
+      },
+    );
+
+    it("should give an empty block empty bounds instead of reaching into the body", () => {
+      const content = "---\n---\nglobs: *.ts\n---\n";
+
+      expect(findFrontmatterBlockBounds(content)).toEqual({ blockStart: 4, blockEnd: 4 });
+    });
+
+    it("should apply the size guard to a block with no closing fence", () => {
+      const content = `---\ndescription: "${"a".repeat(MAX_FRONTMATTER_RAW_CHARS)}"\n`;
+
+      expect(() => parseFrontmatter(content)).toThrow(/Frontmatter block is larger than/);
+    });
+
+    it("should refuse a JavaScript fence even when gray-matter still ships its eval engine", async () => {
+      // The pnpm patch that removes gray-matter's JavaScript engine only applies
+      // inside this repository; an installed rulesync gets the unpatched
+      // package. Re-register an eval-based engine to stand in for it and check
+      // that the engine overrides passed by parseFrontmatter still win.
+      const actualModule = await vi.importActual<typeof import("gray-matter")>("gray-matter");
+      const actualMatter =
+        (actualModule as unknown as { default: typeof actualModule }).default || actualModule;
+      // gray-matter's typings do not declare the `engines` export.
+      const { engines } = actualMatter as unknown as { engines: Record<string, unknown> };
+      engines.javascript = {
+        parse: (input: string) => {
+          // eslint-disable-next-line no-eval -- deliberately mirrors the upstream engine
+          return (0, eval)(`(${input})`);
+        },
+      };
+      try {
+        const content =
+          '---js\n{ name: (globalThis.__RULESYNC_FRONTMATTER_PWNED__ = 1, "x") }\n---\n';
+        // Bypass the language check to exercise the engine overrides alone.
+        expect(() => actualMatter(content, FRONTMATTER_PARSE_OPTIONS)).toThrow(
+          /executable language/,
+        );
+        expect(() => parseFrontmatter(content)).toThrow(/Unsupported frontmatter language/);
+        expect(globals.__RULESYNC_FRONTMATTER_PWNED__).toBeUndefined();
+      } finally {
+        delete engines.javascript;
+      }
+    });
+
+    it("should apply the size guard to an explicit yaml fence", () => {
+      const content = `---yaml\ndescription: "${"a".repeat(MAX_FRONTMATTER_RAW_CHARS)}"\n---\nBody`;
+
+      expect(() => parseFrontmatter(content)).toThrow(/Frontmatter block is larger than/);
+    });
+
+    it("should not treat a body that only starts with dashes as a language fence", () => {
+      const result = parseFrontmatter("----\nnot frontmatter\n");
+
+      expect(result.frontmatter).toEqual({});
+    });
+  });
+
   // Regression tests for issue #1973: verify that the gray-matter js-yaml
   // override (PR #1959) is actually effective. The patch rewrites gray-matter's
   // YAML engine from the deprecated js-yaml v3 API (safeLoad/safeDump) to the
@@ -1085,5 +1241,49 @@ Body.`;
 
       expect(parseFrontmatterWithYamlRepair(content)).toEqual(parseFrontmatter(content));
     });
+  });
+});
+
+describe("validateFrontmatterSchema", () => {
+  const schema = z.looseObject({ description: z.string() });
+
+  it("returns success when the frontmatter matches the schema", () => {
+    expect(
+      validateFrontmatterSchema({
+        schema,
+        frontmatter: { description: "ok", extra: 1 },
+        relativeDirPath: ".rulesync/commands",
+        relativeFilePath: "a.md",
+      }),
+    ).toEqual({ success: true, error: null });
+  });
+
+  it("returns an error naming the file when the frontmatter does not match", () => {
+    const result = validateFrontmatterSchema({
+      schema,
+      frontmatter: { description: 1 },
+      relativeDirPath: ".rulesync/commands",
+      relativeFilePath: "a.md",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeInstanceOf(Error);
+    expect(
+      result.error?.message.startsWith(
+        `Invalid frontmatter in ${join(".rulesync/commands", "a.md")}: `,
+      ),
+    ).toBe(true);
+    expect(result.error?.message).toContain("description");
+  });
+
+  it("validates an undefined frontmatter against the schema", () => {
+    const result = validateFrontmatterSchema({
+      schema,
+      frontmatter: undefined,
+      relativeDirPath: ".",
+      relativeFilePath: "a.md",
+    });
+
+    expect(result.success).toBe(false);
   });
 });

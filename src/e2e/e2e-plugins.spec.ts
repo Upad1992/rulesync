@@ -1,7 +1,7 @@
 import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   RULESYNC_COMMANDS_RELATIVE_DIR_PATH,
@@ -187,8 +187,10 @@ Review changes before submission.
       deleteFiles: true,
     });
 
+    // The directory name is normalized to the lowercase kebab-case form
+    // `agy plugin validate --strict` requires.
     expect(JSON.parse(await readFileContent(join(pluginRoot, "plugin.json")))).toEqual({
-      name: "review_plugin-2",
+      name: "review-plugin-2",
     });
     expect(await readFileContent(join(pluginRoot, "rules", "review.md"))).toContain(
       "Review changes before submission.",
@@ -456,6 +458,7 @@ Review the changes.
     const generatedHooks = await readFileContent(join(pluginRoot, "ai.mistral.vibe", "hooks.toml"));
     expect(generatedHooks).toContain('type = "pre_tool"');
     expect(generatedHooks).toContain('command = "./scripts/audit.sh"');
+    expect(generatedHooks).toContain('match = "re:bash|process_start"');
     expect(await fileExists(join(testDir, ".vibe", "config.toml"))).toBe(false);
 
     await removeDirectory(join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH));
@@ -476,7 +479,8 @@ Review the changes.
       docs: { command: "npx", args: ["-y", "docs-server"] },
     });
     expect(JSON.parse(await readFileContent(rulesyncHooksPath)).hooks.preToolUse).toEqual([
-      expect.objectContaining({ command: "./scripts/audit.sh", matcher: "bash" }),
+      // The widened shell matcher (`re:bash|process_start`) reads back as `Bash`.
+      expect.objectContaining({ command: "./scripts/audit.sh", matcher: "Bash" }),
     ]);
     expect(await fileExists(join(pluginRoot, "plugin.json"))).toBe(true);
   });

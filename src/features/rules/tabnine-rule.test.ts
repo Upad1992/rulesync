@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -50,13 +50,6 @@ describe("TabnineRule", () => {
       expect(paths.root.relativeDirPath).toBe(join(".tabnine", "agent"));
       expect(paths.root.relativeFilePath).toBe("TABNINE.md");
       expect(paths.nonRoot.relativeDirPath).toBe(join(".tabnine", "guidelines"));
-    });
-
-    it("should drop the tool directory when excludeToolDir is set", () => {
-      const paths = TabnineRule.getSettablePaths({ global: true, excludeToolDir: true });
-
-      expect(paths.root.relativeDirPath).toBe(".");
-      expect(paths.nonRoot.relativeDirPath).toBe("guidelines");
     });
   });
 

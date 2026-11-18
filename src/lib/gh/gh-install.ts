@@ -1,21 +1,29 @@
-import { createHash } from "node:crypto";
 import { basename, join, posix } from "node:path";
 
 import { Semaphore } from "es-toolkit/promise";
 
 import type { SourceEntry } from "../../config/config.js";
-import { FETCH_CONCURRENCY_LIMIT, MAX_FILE_SIZE } from "../../constants/rulesync-paths.js";
+import {
+  FETCH_CONCURRENCY_LIMIT,
+  formatMegabytes,
+  MAX_FILE_SIZE,
+  MAX_FILE_SIZE_MB,
+} from "../../constants/rulesync-paths.js";
 import { formatError } from "../../utils/error.js";
 import {
+  assertNoSymlinkBelowRoot,
   checkPathTraversal,
   getHomeDirectory,
+  PathOutsideRootError,
   removeFile,
+  removeFileWithoutFollowingSymlinks,
   toPosixPath,
   writeFileContent,
 } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { GitHubClient, GitHubClientError, logGitHubAuthHints } from "../github-client.js";
-import { listDirectoryRecursive, withSemaphore } from "../github-utils.js";
+import { isGitHubNotFoundError, listDirectoryRecursive, withSemaphore } from "../github-utils.js";
+import { computeInstallContentHash, RULESYNC_CONTENT_HASH_REGEX } from "../install-content-hash.js";
 import { parseSource } from "../source-parser.js";
 import { injectSourceMetadata } from "./gh-frontmatter.js";
 import {
@@ -24,7 +32,6 @@ import {
   type GhLock,
   type GhLockInstallation,
   readGhLock,
-  RULESYNC_CONTENT_HASH_REGEX,
   writeGhLock,
 } from "./gh-lock.js";
 import { type GhAgent, GH_AGENTS, type GhScope, relativeInstallDirFor } from "./gh-paths.js";
@@ -62,6 +69,12 @@ type DeployedFile = {
   /** Absolute on-disk path where the bytes are written. */
   absolutePath: string;
   content: string;
+  /**
+   * Project root the write must not pass a symbolic link under. Unset for
+   * user scope, where linking `~/.claude` into a dotfiles checkout is the
+   * user's own, deliberate setup.
+   */
+  symlinkFreeRoot?: string;
 };
 
 type SkillInstallation = {
@@ -271,15 +284,21 @@ function assertFrozenLockCoversSources(params: {
   // Detect manifest drift on `ref`: when the user edited `ref` in
   // rulesync.jsonc without re-running install, refuse rather than
   // silently install the locked SHA against a different declared ref.
+  // A `ref` added or dropped counts as drift too: the lock pin is only used
+  // for the exact `ref` it was written for (see resolveLockedGhRef).
   const drifted: string[] = [];
   for (const rs of resolvedSources) {
-    if (!rs.ref) continue;
     const matches = existingLock.installations.filter(
-      (i) => i.source.toLowerCase() === rs.entry.source.toLowerCase(),
+      (i) =>
+        i.source.toLowerCase() === rs.entry.source.toLowerCase() &&
+        i.agent === rs.agent &&
+        i.scope === rs.scope,
     );
     for (const m of matches) {
-      if (m.requested_ref !== undefined && m.requested_ref !== rs.ref) {
-        drifted.push(`${rs.entry.source} (manifest=${rs.ref}, lock=${m.requested_ref})`);
+      if (m.requested_ref !== rs.ref) {
+        drifted.push(
+          `${rs.entry.source} (manifest=${rs.ref ?? "<none>"}, lock=${m.requested_ref ?? "<none>"})`,
+        );
         break;
       }
     }
@@ -300,13 +319,25 @@ function assertFrozenLockCoversSources(params: {
  * reporting failure.
  */
 async function writeDeferredFrozenFiles(results: SourceResult[]): Promise<void> {
-  for (const result of results) {
-    if (result.status !== "ok") continue;
-    for (const inst of result.installations) {
-      for (const d of inst.deployed) {
-        await writeFileContent(d.absolutePath, d.content);
-      }
-    }
+  const deployed = results.flatMap((result) =>
+    result.status === "ok" ? result.installations.flatMap((inst) => inst.deployed) : [],
+  );
+  // Check every target before writing any, so a symbolic link rejected for
+  // one file does not leave the files before it on disk.
+  for (const d of deployed) {
+    await assertDeployTargetIsSafe(d);
+  }
+  for (const d of deployed) {
+    // Re-check right before the write: an earlier write of this run may have
+    // created directories, and the tree may have changed since the pass above.
+    await assertDeployTargetIsSafe(d);
+    await writeFileContent(d.absolutePath, d.content);
+  }
+}
+
+async function assertDeployTargetIsSafe(d: DeployedFile): Promise<void> {
+  if (d.symlinkFreeRoot !== undefined) {
+    await assertNoSymlinkBelowRoot({ rootPath: d.symlinkFreeRoot, targetPath: d.absolutePath });
   }
 }
 
@@ -358,17 +389,73 @@ async function removeStaleGhFiles(params: {
     }
   }
   for (const prev of existingLock.installations) {
+    const scope: GhScope = prev.scope === "user" ? "user" : "project";
+    const allowedPrefix = staleRemovalPrefix({ installation: prev, scope });
+    if (allowedPrefix === undefined) {
+      logger.warn(
+        `Refusing to remove stale gh files for an unrecognized lock entry (agent "${prev.agent}", skill "${prev.skill}").`,
+      );
+      continue;
+    }
+    // The lockfile is committed with the project, so a user-scope entry alone
+    // must not be enough to delete files under the home directory: only clean
+    // up after a source the current config still installs at user scope.
+    // rulesync.jsonc is committed too, so this does not stop a repository that
+    // declares a user-scope source on purpose; what bounds the damage is the
+    // install-directory prefix below (such a repository could overwrite the
+    // same skill directory anyway).
+    if (
+      scope === "user" &&
+      !newLock.installations.some(
+        (inst) => inst.scope === "user" && inst.source === prev.source && inst.agent === prev.agent,
+      )
+    ) {
+      if (prev.deployed_files.some((deployed) => !newDeployed.has(`${prev.scope}::${deployed}`))) {
+        logger.warn(
+          `Not removing stale user-scope gh files of "${prev.source}" (skill "${prev.skill}"): the source is no longer installed at user scope. Remove them by hand if they are no longer wanted.`,
+        );
+      }
+      continue;
+    }
     for (const deployed of prev.deployed_files) {
       const key = `${prev.scope}::${deployed}`;
       if (newDeployed.has(key)) continue;
-      await removeStaleFile({
-        relativePath: deployed,
-        scope: prev.scope === "user" ? "user" : "project",
-        projectRoot,
-        logger,
-      });
+      if (!toPosixPath(deployed).startsWith(allowedPrefix)) {
+        logger.warn(
+          `Refusing to remove stale gh file outside the skill's install directory: "${deployed}".`,
+        );
+        continue;
+      }
+      await removeStaleFile({ relativePath: deployed, scope, projectRoot, logger });
     }
   }
+}
+
+/**
+ * The only directory a lock entry's deployed files may be removed from: the
+ * install directory of its agent and scope, joined with its skill name. A
+ * committed lockfile names arbitrary paths, so without this a lock entry could
+ * list `.ssh/authorized_keys` as a "stale" file. Returns `undefined` for an
+ * entry whose agent or skill name rulesync would never have written.
+ */
+function staleRemovalPrefix(params: {
+  installation: GhLock["installations"][number];
+  scope: GhScope;
+}): string | undefined {
+  const { installation, scope } = params;
+  const agent = GH_AGENTS.find((candidate) => candidate === installation.agent);
+  const skill = installation.skill;
+  if (
+    agent === undefined ||
+    // Dot-only names and a trailing dot or space collapse under Windows path
+    // normalization, which would move the prefix up a directory.
+    /^\.*$/.test(skill) ||
+    /[. ]$/.test(skill) ||
+    /[/\\]/.test(skill)
+  ) {
+    return undefined;
+  }
+  return `${toPosixPath(join(relativeInstallDirFor({ agent, scope }), skill))}/`;
 }
 
 async function installSource(params: {
@@ -385,14 +472,23 @@ async function installSource(params: {
   const { entry, owner, repo, agent, scope } = rs;
   const sourceKey = entry.source;
 
-  const { resolvedRef, resolvedSha, usedTag } = await resolveGhRef({
-    rs,
-    client,
-    owner,
-    repo,
-    sourceKey,
-    logger,
-  });
+  // Without --update, a source the lockfile already pins is installed at the
+  // locked commit, so a plain install reproduces what was reviewed and only
+  // --update moves it to whatever the upstream publishes now.
+  const lockedRef =
+    existingLock && !update
+      ? await resolveLockedGhRef({ rs, existingLock, client, sourceKey, logger })
+      : undefined;
+  const { resolvedRef, resolvedSha, usedTag } =
+    lockedRef ??
+    (await resolveGhRef({
+      rs,
+      client,
+      owner,
+      repo,
+      sourceKey,
+      logger,
+    }));
 
   // Discover skills under `skills/`.
   const validatedSkills = await discoverValidatedSkills({
@@ -460,6 +556,7 @@ async function installSource(params: {
       repo,
       resolvedSha,
       installRelDir,
+      scope,
       scopeRoot,
       sourceUrl,
       repository,
@@ -477,7 +574,9 @@ async function installSource(params: {
           : 0,
     );
     const deployedFiles = deployed.map((d) => d.relativeToScopeRoot);
-    const contentHash = computeContentHash(deployed);
+    const contentHash = computeInstallContentHash(
+      deployed.map((d) => ({ path: d.relativeToScopeRoot, content: d.content })),
+    );
 
     assertFrozenSkillIntegrity({
       frozen,
@@ -521,6 +620,116 @@ async function installSource(params: {
 }
 
 /**
+ * The ref a source is pinned to in the lockfile, or `undefined` when the lock
+ * has no installation of this (source, agent, scope) for the declared `ref`.
+ * A changed `ref` in the manifest (or a `ref` added or dropped) is not
+ * covered by the lock, so it is resolved afresh.
+ *
+ * Every skill of one source is installed from the same commit, so the lock
+ * entries of a source agree on it; entries that disagree were not written by
+ * rulesync, and no single pin can be honored for them.
+ */
+async function resolveLockedGhRef(params: {
+  rs: ResolvedSource;
+  existingLock: GhLock;
+  client: GitHubClient;
+  sourceKey: string;
+  logger: Logger;
+}): Promise<{ resolvedRef: string; resolvedSha: string; usedTag: boolean } | undefined> {
+  const { rs, existingLock, client, sourceKey, logger } = params;
+  const matches = existingLock.installations.filter(
+    (i) =>
+      i.source.toLowerCase() === sourceKey.toLowerCase() &&
+      i.agent === rs.agent &&
+      i.scope === rs.scope &&
+      i.requested_ref === rs.ref,
+  );
+  const [first] = matches;
+  if (first === undefined) {
+    return undefined;
+  }
+  if (
+    matches.some(
+      (i) => i.resolved_commit !== first.resolved_commit || i.resolved_ref !== first.resolved_ref,
+    )
+  ) {
+    throw new Error(
+      `rulesync-gh.lock.yaml pins ${sourceKey} (agent=${rs.agent}, scope=${rs.scope}) to more than one commit. Run 'rulesync install --mode gh --update' to re-resolve it.`,
+    );
+  }
+  const pinError = (detail: string, cause?: unknown): Error =>
+    new Error(
+      `rulesync-gh.lock.yaml pins ${sourceKey} to ${first.resolved_commit} (ref ${first.resolved_ref}), but ${detail}. Run 'rulesync install --mode gh --update' to re-resolve it.`,
+      cause === undefined ? undefined : { cause },
+    );
+  // The ref the locked commit is checked against must not come from the lock
+  // alone, since the lock is as easy to edit as the commit it pins: a
+  // `resolved_ref` equal to the commit, or a cross-repository `fork:branch`,
+  // would vouch for any commit of the fork network. So it is either the
+  // declared `ref`, which resolveGhRef records as is, or — without one — the
+  // repository's current default branch or one of its release tags, the only
+  // two refs resolveGhRef falls back to. Which of the two it is also decides
+  // the `ref` recorded in the deployed SKILL.md.
+  let usedTag: boolean;
+  if (rs.ref !== undefined) {
+    if (first.resolved_ref !== rs.ref) {
+      throw pinError(`the declared ref is ${rs.ref}`);
+    }
+    usedTag = false;
+  } else {
+    let defaultBranch: string;
+    try {
+      defaultBranch = await client.getDefaultBranch(rs.owner, rs.repo);
+    } catch (error) {
+      throw pinError(`the repository could not be read: ${formatError(error)}`, error);
+    }
+    usedTag = first.resolved_ref !== defaultBranch;
+    if (usedTag) {
+      let releaseTag: string;
+      try {
+        releaseTag = (
+          await client.getReleaseByTag({ owner: rs.owner, repo: rs.repo, tag: first.resolved_ref })
+        ).tag_name;
+      } catch (error) {
+        throw pinError(
+          `${first.resolved_ref} is neither the default branch nor a release of the repository: ${formatError(error)}`,
+          error,
+        );
+      }
+      if (releaseTag !== first.resolved_ref) {
+        throw pinError(`the repository's release for it is tagged ${releaseTag}`);
+      }
+    }
+  }
+  // The locked commit must still be part of that ref's history in this very
+  // repository. That stops two things. A commit that disappeared upstream (a
+  // force-push, a deleted branch) would otherwise make the skill listing read
+  // the 404 as "no skills/ directory", install nothing and sweep the deployed
+  // files as stale. And GitHub serves commits of a whole fork network through
+  // the parent repository, so a lockfile edited to pin a commit that only
+  // exists in a fork would otherwise install the fork's bytes under the
+  // trusted source's name.
+  let status: string;
+  try {
+    status = await client.compareCommits({
+      owner: rs.owner,
+      repo: rs.repo,
+      base: first.resolved_commit,
+      head: first.resolved_ref,
+    });
+  } catch (error) {
+    throw pinError(`it could not be checked against the ref: ${formatError(error)}`, error);
+  }
+  if (status !== "identical" && status !== "ahead") {
+    throw pinError(`that commit is not in the ref's history (${status})`);
+  }
+  logger.debug(
+    `Using locked commit for ${sourceKey}: ref=${first.resolved_ref} sha=${first.resolved_commit}`,
+  );
+  return { resolvedRef: first.resolved_ref, resolvedSha: first.resolved_commit, usedTag };
+}
+
+/**
  * Resolve the ref for a gh source. Order: explicit `entry.ref`, then the latest
  * release's tag, then the default branch (when the repo has no releases).
  * Returns the resolved ref, its commit SHA, and whether a release tag was used.
@@ -548,7 +757,7 @@ async function resolveGhRef(params: {
       // 404. We treat any 404 (real GitHubClientError or any thrown value
       // carrying statusCode 404) as "no releases" and fall back to the
       // default branch. Other errors propagate.
-      if (is404(error)) {
+      if (isGitHubNotFoundError(error)) {
         resolvedRef = await client.getDefaultBranch(owner, repo);
       } else {
         throw error;
@@ -580,7 +789,7 @@ async function discoverValidatedSkills(params: {
   try {
     topLevel = await client.listDirectory(owner, repo, SKILLS_REMOTE_DIR, resolvedSha);
   } catch (error) {
-    if (is404(error)) {
+    if (isGitHubNotFoundError(error)) {
       logger.warn(`No skills/ directory found in ${sourceKey}. Skipping.`);
       return null;
     }
@@ -674,6 +883,7 @@ async function buildSkillDeployment(params: {
   repo: string;
   resolvedSha: string;
   installRelDir: string;
+  scope: GhScope;
   scopeRoot: string;
   sourceUrl: string;
   repository: string;
@@ -691,6 +901,7 @@ async function buildSkillDeployment(params: {
     repo,
     resolvedSha,
     installRelDir,
+    scope,
     scopeRoot,
     sourceUrl,
     repository,
@@ -704,7 +915,7 @@ async function buildSkillDeployment(params: {
   for (const file of allFiles) {
     if (file.size > MAX_FILE_SIZE) {
       logger.warn(
-        `Skipping "${file.path}" from ${sourceKey}: ${(file.size / 1024 / 1024).toFixed(2)}MB exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit.`,
+        `Skipping "${file.path}" from ${sourceKey}: ${formatMegabytes(file.size)}MB exceeds ${MAX_FILE_SIZE_MB}MB limit.`,
       );
       continue;
     }
@@ -732,7 +943,7 @@ async function buildSkillDeployment(params: {
     const byteLength = Buffer.byteLength(content, "utf8");
     if (byteLength > MAX_FILE_SIZE) {
       logger.warn(
-        `Skipping "${file.path}" from ${sourceKey}: fetched ${(byteLength / 1024 / 1024).toFixed(2)}MB exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit.`,
+        `Skipping "${file.path}" from ${sourceKey}: fetched ${formatMegabytes(byteLength)}MB exceeds ${MAX_FILE_SIZE_MB}MB limit.`,
       );
       continue;
     }
@@ -758,7 +969,21 @@ async function buildSkillDeployment(params: {
     }
 
     const absolutePath = join(scopeRoot, deployRelative);
-    deployed.push({ relativeToScopeRoot: deployRelative, absolutePath, content });
+    // checkPathTraversal is textual only: a symbolic link committed to the
+    // project would otherwise redirect the write — out of the project
+    // (`.agents/skills -> ~/somewhere`), or into a sensitive file inside it
+    // (`.agents/skills/x/config -> ../../../.git/config`). So no path
+    // component under the project root may be a link. User scope is left
+    // alone, since linking `~/.claude` into a dotfiles checkout is the user's
+    // own, deliberate setup.
+    const deployedFile: DeployedFile = {
+      relativeToScopeRoot: deployRelative,
+      absolutePath,
+      content,
+      ...(scope === "project" ? { symlinkFreeRoot: scopeRoot } : {}),
+    };
+    await assertDeployTargetIsSafe(deployedFile);
+    deployed.push(deployedFile);
 
     if (!frozen) {
       await writeFileContent(absolutePath, content);
@@ -817,45 +1042,21 @@ async function removeStaleFile(params: {
     return;
   }
   const absolute = join(scopeRoot, relativePath);
-  await removeFile(absolute);
+  if (scope === "project") {
+    try {
+      // No parent component may be a link; a stale file that is itself a link
+      // is unlinked without following it.
+      await removeFileWithoutFollowingSymlinks({ rootPath: scopeRoot, targetPath: absolute });
+    } catch (error) {
+      logger.warn(
+        error instanceof PathOutsideRootError
+          ? `Refusing to remove stale gh file "${relativePath}": ${error.message}`
+          : `Skipping removal of stale gh file "${relativePath}": ${formatError(error)}`,
+      );
+      return;
+    }
+  } else {
+    await removeFile(absolute);
+  }
   logger.debug(`Removed stale gh file: ${relativePath}`);
-}
-
-/**
- * Detect a 404-like error in a way that tolerates both real `GitHubClientError`
- * instances and any other thrown value that exposes a numeric `statusCode`
- * (e.g. plain Errors raised from a test mock that does not import the real
- * client class).
- */
-function is404(error: unknown): boolean {
-  if (error instanceof GitHubClientError && error.statusCode === 404) {
-    return true;
-  }
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "statusCode" in error &&
-    error.statusCode === 404
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * SHA-256 over a canonical, order-independent representation of the deployed
- * files. Identical algorithm to the apm-install hash so users familiar with
- * one mode can read the other.
- */
-function computeContentHash(
-  files: Array<{ relativeToScopeRoot: string; content: string }>,
-): string {
-  const hash = createHash("sha256");
-  for (const { relativeToScopeRoot, content } of files) {
-    hash.update(relativeToScopeRoot);
-    hash.update("\0");
-    hash.update(content);
-    hash.update("\0");
-  }
-  return `sha256:${hash.digest("hex")}`;
 }

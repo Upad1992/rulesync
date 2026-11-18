@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -142,11 +142,67 @@ describe("CopilotcliSubagent", () => {
       expect(fm.models).toEqual(["claude-opus-5", "claude-sonnet-5"]);
       expect(fm.modelPolicy).toBe("required");
 
-      // The changelog spelling (`model` as a list) is not the documented form.
-      expect(() => build({ model: ["a", "b"] })).toThrow(/Invalid copilotcli subagent frontmatter/);
+      expect(() => build({ model: ["a", 1] })).toThrow(/Invalid copilotcli subagent frontmatter/);
       expect(() => build({ modelPolicy: "locked" })).toThrow(
         /Invalid copilotcli subagent frontmatter/,
       );
+    });
+
+    it("should emit a list-valued model as a list in preference order", () => {
+      const rulesyncSubagent = new RulesyncSubagent({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync/subagents",
+        relativeFilePath: "planner.md",
+        frontmatter: {
+          targets: ["copilotcli"],
+          name: "planner",
+          description: "Plans changes",
+          copilotcli: { model: ["gpt-5.5", "claude-opus-5.5"] },
+        },
+        body: "Body",
+        validate: false,
+      });
+
+      const subagent = CopilotcliSubagent.fromRulesyncSubagent({
+        outputRoot: testDir,
+        relativeDirPath: join(".github", "agents"),
+        rulesyncSubagent,
+      }) as CopilotcliSubagent;
+
+      const fm = subagent.getFrontmatter();
+      expect(fm.model).toEqual(["gpt-5.5", "claude-opus-5.5"]);
+      expect(fm.models).toBeUndefined();
+      expect(subagent.getFileContent()).toMatch(/model:\n\s+- gpt-5\.5\n\s+- claude-opus-5\.5\n/);
+    });
+
+    it("should keep list-valued model and models side by side without merging them", () => {
+      const rulesyncSubagent = new RulesyncSubagent({
+        outputRoot: testDir,
+        relativeDirPath: ".rulesync/subagents",
+        relativeFilePath: "planner.md",
+        frontmatter: {
+          targets: ["copilotcli"],
+          name: "planner",
+          description: "Plans changes",
+          copilotcli: {
+            model: ["gpt-5.5", "claude-opus-5.5"],
+            models: ["claude-opus-5", "claude-sonnet-5"],
+          },
+        },
+        body: "Body",
+        validate: false,
+      });
+
+      const subagent = CopilotcliSubagent.fromRulesyncSubagent({
+        outputRoot: testDir,
+        relativeDirPath: join(".github", "agents"),
+        rulesyncSubagent,
+      }) as CopilotcliSubagent;
+
+      const fm = subagent.getFrontmatter();
+      expect(fm.model).toEqual(["gpt-5.5", "claude-opus-5.5"]);
+      expect(fm.models).toEqual(["claude-opus-5", "claude-sonnet-5"]);
+      expect(subagent.validate().success).toBe(true);
     });
   });
 
@@ -193,6 +249,57 @@ describe("CopilotcliSubagent", () => {
   });
 
   describe("fromFile", () => {
+    it.each([false, true])(
+      "should preserve list-valued model on import and regenerate (global=%s)",
+      async (global) => {
+        const { testDir: homeDir, cleanup: cleanupHome } = await setupTestDirectory({
+          home: true,
+        });
+        onTestFinished(cleanupHome);
+        const outputRoot = global ? homeDir : testDir;
+        const { relativeDirPath } = CopilotcliSubagent.getSettablePaths({ global });
+        await ensureDir(join(outputRoot, relativeDirPath));
+        await writeFileContent(
+          join(outputRoot, relativeDirPath, "planner.agent.md"),
+          `---\ndescription: Plans changes\nmodel: [gpt-5.5, claude-opus-5.5]\nmodels: [claude-sonnet-5]\nmodelPolicy: preferred\nreasoning-effort: high\nhooks:\n  sessionStart: []\n---\n\nPlan carefully.\n`,
+        );
+
+        const imported = await CopilotcliSubagent.fromFile({
+          outputRoot,
+          relativeFilePath: "planner.agent.md",
+          global,
+        });
+        expect(imported.validate().success).toBe(true);
+        const rulesyncSubagent = imported.toRulesyncSubagent();
+        expect(rulesyncSubagent.getFrontmatter().copilotcli).toMatchObject({
+          model: ["gpt-5.5", "claude-opus-5.5"],
+          models: ["claude-sonnet-5"],
+          modelPolicy: "preferred",
+          "reasoning-effort": "high",
+          hooks: { sessionStart: [] },
+        });
+        const generated = CopilotcliSubagent.fromRulesyncSubagent({
+          outputRoot,
+          relativeDirPath,
+          rulesyncSubagent,
+          global,
+        }) as CopilotcliSubagent;
+        expect(generated.getFrontmatter()).toMatchObject(imported.getFrontmatter());
+        expect(generated.getBody()).toBe("Plan carefully.");
+        expect(generated.getRelativeDirPath()).toBe(relativeDirPath);
+        await writeFileContent(
+          join(outputRoot, relativeDirPath, generated.getRelativeFilePath()),
+          generated.getFileContent(),
+        );
+        const reimported = await CopilotcliSubagent.fromFile({
+          outputRoot,
+          relativeFilePath: "planner.agent.md",
+          global,
+        });
+        expect(reimported.getFrontmatter()).toEqual(generated.getFrontmatter());
+      },
+    );
+
     it("should load <stem>.agent.md from project .github/agents", async () => {
       const dir = join(testDir, ".github", "agents");
       await ensureDir(dir);

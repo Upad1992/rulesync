@@ -1,6 +1,5 @@
 import { getTraeSkillsDirPath } from "../../utils/trae.js";
 import { AgentsSkillsSkill } from "./agentsskills-skill.js";
-import { RulesyncSkill } from "./rulesync-skill.js";
 import { ToolSkillSettablePaths } from "./tool-skill.js";
 
 /**
@@ -20,8 +19,5 @@ export class TraeSkill extends AgentsSkillsSkill {
     return { relativeDirPath: getTraeSkillsDirPath({ global }) };
   }
 
-  static override isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("trae");
-  }
+  protected static override readonly toolTarget = "trae";
 }

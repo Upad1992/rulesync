@@ -1,32 +1,36 @@
 import { Command } from "commander";
 
+import { addCommand, type AddCommandOptions } from "../lib/add.js";
+import { doctorCommand, type DoctorOptions } from "../lib/doctor.js";
+import { fetchCommand } from "../lib/fetch-command.js";
+import { gitignoreCommand } from "../lib/gitignore.js";
+import { initCommand } from "../lib/init-command.js";
+import { INSTALL_MODES, InstallMode, installCommand } from "../lib/install.js";
+import {
+  releaseNotesCommand,
+  type ReleaseNotesCommandOptions,
+} from "../lib/release-notes-command.js";
 import { DEFAULT_LATEST_COUNT } from "../lib/release-notes.js";
+import { resolveGitignoreTargets } from "../lib/resolve-gitignore-targets.js";
 import { ALL_FEATURES, RulesyncFeatures } from "../types/features.js";
 import { FetchOptions } from "../types/fetch.js";
+import { type ErrorCode, ErrorCodes } from "../types/json-output.js";
 import type { Logger } from "../utils/logger.js";
 import { parseCommaSeparatedList } from "../utils/parse-comma-separated-list.js";
-import { addCommand, type AddCommandOptions } from "./commands/add.js";
 import { convertCommand, ConvertOptions } from "./commands/convert.js";
 import { docsCommand, type DocsOptions } from "./commands/docs.js";
-import { doctorCommand, type DoctorOptions } from "./commands/doctor.js";
-import { fetchCommand } from "./commands/fetch.js";
 import { generateCommand, GenerateOptions } from "./commands/generate.js";
-import { gitignoreCommand } from "./commands/gitignore.js";
 import { importCommand, ImportOptions } from "./commands/import.js";
-import { initCommand } from "./commands/init.js";
-import { INSTALL_MODES, InstallMode, installCommand } from "./commands/install.js";
 import { mcpCommand } from "./commands/mcp.js";
-import { releaseNotesCommand, type ReleaseNotesCommandOptions } from "./commands/release-notes.js";
-import { resolveGitignoreTargets } from "./commands/resolve-gitignore-targets.js";
 import { updateCommand, UpdateCommandOptions } from "./commands/update.js";
 import { wrapCommand as _wrapCommand } from "./wrap-command.js";
 
-const getVersion = () => "37.1.0";
+const getVersion = () => "43.9.0";
 const FEATURES_HELP = `${ALL_FEATURES.join(",")}; ignore is deprecated, use permissions`;
 
 function wrapCommand(
   name: string,
-  errorCode: string,
+  errorCode: ErrorCode,
   handler: (
     logger: Logger,
     options: unknown,
@@ -35,6 +39,17 @@ function wrapCommand(
   ) => Promise<void>,
 ) {
   return _wrapCommand({ name, errorCode, handler, getVersion });
+}
+
+/**
+ * Commander stores `-c, --config <path>` as `config`, but the commands read
+ * `configPath`; this renames the key so no command sees `config`.
+ */
+function withConfigPath<T extends { config?: string }>(
+  options: T,
+): Omit<T, "config"> & { configPath: string | undefined } {
+  const { config, ...rest } = options;
+  return { ...rest, configPath: config };
 }
 
 export function createProgram(): Command {
@@ -54,7 +69,7 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("init", "INIT_FAILED", async (logger) => {
+      wrapCommand("init", ErrorCodes.INIT_FAILED, async (logger) => {
         await initCommand(logger);
       }),
     );
@@ -75,7 +90,7 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("gitignore", "GITIGNORE_FAILED", async (logger, options) => {
+      wrapCommand("gitignore", ErrorCodes.GITIGNORE_FAILED, async (logger, options) => {
         const cliTargets = (options as { targets?: string[] }).targets;
         const cliFeatures = (options as { features?: RulesyncFeatures }).features;
 
@@ -104,23 +119,29 @@ export function createProgram(): Command {
     .option("-p, --path <path>", "Skills path within the source")
     .option("--rules-path <path>", "Rules path within the source")
     .option("--registry <url>", "npm-compatible registry URL")
-    .option("--token-env <name>", "Environment variable containing the npm registry token")
+    .option(
+      "--token-env <name>",
+      "Environment variable containing the npm registry token (NPM_TOKEN, NODE_AUTH_TOKEN, or *_NPM_TOKEN)",
+    )
     .option("--token <token>", "GitHub token for private repositories")
     .option("-c, --config <path>", "Path to configuration file")
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("add", "ADD_FAILED", async (logger, options, _globalOpts, positionalArgs) => {
-        const source = positionalArgs[0] as string;
-        const addOptions = options as Omit<AddCommandOptions, "source" | "configPath"> & {
-          config?: string;
-        };
-        await addCommand(logger, {
-          ...addOptions,
-          source,
-          configPath: addOptions.config,
-        });
-      }),
+      wrapCommand(
+        "add",
+        ErrorCodes.ADD_FAILED,
+        async (logger, options, _globalOpts, positionalArgs) => {
+          const source = positionalArgs[0] as string;
+          const addOptions = withConfigPath(
+            options as Omit<AddCommandOptions, "source" | "configPath"> & { config?: string },
+          );
+          await addCommand(logger, {
+            ...addOptions,
+            source,
+          });
+        },
+      ),
     );
 
   program
@@ -159,16 +180,20 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("fetch", "FETCH_FAILED", async (logger, options, globalOpts, positionalArgs) => {
-        const fetchOptions = options as FetchOptions;
-        // The interactive prompt draws its UI on stdout; mixing it with the
-        // global --json envelope would corrupt the machine-readable output.
-        if (fetchOptions.interactive && globalOpts.json) {
-          throw new Error("The --interactive option cannot be combined with --json output.");
-        }
-        const source = positionalArgs[0] as string;
-        await fetchCommand(logger, { ...fetchOptions, source });
-      }),
+      wrapCommand(
+        "fetch",
+        ErrorCodes.FETCH_FAILED,
+        async (logger, options, globalOpts, positionalArgs) => {
+          const fetchOptions = options as FetchOptions;
+          // The interactive prompt draws its UI on stdout; mixing it with the
+          // global --json envelope would corrupt the machine-readable output.
+          if (fetchOptions.interactive && globalOpts.json) {
+            throw new Error("The --interactive option cannot be combined with --json output.");
+          }
+          const source = positionalArgs[0] as string;
+          await fetchCommand(logger, { ...fetchOptions, source });
+        },
+      ),
     );
 
   program
@@ -192,7 +217,7 @@ export function createProgram(): Command {
       "Root directory containing the tool configuration to import",
     )
     .action(
-      wrapCommand("import", "IMPORT_FAILED", async (logger, options) => {
+      wrapCommand("import", ErrorCodes.IMPORT_FAILED, async (logger, options) => {
         const { outputRoot, ...importOptions } = options as ImportOptions & {
           outputRoot?: string;
         };
@@ -224,7 +249,7 @@ export function createProgram(): Command {
     .option("-g, --global", "Convert for global(user scope) configuration files")
     .option("--dry-run", "Dry run: show changes without writing files")
     .action(
-      wrapCommand("convert", "CONVERT_FAILED", async (logger, options) => {
+      wrapCommand("convert", ErrorCodes.CONVERT_FAILED, async (logger, options) => {
         await convertCommand(logger, options as ConvertOptions);
       }),
     );
@@ -233,7 +258,7 @@ export function createProgram(): Command {
     .command("mcp")
     .description("Start MCP server for rulesync")
     .action(
-      wrapCommand("mcp", "MCP_FAILED", async (logger, _options) => {
+      wrapCommand("mcp", ErrorCodes.MCP_FAILED, async (logger, _options) => {
         await mcpCommand(logger, { version });
       }),
     );
@@ -261,18 +286,38 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("install", "INSTALL_FAILED", async (logger, options) => {
-        const rawMode = (options as { mode?: string }).mode;
+      wrapCommand("install", ErrorCodes.INSTALL_FAILED, async (logger, options) => {
+        const {
+          mode: rawMode,
+          update,
+          frozen,
+          outdated,
+          token,
+          configPath,
+          verbose,
+          silent,
+        } = withConfigPath(
+          options as {
+            mode?: string;
+            update?: boolean;
+            frozen?: boolean;
+            outdated?: boolean;
+            token?: string;
+            config?: string;
+            verbose?: boolean;
+            silent?: boolean;
+          },
+        );
         const mode = parseInstallMode(rawMode);
         await installCommand(logger, {
           mode,
-          update: (options as { update?: boolean }).update,
-          frozen: (options as { frozen?: boolean }).frozen,
-          outdated: (options as { outdated?: boolean }).outdated,
-          token: (options as { token?: string }).token,
-          configPath: (options as { config?: string }).config,
-          verbose: (options as { verbose?: boolean }).verbose,
-          silent: (options as { silent?: boolean }).silent,
+          update,
+          frozen,
+          outdated,
+          token,
+          configPath,
+          verbose,
+          silent,
         });
       }),
     );
@@ -332,13 +377,11 @@ export function createProgram(): Command {
       "Keep running and regenerate whenever rulesync source files change (cannot be combined with --check, --dry-run or --json)",
     )
     .action(
-      wrapCommand("generate", "GENERATION_FAILED", async (logger, options) => {
-        // Commander stores `-c, --config <path>` as `config`, but the resolver
-        // reads `configPath`; map it explicitly like `add` and `install` do.
-        const { config, ...generateOptions } = options as Omit<GenerateOptions, "configPath"> & {
-          config?: string;
-        };
-        await generateCommand(logger, { ...generateOptions, configPath: config });
+      wrapCommand("generate", ErrorCodes.GENERATION_FAILED, async (logger, options) => {
+        await generateCommand(
+          logger,
+          withConfigPath(options as Omit<GenerateOptions, "configPath"> & { config?: string }),
+        );
       }),
     );
 
@@ -352,8 +395,11 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("doctor", "DOCTOR_FAILED", async (logger, options) => {
-        await doctorCommand(logger, options as DoctorOptions);
+      wrapCommand("doctor", ErrorCodes.DOCTOR_FAILED, async (logger, options) => {
+        await doctorCommand(
+          logger,
+          withConfigPath(options as Omit<DoctorOptions, "configPath"> & { config?: string }),
+        );
       }),
     );
 
@@ -366,15 +412,19 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("docs", "DOCS_FAILED", async (logger, options, globalOpts, positionalArgs) => {
-        // The command's product is raw Markdown on stdout; mixing it with the
-        // global --json envelope would break both consumers.
-        if (globalOpts.json) {
-          throw new Error("The docs command prints raw Markdown and does not support --json.");
-        }
-        const document = positionalArgs[0] as string | undefined;
-        await docsCommand(logger, document, options as DocsOptions);
-      }),
+      wrapCommand(
+        "docs",
+        ErrorCodes.DOCS_FAILED,
+        async (logger, options, globalOpts, positionalArgs) => {
+          // The command's product is raw Markdown on stdout; mixing it with the
+          // global --json envelope would break both consumers.
+          if (globalOpts.json) {
+            throw new Error("The docs command prints raw Markdown and does not support --json.");
+          }
+          const document = positionalArgs[0] as string | undefined;
+          await docsCommand(logger, document, options as DocsOptions);
+        },
+      ),
     );
 
   program
@@ -396,7 +446,7 @@ export function createProgram(): Command {
     .action(
       wrapCommand(
         "release-notes",
-        "RELEASE_NOTES_FAILED",
+        ErrorCodes.RELEASE_NOTES_FAILED,
         async (logger, options, _globalOpts, positionalArgs) => {
           const source = positionalArgs[0] as string;
           await releaseNotesCommand(logger, {
@@ -416,7 +466,7 @@ export function createProgram(): Command {
     .option("-V, --verbose", "Verbose output")
     .option("-s, --silent", "Suppress all output")
     .action(
-      wrapCommand("update", "UPDATE_FAILED", async (logger, options) => {
+      wrapCommand("update", ErrorCodes.UPDATE_FAILED, async (logger, options) => {
         await updateCommand(logger, version, options as UpdateCommandOptions);
       }),
     );

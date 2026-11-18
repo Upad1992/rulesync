@@ -264,7 +264,7 @@ const defaultGetFactory: GetFactory = (target) => {
 // Derive tool target arrays from factory metadata
 const allToolTargetKeys = [...toolCheckFactories.keys()];
 
-export const checksProcessorToolTargets: ToolTarget[] = allToolTargetKeys.filter((target) => {
+const checksProcessorToolTargets: ToolTarget[] = allToolTargetKeys.filter((target) => {
   const factory = toolCheckFactories.get(target);
   return factory?.meta.supportsProject !== false;
 });
@@ -277,6 +277,10 @@ const checksProcessorToolTargetsGlobal: ToolTarget[] = allToolTargetKeys.filter(
 export class ChecksProcessor extends FeatureProcessor {
   private readonly toolTarget: ChecksProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
   private readonly getFactory: GetFactory;
 
   constructor({

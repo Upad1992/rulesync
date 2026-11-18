@@ -1,11 +1,10 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { QoderCommand } from "./qoder-command.js";
 import { RulesyncCommand } from "./rulesync-command.js";
 
@@ -42,7 +41,6 @@ describe("QoderCommand", () => {
       relativeFilePath: join("git", "commit.md"),
       frontmatter,
       body: "Review the diff.",
-      fileContent: stringifyFrontmatter("Review the diff.", frontmatter),
     });
 
     const command = QoderCommand.fromRulesyncCommand({ outputRoot: testDir, rulesyncCommand });

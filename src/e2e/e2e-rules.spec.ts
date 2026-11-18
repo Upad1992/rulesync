@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   RULESYNC_CONFIG_RELATIVE_FILE_PATH,
@@ -36,6 +36,7 @@ const rulesRootTargets = [
   { target: "codexcli", outputPath: "AGENTS.md" },
   { target: "commandcode", outputPath: "AGENTS.md" },
   { target: "qoder", outputPath: "AGENTS.md" },
+  { target: "xum", outputPath: join(".xum", "AGENTS.md") },
   { target: "grokcli", outputPath: "AGENTS.md" },
   { target: "gitlabduo", outputPath: join(".gitlab", "duo", "chat-rules.md") },
   { target: "hermesagent", outputPath: ".hermes.md" },
@@ -43,6 +44,7 @@ const rulesRootTargets = [
   { target: "mimocode", outputPath: "AGENTS.md" },
   { target: "omp", outputPath: join(".omp", "AGENTS.md") },
   { target: "opencode", outputPath: "AGENTS.md" },
+  { target: "opencodev1", outputPath: "AGENTS.md" },
   { target: "antigravity-cli", outputPath: "AGENTS.md" },
   { target: "antigravity-ide", outputPath: "AGENTS.md" },
   { target: "goose", outputPath: ".goosehints" },
@@ -77,6 +79,7 @@ const rulesRootTargets = [
   { target: "continue", outputPath: "AGENTS.md" },
   { target: "pool", outputPath: "AGENTS.md" },
   { target: "dsh", outputPath: "AGENTS.md" },
+  { target: "firebender", outputPath: join(".firebender", "AGENTS.md") },
 ] as const;
 
 // Tools that emit every rule as a directory entry.
@@ -101,6 +104,7 @@ const rulesNonRootTargets = [
   { target: "codewhale", outputPath: join(".codewhale", "rules", "overview.md") },
   { target: "takt", outputPath: join(".takt", "facets", "policies", "overview.md") },
   { target: "omp", outputPath: join(".omp", "rules", "overview.md") },
+  { target: "firebender", outputPath: join(".firebender", "rules", "overview.mdc") },
 ] as const;
 
 describe("E2E: rules", () => {
@@ -791,6 +795,32 @@ ${"x".repeat(33 * 1024)}
     expect(root).toContain("Large Rule");
     expect(root).not.toContain("Rule for svc1");
     expect(stderr).toContain("project_doc_max_bytes");
+
+    // Raising the budget in `.codex/config.toml` suppresses the warning, and
+    // rulesync only reads that file, never rewrites it.
+    const configPath = join(testDir, ".codex", "config.toml");
+    const raisedConfig = "project_doc_max_bytes = 131072\n";
+    await writeFileContent(configPath, raisedConfig);
+    const raised = await runGenerate({
+      target: "codexcli",
+      features: "rules",
+      env: { NODE_ENV: "e2e" },
+    });
+    expect(raised.stderr).not.toContain("project_doc_max_bytes");
+    expect(await readFileContent(configPath)).toBe(raisedConfig);
+
+    // `project_doc_max_bytes = 0` disables project docs in Codex, so the
+    // warning says the generated files will not be loaded.
+    const disabledConfig = "project_doc_max_bytes = 0\n";
+    await writeFileContent(configPath, disabledConfig);
+    const disabled = await runGenerate({
+      target: "codexcli",
+      features: "rules",
+      env: { NODE_ENV: "e2e" },
+    });
+    expect(disabled.stderr).toContain("is set to 0");
+    expect(disabled.stderr).toContain("will not be loaded");
+    expect(await readFileContent(configPath)).toBe(disabledConfig);
   });
 
   it("should fold junie non-root rules into the root .junie/AGENTS.md", async () => {
@@ -1756,6 +1786,7 @@ describe("E2E: rules (import)", () => {
     { target: "codexcli", sourcePath: "AGENTS.md", importedFileName: "overview.md" },
     { target: "commandcode", sourcePath: "AGENTS.md", importedFileName: "overview.md" },
     { target: "qoder", sourcePath: "AGENTS.md", importedFileName: "overview.md" },
+    { target: "xum", sourcePath: join(".xum", "AGENTS.md"), importedFileName: "overview.md" },
     {
       target: "copilot",
       sourcePath: join(".github", "copilot-instructions.md"),
@@ -1769,6 +1800,7 @@ describe("E2E: rules (import)", () => {
       importedFileName: "overview.md",
     },
     { target: "opencode", sourcePath: "AGENTS.md", importedFileName: "overview.md" },
+    { target: "opencodev1", sourcePath: "AGENTS.md", importedFileName: "overview.md" },
     { target: "goose", sourcePath: ".goosehints", importedFileName: "overview.md" },
     {
       target: "copilotcli",
@@ -1869,6 +1901,16 @@ describe("E2E: rules (import)", () => {
       importedFileName: "overview.md",
     },
     { target: "zed", sourcePath: ".rules", importedFileName: "overview.md" },
+    {
+      target: "firebender",
+      sourcePath: join(".firebender", "AGENTS.md"),
+      importedFileName: "overview.md",
+    },
+    {
+      target: "firebender",
+      sourcePath: join(".firebender", "rules", "overview.mdc"),
+      importedFileName: "overview.md",
+    },
   ])("should import $target rules", async ({ target, sourcePath, importedFileName }) => {
     const testDir = getTestDir();
 
@@ -1994,9 +2036,11 @@ const rulesGlobalTargets = [
   { target: "mimocode", outputPath: join(".config", "mimocode", "AGENTS.md") },
   { target: "omp", outputPath: join(".omp", "agent", "AGENTS.md") },
   { target: "opencode", outputPath: join(".config", "opencode", "AGENTS.md") },
+  { target: "opencodev1", outputPath: join(".config", "opencode", "AGENTS.md") },
   { target: "codexcli", outputPath: join(".codex", "AGENTS.md") },
   { target: "commandcode", outputPath: join(".commandcode", "AGENTS.md") },
   { target: "qoder", outputPath: join(".qoder", "AGENTS.md") },
+  { target: "xum", outputPath: join(".xum", "AGENTS.md") },
   { target: "grokcli", outputPath: join(".grok", "AGENTS.md") },
   { target: "gitlabduo", outputPath: join(".gitlab", "duo", "chat-rules.md") },
   { target: "amp", outputPath: join(".config", "amp", "AGENTS.md") },
@@ -2035,6 +2079,7 @@ const rulesGlobalTargets = [
   { target: "continue", outputPath: join(".continue", "rules", "AGENTS.md") },
   { target: "pool", outputPath: join(".config", "poolside", "AGENTS.md") },
   { target: "dsh", outputPath: join(".dsh", "AGENTS.md") },
+  { target: "firebender", outputPath: join(".firebender", "AGENTS.md") },
 ] as const;
 
 describe("E2E: rules (global mode)", () => {
@@ -2202,6 +2247,7 @@ globs: ["src/**/*"]
     { target: "commandcode", outputPath: join(".commandcode", "AGENTS.md") },
     { target: "junie", outputPath: join(".junie", "AGENTS.md") },
     { target: "pi", outputPath: join(".pi", "agent", "AGENTS.md") },
+    { target: "xum", outputPath: join(".xum", "AGENTS.md") },
   ] as const)(
     "should fold $target non-root rules into its global root file",
     async ({ target, outputPath }) => {

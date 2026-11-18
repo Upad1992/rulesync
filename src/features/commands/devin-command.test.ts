@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { DevinCommand } from "./devin-command.js";
@@ -27,7 +27,6 @@ describe("DevinCommand", () => {
         description: "Review the current changes",
       },
       body: "Review the diff carefully.",
-      fileContent: "",
     });
 
     it("should emit a SKILL.md under a per-command slug directory (project)", () => {
@@ -61,7 +60,6 @@ describe("DevinCommand", () => {
         relativeFilePath: "deploy.md",
         frontmatter: {},
         body: "Deploy the app.",
-        fileContent: "",
       });
 
       const command = DevinCommand.fromRulesyncCommand({
@@ -78,7 +76,6 @@ describe("DevinCommand", () => {
         relativeFilePath: "review pr!.md",
         frontmatter: { description: "Review" },
         body: "Review.",
-        fileContent: "",
       });
 
       const command = DevinCommand.fromRulesyncCommand({
@@ -127,7 +124,6 @@ describe("DevinCommand", () => {
         relativeFilePath: "review-pr.md",
         frontmatter: { targets: targets as ["*"] | undefined, description: "Review" },
         body: "Review.",
-        fileContent: "",
       });
 
       expect(DevinCommand.isTargetedByRulesyncCommand(rulesyncCommand)).toBe(expected);
@@ -144,7 +140,6 @@ describe("DevinCommand", () => {
           devin: { "argument-hint": "[environment]", model: "fast", agent: "deployer" },
         },
         body: "Deploy.",
-        fileContent: "",
       });
 
       const command = DevinCommand.fromRulesyncCommand({

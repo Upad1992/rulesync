@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { RulesyncPermissionsFileSchema } from "./permissions.js";
 
@@ -19,6 +19,94 @@ describe("RulesyncPermissionsFileSchema tool-scoped override enums", () => {
     it("should reject an unknown value", () => {
       const result = RulesyncPermissionsFileSchema.safeParse(
         withOverride({ cursor: { approvalMode: "yolo" } }),
+      );
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe("codexcli.auto_review", () => {
+    it.each([0, 90_000, 4_294_967_295])("should accept timeout_ms %s", (value) => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({
+          codexcli: { auto_review: { policy: "Deny network calls.", timeout_ms: value } },
+        }),
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it.each([-1, 1.5, 4_294_967_296, "90000"])("should reject timeout_ms %s", (value) => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ codexcli: { auto_review: { timeout_ms: value } } }),
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it.each([
+      { circuit_break_action: "default" },
+      { circuit_break_action: "strict" },
+      { conversation_history_max_output_tokens: 4000 },
+    ])("should accept %o", (value) => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ codexcli: { auto_review: value } }),
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it.each([
+      { circuit_break_action: "loose" },
+      { conversation_history_max_output_tokens: 0 },
+      { conversation_history_max_output_tokens: 1.5 },
+    ])("should reject %o", (value) => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ codexcli: { auto_review: value } }),
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it("should pass unmodeled keys through", () => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({
+          codexcli: { auto_review: { experimental_policy_template: "{{ tenant_policy }}" } },
+        }),
+      );
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe("omp.approvalMode", () => {
+    it.each(["always-ask", "always-ask-cached", "write", "yolo"])("should accept %s", (value) => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ omp: { approvalMode: value } }),
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it("should reject an unknown value", () => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ omp: { approvalMode: "always-ask-remember" } }),
+      );
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe("omp.restrictedFolders", () => {
+    it("should accept a list of folders", () => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ omp: { restrictedFolders: ["~/secrets", "C:/work/payments"] } }),
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it("should reject a non-list value", () => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ omp: { restrictedFolders: "~/secrets" } }),
+      );
+      expect(result.success).toBe(false);
+    });
+
+    it("should reject a list with a non-string entry", () => {
+      const result = RulesyncPermissionsFileSchema.safeParse(
+        withOverride({ omp: { restrictedFolders: ["~/a", 42] } }),
       );
       expect(result.success).toBe(false);
     });
@@ -339,6 +427,21 @@ describe("RulesyncPermissionsFileSchema tool-scoped override enums", () => {
         }),
       );
       expect(result.success).toBe(true);
+    });
+
+    it("devin.permission_mode accepts only the documented modes", () => {
+      for (const mode of ["normal", "accept-edits", "smart", "dangerous"]) {
+        expect(
+          RulesyncPermissionsFileSchema.safeParse(
+            withOverride({ devin: { permission_mode: mode } }),
+          ).success,
+        ).toBe(true);
+      }
+      expect(
+        RulesyncPermissionsFileSchema.safeParse(
+          withOverride({ devin: { permission_mode: "yolo" } }),
+        ).success,
+      ).toBe(false);
     });
   });
 });

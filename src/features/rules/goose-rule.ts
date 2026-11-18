@@ -1,27 +1,12 @@
-import { join } from "node:path";
-
 import { GOOSE_GLOBAL_DIR, GOOSE_RULE_FILE_NAME } from "../../constants/goose-paths.js";
-import { readFileContent } from "../../utils/file.js";
-import { RulesyncRule } from "./rulesync-rule.js";
+import { SingleRootFileRule } from "./single-root-file-rule.js";
 import {
-  ToolRule,
-  ToolRuleForDeletionParams,
-  ToolRuleFromFileParams,
-  ToolRuleFromRulesyncRuleParams,
   ToolRuleParams,
-  ToolRuleSettablePaths,
+  ToolRuleRootOnlySettablePaths,
   ToolRuleSettablePathsGlobal,
 } from "./tool-rule.js";
 
 export type GooseRuleParams = ToolRuleParams;
-
-export type GooseRuleSettablePaths = Pick<ToolRuleSettablePaths, "root"> & {
-  root: {
-    relativeDirPath: string;
-    relativeFilePath: string;
-  };
-  nonRoot?: undefined;
-};
 
 export type GooseRuleSettablePathsGlobal = ToolRuleSettablePathsGlobal;
 
@@ -53,12 +38,12 @@ export type GooseRuleSettablePathsGlobal = ToolRuleSettablePathsGlobal;
  * (e.g. cline in global mode) — a second writer would need cross-target
  * shared-file coordination for zero gain (decision recorded in issue #2207).
  */
-export class GooseRule extends ToolRule {
+export class GooseRule extends SingleRootFileRule {
   static getSettablePaths({
     global,
   }: {
     global?: boolean;
-  } = {}): GooseRuleSettablePaths | GooseRuleSettablePathsGlobal {
+  } = {}): ToolRuleRootOnlySettablePaths | GooseRuleSettablePathsGlobal {
     if (global) {
       return {
         root: {
@@ -75,81 +60,21 @@ export class GooseRule extends ToolRule {
     };
   }
 
-  static async fromFile({
-    outputRoot = process.cwd(),
-    relativeFilePath: _relativeFilePath,
-    validate = true,
-    global = false,
-  }: ToolRuleFromFileParams): Promise<GooseRule> {
-    const paths = this.getSettablePaths({ global });
-    const fileContent = await readFileContent(
-      join(outputRoot, paths.root.relativeDirPath, paths.root.relativeFilePath),
-    );
-
-    return new GooseRule({
-      outputRoot,
-      relativeDirPath: paths.root.relativeDirPath,
-      relativeFilePath: paths.root.relativeFilePath,
-      fileContent,
-      validate,
-      root: true,
-    });
-  }
-
-  static fromRulesyncRule({
-    outputRoot = process.cwd(),
-    rulesyncRule,
-    validate = true,
-    global = false,
-  }: ToolRuleFromRulesyncRuleParams): GooseRule {
-    const paths = this.getSettablePaths({ global });
-    const isRoot = rulesyncRule.getFrontmatter().root ?? false;
-
-    return new GooseRule({
-      outputRoot,
-      relativeDirPath: paths.root.relativeDirPath,
-      relativeFilePath: paths.root.relativeFilePath,
-      fileContent: rulesyncRule.getBody(),
-      validate,
-      root: isRoot,
-    });
-  }
-
-  toRulesyncRule(): RulesyncRule {
-    return this.toRulesyncRuleDefault();
-  }
-
-  validate() {
-    // Goose uses plain markdown without frontmatter requirements
-    // Validation always succeeds
-    return { success: true as const, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
+  protected static override isRootFilePath({
     relativeDirPath,
     relativeFilePath,
-    global = false,
-  }: ToolRuleForDeletionParams): GooseRule {
+    global,
+  }: {
+    relativeDirPath: string;
+    relativeFilePath: string;
+    global: boolean;
+  }): boolean {
     const paths = this.getSettablePaths({ global });
-    const isRoot =
+    return (
       relativeFilePath === paths.root.relativeFilePath &&
-      (relativeDirPath === "." || relativeDirPath === paths.root.relativeDirPath);
-
-    return new GooseRule({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      root: isRoot,
-    });
+      (relativeDirPath === "." || relativeDirPath === paths.root.relativeDirPath)
+    );
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "goose",
-    });
-  }
+  protected static override readonly toolTarget = "goose";
 }

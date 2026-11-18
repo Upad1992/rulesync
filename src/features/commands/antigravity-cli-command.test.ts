@@ -1,9 +1,8 @@
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
-import { stringifyFrontmatter } from "../../utils/frontmatter.js";
 import { AntigravityCliCommand } from "./antigravity-cli-command.js";
 import { AntigravityCommandFrontmatter } from "./antigravity-command.js";
 import { RulesyncCommand } from "./rulesync-command.js";
@@ -17,7 +16,6 @@ const buildCommand = (targets: string[]) =>
       description: "Test",
     },
     body: "Body",
-    fileContent: "",
   });
 
 describe("AntigravityCliCommand", () => {
@@ -47,7 +45,6 @@ describe("AntigravityCliCommand", () => {
         relativeFilePath: "test.md",
         frontmatter,
         body: "test body",
-        fileContent: stringifyFrontmatter("test body", frontmatter),
       });
 
       const result = command.validate();
@@ -71,7 +68,6 @@ describe("AntigravityCliCommand", () => {
         relativeFilePath: "my-workflow.md",
         frontmatter,
         body,
-        fileContent: stringifyFrontmatter(body, frontmatter),
       });
 
       const rulesyncCommand = antigravityCommand.toRulesyncCommand();
@@ -109,7 +105,6 @@ describe("AntigravityCliCommand", () => {
         relativeFilePath: "original-file.md",
         frontmatter: rulesyncFrontmatter,
         body,
-        fileContent: stringifyFrontmatter(body, rulesyncFrontmatter),
       });
 
       const antigravityCommand = AntigravityCliCommand.fromRulesyncCommand({
@@ -140,7 +135,6 @@ describe("AntigravityCliCommand", () => {
         relativeFilePath: "global-workflow.md",
         frontmatter: rulesyncFrontmatter,
         body,
-        fileContent: stringifyFrontmatter(body, rulesyncFrontmatter),
       });
 
       const antigravityCommand = AntigravityCliCommand.fromRulesyncCommand({
@@ -169,7 +163,6 @@ describe("AntigravityCliCommand", () => {
         relativeFilePath: "evil.md",
         frontmatter: rulesyncFrontmatter,
         body: "Malicious payload",
-        fileContent: stringifyFrontmatter("Malicious payload", rulesyncFrontmatter),
       });
 
       const antigravityCommand = AntigravityCliCommand.fromRulesyncCommand({

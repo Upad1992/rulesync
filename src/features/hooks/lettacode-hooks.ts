@@ -1,15 +1,13 @@
 import { join } from "node:path";
 
 import { LETTACODE_DIR, LETTACODE_SETTINGS_FILE_NAME } from "../../constants/lettacode-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import {
   CANONICAL_TO_LETTACODE_EVENT_NAMES,
   LETTACODE_HOOK_EVENTS,
   LETTACODE_TO_CANONICAL_EVENT_NAMES,
 } from "../../types/hooks.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
-import type { Logger } from "../../utils/logger.js";
+import { type Logger, warnOnceWithFallback } from "../../utils/logger.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
@@ -24,8 +22,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
@@ -50,7 +46,7 @@ const LETTACODE_NO_MATCHER_EVENTS: ReadonlySet<string> = new Set([
 // verbatim. `timeout` is in milliseconds (default 60000), so the
 // canonical seconds are converted both ways. Only `command` hooks are emitted:
 // Letta's `prompt` hooks exist on a subset of events only.
-const LETTACODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const LETTACODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedEvents: LETTACODE_HOOK_EVENTS,
   canonicalToToolEventNames: CANONICAL_TO_LETTACODE_EVENT_NAMES,
   toolToCanonicalEventNames: LETTACODE_TO_CANONICAL_EVENT_NAMES,
@@ -59,6 +55,18 @@ const LETTACODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedHookTypes: new Set(["command"]),
   timeoutUnit: "milliseconds",
 };
+
+/**
+ * Letta Code documents settings-file hooks as deprecated in favor of Mods
+ * (https://docs.letta.com/reference/deprecated/hooks) but still ships the
+ * loader, so rulesync keeps emitting them and tells the user once per run.
+ * Mods are not modeled: they are JS/TS code modules loaded only from
+ * `~/.letta/mods/` or an agent's memory directory, with no declarative or
+ * project-local form a canonical hook could be translated into.
+ */
+export const LETTACODE_HOOKS_DEPRECATION_WARNING =
+  "Letta Code documents settings.json hooks as deprecated in favor of Mods and may remove them in a future release; " +
+  "rulesync still writes them while Letta Code loads them. See https://docs.letta.com/reference/deprecated/hooks";
 
 /**
  * Letta Code keeps a boolean `disabled` switch beside the event arrays inside
@@ -138,17 +146,15 @@ function parseLettacodeSettings(fileContent: string, filePath?: string): Record<
  * and UI preferences, ...), so generation merges the `hooks` key into the
  * existing file (see `SHARED_CONFIG_OWNERSHIP`) instead of overwriting it.
  *
+ * Letta Code marks this surface deprecated in favor of Mods (see
+ * `LETTACODE_HOOKS_DEPRECATION_WARNING`); generation warns once per run when it
+ * writes any hook.
+ *
+ * @see https://docs.letta.com/reference/deprecated/hooks
  * @see https://github.com/letta-ai/letta-code/blob/main/src/hooks/types.ts
  * @see https://github.com/letta-ai/letta-code/blob/main/src/hooks/loader.ts
  */
 export class LettacodeHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   override isDeletable(): boolean {
     // settings.json carries user-managed settings beyond hooks, so it is never
     // removed wholesale; clearing hooks happens via an in-place merge.
@@ -162,23 +168,6 @@ export class LettacodeHooks extends ToolHooks {
       relativeDirPath: LETTACODE_DIR,
       relativeFilePath: LETTACODE_SETTINGS_FILE_NAME,
     };
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<LettacodeHooks> {
-    const paths = LettacodeHooks.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new LettacodeHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -209,6 +198,9 @@ export class LettacodeHooks extends ToolHooks {
       converterConfig: LETTACODE_CONVERTER_CONFIG,
       logger,
     });
+    if (Object.keys(hooks).length > 0) {
+      warnOnceWithFallback(logger, LETTACODE_HOOKS_DEPRECATION_WARNING);
+    }
     const fileContent = applySharedConfigPatch({
       fileKey: sharedConfigFileKey(paths),
       feature: "hooks",
@@ -228,17 +220,10 @@ export class LettacodeHooks extends ToolHooks {
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
     const configPath = join(this.getRelativeDirPath(), this.getRelativeFilePath());
-    let settings: Record<string, unknown>;
-    try {
-      settings = parseLettacodeSettings(this.getFileContent(), configPath);
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Letta Code hooks content in ${configPath}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const settings: Record<string, unknown> = this.parseFileContentOrThrow({
+      displayName: "Letta Code",
+      parse: (fileContent) => parseLettacodeSettings(fileContent, configPath),
+    });
     const hooks = toolHooksToCanonical({
       logger,
       hooks: settings.hooks,
@@ -250,24 +235,6 @@ export class LettacodeHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): LettacodeHooks {
-    return new LettacodeHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -295,7 +295,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test-command.md",
-        fileContent: "",
         frontmatter: {
           targets: ["junie"],
           description: "Test description",
@@ -321,7 +320,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test-command.md",
-        fileContent: "",
         frontmatter: {
           targets: ["junie"],
           description: "Test description",
@@ -346,7 +344,6 @@ describe("JunieCommand", () => {
           outputRoot: testDir,
           relativeDirPath: ".rulesync/commands",
           relativeFilePath: "fix.md",
-          fileContent: "",
           frontmatter: {
             targets: ["junie"],
             description: "Fix",
@@ -473,7 +470,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["*"], description: "Test" },
         body: "Body",
       });
@@ -486,7 +482,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["junie"], description: "Test" },
         body: "Body",
       });
@@ -499,7 +494,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["other-tool"] as any, description: "Test" },
         body: "Body",
       });
@@ -512,7 +506,6 @@ describe("JunieCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/command",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: undefined, description: "Test" } as any,
         body: "Body",
       });

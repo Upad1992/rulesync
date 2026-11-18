@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import { load } from "js-yaml";
 import * as smolToml from "smol-toml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { CLAUDECODE_SETTINGS_SCHEMA_URL } from "../constants/claudecode-paths.js";
 import {
@@ -34,6 +34,7 @@ import {
 // green. Keep this list in sync with the actual `it`s by hand.
 const permissionsGenerateTargets = [
   "opencode",
+  "opencodev1",
   "mimocode",
   "omp",
   "pi",
@@ -76,6 +77,7 @@ const permissionsGlobalTargets = [
   "omp",
   "pi",
   "opencode",
+  "opencodev1",
   "mimocode",
   "codebuddy",
   "codewhale",
@@ -110,6 +112,7 @@ const permissionsGlobalTargets = [
   "junie",
   "lettacode",
   "qoder",
+  "trae",
   "kiro-cli",
   "kiro-ide",
 ] as const;
@@ -144,6 +147,7 @@ describe("E2E: permissions", () => {
     // opencode writes the `.jsonc` twin when neither file exists yet, so both
     // spellings must stay absent.
     { target: "opencode", relativePaths: [["opencode.json"], ["opencode.jsonc"]] },
+    { target: "opencodev1", relativePaths: [["opencode.json"], ["opencode.jsonc"]] },
     {
       target: "mimocode",
       relativePaths: [
@@ -380,6 +384,35 @@ describe("E2E: permissions", () => {
 
     await runGenerate({ target: "opencode", features: "permissions" });
 
+    // OpenCode V2 reads an ordered `permissions` array.
+    const content = JSON.parse(await readFileContent(join(testDir, "opencode.jsonc")));
+    expect(content.permission).toBeUndefined();
+    expect(content.permissions).toEqual([
+      { action: "shell", resource: "*", effect: "ask" },
+      { action: "shell", resource: "git *", effect: "allow" },
+      { action: "read", resource: ".env", effect: "deny" },
+    ]);
+  });
+
+  it("should generate opencodev1 permissions from .rulesync/permissions.jsonc", async () => {
+    const testDir = getTestDir();
+
+    await writeFileContent(
+      join(testDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH),
+      JSON.stringify(
+        {
+          permission: {
+            bash: { "*": "ask", "git *": "allow" },
+            read: { ".env": "deny" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await runGenerate({ target: "opencodev1", features: "permissions" });
+
     const content = JSON.parse(await readFileContent(join(testDir, "opencode.jsonc")));
     expect(content.permission.bash["git *"]).toBe("allow");
     expect(content.permission.read[".env"]).toBe("deny");
@@ -444,7 +477,11 @@ describe("E2E: permissions", () => {
 
     // OpenCode still sees the shared bash category.
     const opencode = JSON.parse(await readFileContent(join(testDir, "opencode.jsonc")));
-    expect(opencode.permission.bash["git *"]).toBe("allow");
+    expect(opencode.permissions).toContainEqual({
+      action: "shell",
+      resource: "git *",
+      effect: "allow",
+    });
   });
 
   it("should generate permissions from permissions.jsonc (preferred over permissions.json)", async () => {
@@ -947,11 +984,15 @@ web_search_request = true
     await runGenerate({ target: "copilot", features: "permissions" });
 
     const generated = JSON.parse(await readFileContent(join(testDir, ".vscode", "settings.json")));
+    // `ask` is written as `false` too, so no broader `true` entry can
+    // auto-approve it.
     expect(generated["chat.tools.terminal.autoApprove"]).toEqual({
       "git *": true,
       "rm -rf *": false,
+      "npm *": false,
     });
     expect(generated["chat.permissions.default"]).toBe("autoApprove");
+    expect(generated["chat.defaultConfiguration"]).toEqual({ approvals: "allowAll" });
     expect(generated["editor.tabSize"]).toBe(2);
   });
 
@@ -1305,6 +1346,40 @@ web_search_request = true
     expect(content.options.debug).toBe(true);
   });
 
+  it("should generate crush bash pattern rules into crush.json command lists", async () => {
+    const testDir = getTestDir();
+
+    await writeFileContent(
+      join(testDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH),
+      JSON.stringify(
+        {
+          permission: {
+            bash: {
+              "go build": "allow",
+              "kubectl get": "allow",
+              "kubectl *": "deny",
+              "helm *": "ask",
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await runGenerate({ target: "crush", features: "permissions" });
+
+    // An exact allow becomes a safe command unless an ask/deny covers it
+    // (`kubectl get` is withheld by `kubectl *`); a whole-command deny becomes a
+    // blocked command; an ask is skipped, since blocking would refuse the
+    // command's read-only forms outright.
+    const content = JSON.parse(await readFileContent(join(testDir, "crush.json")));
+    expect(content.permissions).toEqual({
+      safe_commands: ["go build"],
+      blocked_commands: ["kubectl"],
+    });
+  });
+
   it("should generate pool permissions into .poolside/settings.yaml", async () => {
     const testDir = getTestDir();
 
@@ -1466,6 +1541,7 @@ web_search_request = true
             read: { "*": "allow" },
             agent: { "*": "ask" },
           },
+          omp: { restrictedFolders: ["~/secrets"] },
         },
         null,
         2,
@@ -1477,7 +1553,11 @@ web_search_request = true
     const parsed = load(await readFileContent(join(testDir, ".omp", "config.yml")));
     expect(parsed).toEqual({
       theme: { dark: "titanium" },
-      tools: { approvalMode: "write", approval: { read: "allow", task: "prompt" } },
+      tools: {
+        approvalMode: "write",
+        restrictedFolders: ["~/secrets"],
+        approval: { read: "allow", task: "prompt" },
+      },
       bash: {
         patterns: [
           { match: "rm -rf *", approval: "deny" },
@@ -1496,7 +1576,7 @@ web_search_request = true
       read: { "*": "allow" },
       agent: { "*": "ask" },
     });
-    expect(imported.omp).toEqual({ approvalMode: "write" });
+    expect(imported.omp).toEqual({ approvalMode: "write", restrictedFolders: ["~/secrets"] });
   });
 
   it("should generate pi permissions into .pi/settings.json and preserve unrelated keys", async () => {
@@ -1951,7 +2031,11 @@ enabled = true
       join(testDir, "crush.json"),
       JSON.stringify(
         {
-          permissions: { allowed_tools: ["bash", "view", "edit:write"] },
+          permissions: {
+            allowed_tools: ["bash", "view", "edit:write"],
+            safe_commands: ["go build"],
+            blocked_commands: ["kubectl"],
+          },
           options: { disabled_tools: ["fetch"] },
         },
         null,
@@ -1965,6 +2049,9 @@ enabled = true
       await readFileContent(join(testDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH)),
     );
     expect(content.permission.bash["*"]).toBe("allow");
+    expect(content.permission.bash["go build"]).toBe("allow");
+    expect(content.permission.bash.kubectl).toBe("deny");
+    expect(content.permission.bash["kubectl *"]).toBe("deny");
     expect(content.permission.read["*"]).toBe("allow");
     expect(content.permission.webfetch["*"]).toBe("deny");
     // `tool:action` entries are narrower than a tool-wide rule and are not imported.
@@ -2468,7 +2555,8 @@ describe("E2E: permissions (global mode)", () => {
       await readFileContent(join(homeDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH)),
     );
     expect(imported.permission).toEqual({
-      bash: { "git status": "allow", rm: "deny" },
+      // A prefix deny keeps its reach as a glob on import.
+      bash: { "git status": "allow", rm: "deny", "rm *": "deny" },
     });
     // The whole-group switches round-trip through the `bob` override block.
     expect(imported.bob).toEqual({ approval: { allowed_permissions: ["read", "execute"] } });
@@ -2841,6 +2929,51 @@ describe("E2E: permissions (global mode)", () => {
     });
   });
 
+  it("should generate trae permissions into ~/.trae/permission/global.json (global-only)", async () => {
+    const projectDir = getProjectDir();
+    const homeDir = getHomeDir();
+
+    await writeFileContent(
+      join(projectDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH),
+      JSON.stringify(
+        {
+          permission: {
+            bash: { "git *": "allow", "rm -rf *": "deny" },
+            "mcp__github__*": { "*": "ask" },
+            webfetch: { "github.com": "allow" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await runGenerate({
+      target: "trae",
+      features: "permissions",
+      global: true,
+      env: { HOME_DIR: homeDir },
+    });
+
+    const generated = JSON.parse(
+      await readFileContent(join(homeDir, ".trae", "permission", "global.json")),
+    );
+    expect(generated).toEqual({
+      customProfiles: {
+        defaultCustomProfile: {
+          approval: {
+            commandRules: {
+              "git *": { approval: "allow" },
+              "rm -rf *": { approval: "deny" },
+            },
+            mcpRules: { "github__*": { approval: "ask" } },
+          },
+        },
+      },
+      resourceAuthorization: { network: { allow: ["github.com"] } },
+    });
+  });
+
   it("should generate junie permissions as AllowListRuleSet objects (global-only)", async () => {
     const projectDir = getProjectDir();
     const homeDir = getHomeDir();
@@ -2876,9 +3009,10 @@ describe("E2E: permissions (global mode)", () => {
     // Canonical deny downgrades to ask (Junie has no deny).
     expect(content.rules.executables).toEqual({
       default: "ask",
+      // Junie is first-match-wins, so restrictions are written ahead of allows.
       rules: [
-        { prefix: "git ", action: "allow" },
         { pattern: "rm *", action: "ask" },
+        { prefix: "git ", action: "allow" },
       ],
     });
     expect(content.rules.fileEditing).toEqual({ rules: [{ pattern: "src/**", action: "allow" }] });
@@ -3308,6 +3442,41 @@ describe("E2E: permissions (global mode)", () => {
     const generated = JSON.parse(
       await readFileContent(join(homeDir, ".config", "opencode", "opencode.jsonc")),
     );
+    expect(generated.permissions).toContainEqual({
+      action: "shell",
+      resource: "git status *",
+      effect: "allow",
+    });
+  });
+
+  it("should generate opencodev1 permissions in home directory with --global", async () => {
+    const projectDir = getProjectDir();
+    const homeDir = getHomeDir();
+
+    await writeFileContent(
+      join(projectDir, RULESYNC_PERMISSIONS_RELATIVE_FILE_PATH),
+      JSON.stringify(
+        {
+          root: true,
+          permission: {
+            bash: { "*": "ask", "git status *": "allow" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await runGenerate({
+      target: "opencodev1",
+      features: "permissions",
+      global: true,
+      env: { HOME_DIR: homeDir },
+    });
+
+    const generated = JSON.parse(
+      await readFileContent(join(homeDir, ".config", "opencode", "opencode.jsonc")),
+    );
     expect(generated.permission.bash["git status *"]).toBe("allow");
   });
 
@@ -3661,7 +3830,7 @@ describe("E2E: permissions (global mode)", () => {
               "rm -rf *": "deny",
               "git push * --force": "deny",
             },
-            read: { "src/**": "allow" },
+            read: { "src/**": "allow", "~/.ssh/**": "deny" },
             webfetch: { "https://example.com/*": "allow" },
           },
         },
@@ -3689,7 +3858,13 @@ describe("E2E: permissions (global mode)", () => {
     // and a `*` that spans words has no spelling. Such a deny is widened to
     // its leading literal words, so it still blocks what it was meant to.
     expect(generated.permissions.allow).toContain("command(regex:^npm$ ^run$ ^test:.*$)");
-    expect(generated.permissions.deny).toEqual(["command(git push)", "command(rm -rf)"]);
+    // agy does not expand `~`, so a `~/` path is written with the absolute
+    // home directory; the file lives in that home and is never shared.
+    expect(generated.permissions.deny).toEqual([
+      "command(git push)",
+      "command(rm -rf)",
+      `read_file(${homeDir.replaceAll("\\", "/")}/.ssh)`,
+    ]);
     expect(generated.permissions.allow).toContain("read_file(src)");
     expect(generated.permissions.allow).toContain("read_url(example.com)");
   });

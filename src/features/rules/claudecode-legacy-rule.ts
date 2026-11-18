@@ -10,12 +10,12 @@ import { readFileContent } from "../../utils/file.js";
 import { RulesyncRule } from "./rulesync-rule.js";
 import {
   ToolRule,
+  ToolRuleBuildLocalRootFileParams,
   ToolRuleForDeletionParams,
   ToolRuleFromFileParams,
   ToolRuleFromRulesyncRuleParams,
   ToolRuleSettablePaths,
   ToolRuleSettablePathsGlobal,
-  buildToolPath,
 } from "./tool-rule.js";
 
 export type ClaudecodeLegacyRuleSettablePaths = Omit<ToolRuleSettablePaths, "root"> & {
@@ -46,17 +46,40 @@ export type ClaudecodeLegacyRuleSettablePathsGlobal = ToolRuleSettablePathsGloba
  * - {project}/CLAUDE.md references to {project}/.claude/memories/*.md using `@` syntax
  */
 export class ClaudecodeLegacyRule extends ToolRule {
+  /**
+   * Build this tool's separate personal local-root file (`localRootMode:
+   * "separate-local-file"`), for generation and import. See
+   * {@link ToolRuleBuildLocalRootFileParams}.
+   */
+  static buildLocalRootFile({
+    outputRoot,
+    global,
+    fileName,
+    body,
+    relativeDirPath,
+    localRoot,
+  }: ToolRuleBuildLocalRootFileParams): ToolRule {
+    const paths = ClaudecodeLegacyRule.getSettablePaths({ global });
+    return new ClaudecodeLegacyRule({
+      outputRoot,
+      relativeDirPath: relativeDirPath ?? paths.root.relativeDirPath,
+      relativeFilePath: fileName,
+      fileContent: body,
+      validate: true,
+      root: true,
+      localRoot,
+    });
+  }
+
   static getSettablePaths({
     global,
-    excludeToolDir,
   }: {
     global?: boolean;
-    excludeToolDir?: boolean;
   } = {}): ClaudecodeLegacyRuleSettablePaths | ClaudecodeLegacyRuleSettablePathsGlobal {
     if (global) {
       return {
         root: {
-          relativeDirPath: buildToolPath(CLAUDECODE_DIR, ".", excludeToolDir),
+          relativeDirPath: join(CLAUDECODE_DIR, "."),
           relativeFilePath: CLAUDECODE_RULE_FILE_NAME,
         },
       };
@@ -73,11 +96,7 @@ export class ClaudecodeLegacyRule extends ToolRule {
         },
       ],
       nonRoot: {
-        relativeDirPath: buildToolPath(
-          CLAUDECODE_DIR,
-          CLAUDECODE_MEMORIES_DIR_NAME,
-          excludeToolDir,
-        ),
+        relativeDirPath: join(CLAUDECODE_DIR, CLAUDECODE_MEMORIES_DIR_NAME),
       },
     };
   }
@@ -169,10 +188,5 @@ export class ClaudecodeLegacyRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "claudecode-legacy",
-    });
-  }
+  protected static override readonly toolTarget = "claudecode-legacy";
 }

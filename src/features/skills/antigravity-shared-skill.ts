@@ -1,20 +1,16 @@
 import { join } from "node:path";
 
+import { z } from "zod/mini";
+
 import {
   ANTIGRAVITY_GEMINI_DIR,
   ANTIGRAVITY_SKILLS_DIR_PATH,
 } from "../../constants/antigravity-cli-paths.js";
 import { SKILL_FILE_NAME } from "../../constants/general.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
 import { ToolTarget } from "../../types/tool-targets.js";
-import { formatError } from "../../utils/error.js";
 import { isRecord } from "../../utils/type-guards.js";
 import { antigravityCommandSkillNameExists } from "../commands/antigravity-command-skill-name.js";
-import {
-  AntigravitySkillFrontmatter,
-  AntigravitySkillFrontmatterSchema,
-} from "./antigravity-skill.js";
 import { RulesyncSkill, RulesyncSkillFrontmatterInput, SkillFile } from "./rulesync-skill.js";
 import { resolveMetadata } from "./skills-utils.js";
 import {
@@ -24,6 +20,13 @@ import {
   ToolSkillFromRulesyncSkillParams,
   ToolSkillSettablePaths,
 } from "./tool-skill.js";
+
+const AntigravitySkillFrontmatterSchema = z.looseObject({
+  name: z.string(),
+  description: z.string(),
+});
+
+type AntigravitySkillFrontmatter = z.infer<typeof AntigravitySkillFrontmatterSchema>;
 
 export type AntigravitySharedSkillParams = {
   outputRoot?: string;
@@ -48,8 +51,9 @@ export type AntigravitySharedSkillParams = {
  * {@link AntigravitySharedSkill.getToolTarget}.
  *
  * Frontmatter beyond `name`/`description` (e.g. `disable-slash-command`,
- * `metadata`) comes from the rulesync section named after that target, with the
- * root-level `user-invocable` / `metadata` as defaults. On the shared project
+ * `disable-model-invocation`, `metadata`) comes from the rulesync section named
+ * after that target, with the root-level `user-invocable` /
+ * `disable-model-invocation` / `metadata` as defaults. On the shared project
  * `.agents/skills/` tree both targets merge the `antigravity-ide` and
  * `antigravity-cli` sections so their output never diverges.
  */
@@ -117,28 +121,8 @@ export class AntigravitySharedSkill extends ToolSkill {
     return result;
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (this.mainFile === undefined) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-    const result = AntigravitySkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(AntigravitySkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
@@ -154,16 +138,7 @@ export class AntigravitySharedSkill extends ToolSkill {
       ...(Object.keys(antigravityFields).length > 0 && { [sectionKey]: antigravityFields }),
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -198,6 +173,14 @@ export class AntigravitySharedSkill extends ToolSkill {
         : rulesyncFrontmatter["user-invocable"] === false
           ? true
           : undefined;
+    // `disable-model-invocation: true` keeps the skill out of automatic model
+    // invocation so it runs only via `/<name>` (Antigravity "Build plugins"
+    // skill frontmatter); the root-level flag is the default, a section value wins.
+    const sectionDisableModelInvocation = sectionFields["disable-model-invocation"];
+    const disableModelInvocation =
+      typeof sectionDisableModelInvocation === "boolean"
+        ? sectionDisableModelInvocation
+        : rulesyncFrontmatter["disable-model-invocation"];
     const metadata = resolveMetadata({
       rootFrontmatter: rulesyncFrontmatter,
       section: sectionFields,
@@ -210,6 +193,9 @@ export class AntigravitySharedSkill extends ToolSkill {
       name: rulesyncFrontmatter.name,
       description: rulesyncFrontmatter.description,
       ...(disableSlashCommand !== undefined && { "disable-slash-command": disableSlashCommand }),
+      ...(disableModelInvocation !== undefined && {
+        "disable-model-invocation": disableModelInvocation,
+      }),
       ...(metadata !== undefined && { metadata }),
     };
 
@@ -265,46 +251,12 @@ export class AntigravitySharedSkill extends ToolSkill {
   }
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<AntigravitySharedSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: (options) => this.getSettablePaths(options),
-    });
-
-    const result = AntigravitySkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new this({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new this(
+      await this.loadStandardSkillParams({ params, schema: AntigravitySkillFrontmatterSchema }),
+    );
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): AntigravitySharedSkill {
-    return new this({
-      outputRoot,
-      relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): AntigravitySharedSkill {
+    return new this(this.forDeletionParams(params));
   }
 }

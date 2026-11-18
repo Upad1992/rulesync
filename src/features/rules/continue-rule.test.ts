@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -53,11 +53,6 @@ describe("ContinueRule", () => {
         relativeFilePath: "AGENTS.md",
       });
       expect(paths.nonRoot).toEqual({ relativeDirPath: join(".continue", "rules") });
-    });
-
-    it("drops the tool directory when excludeToolDir is set", () => {
-      const paths = ContinueRule.getSettablePaths({ excludeToolDir: true });
-      expect(paths.nonRoot.relativeDirPath).toBe("rules");
     });
   });
 

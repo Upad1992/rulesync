@@ -71,7 +71,7 @@ Add a `sources` array to your `rulesync.jsonc`:
       "source": "@acme/skill-package",
       "transport": "npm",
       "registry": "https://acme.jfrog.io/artifactory/api/npm/npm-local/",
-      "tokenEnv": "ACME_REGISTRY_TOKEN",
+      "tokenEnv": "ACME_NPM_TOKEN",
     },
   ],
 }
@@ -89,7 +89,7 @@ Each entry in `sources` accepts:
 | `path`      | `string`   | Path to the skills directory within the repository. Defaults to `"skills"`. Set to `""`, `"."`, or `"./"` to target the entire repository root (see note below). For GitHub transport, use the `:path` source syntax.                                                      |
 | `rulesPath` | `string`   | Path to the rules directory within the repository or package. Defaults to `"rules"`. This is independent from the skills-only `path` field.                                                                                                                                |
 | `registry`  | `string`   | npm transport only. Base URL of the npm-compatible registry. Defaults to `https://registry.npmjs.org`.                                                                                                                                                                     |
-| `tokenEnv`  | `string`   | npm transport only. Name of the environment variable holding the registry token. Defaults to `NPM_TOKEN`.                                                                                                                                                                  |
+| `tokenEnv`  | `string`   | npm transport only. Name of the environment variable holding the registry token. Defaults to `NPM_TOKEN`. Must be `NPM_TOKEN`, `NODE_AUTH_TOKEN`, or end with `_NPM_TOKEN` (e.g. `ACME_NPM_TOKEN`).                                                                        |
 
 An empty `skills` or `rules` list fails only the source that declares it, in `--frozen` mode too: the other sources are still installed into `.curated/`, and then `install` exits with an error that counts the failed sources.
 
@@ -117,6 +117,13 @@ Package layout: skills are discovered the same way as for the git transports. Sk
 
 Authentication uses a bearer token from an environment variable: `NPM_TOKEN` by default, or the variable named by the per-source `tokenEnv` field. The token is sent as `Authorization: Bearer <token>` to the registry (and to the tarball host only when it matches the registry host). `.npmrc` files are intentionally **not** read.
 
+For CI environments using `NODE_AUTH_TOKEN`, set `"tokenEnv": "NODE_AUTH_TOKEN"` explicitly. The default remains `NPM_TOKEN`.
+
+Because `registry` and `tokenEnv` live in the project's committed config, a cloned repository must not be able to send your token to a host of its choosing. rulesync therefore:
+
+- only accepts a `tokenEnv` named `NPM_TOKEN`, `NODE_AUTH_TOKEN`, or ending with `_NPM_TOKEN`, so a config cannot point it at unrelated secrets such as `GITHUB_TOKEN`;
+- only sends a token to `https://registry.npmjs.org`, or to a registry whose origin you list in the `RULESYNC_NPM_TRUSTED_REGISTRIES` environment variable (comma-separated, e.g. `RULESYNC_NPM_TRUSTED_REGISTRIES=https://acme.jfrog.io`). Each entry must be a full URL with its scheme; an entry such as `acme.jfrog.io` cannot be read as an origin, so it trusts nothing and rulesync warns about it. For any other registry, the `NPM_TOKEN` fallback is not sent (rulesync warns and requests anonymously), and an explicit `tokenEnv` is an error.
+
 Resolved versions are pinned in `rulesync-npm.lock.json` (next to `rulesync.lock`), which records the resolved version, the tarball integrity, and per-artifact content hashes. Commit it for reproducible installs; `--update` and `--frozen` behave the same as for git sources.
 
 ## How It Works
@@ -142,6 +149,8 @@ When `rulesync install` runs and `sources` is configured:
 | `gh`       | `rulesync.jsonc` `sources`   | `rulesync-gh.lock.yaml`                                      | Per-agent / per-scope dirs (matching `gh skill install`)                                                           |
 
 When `--mode` is omitted, rulesync defaults to `rulesync` mode. If `apm.yml` is present and `sources` is also defined, you must pass `--mode apm` or `--mode rulesync` to disambiguate.
+
+In `--mode apm`, a plain install uses the commit recorded in `rulesync-apm.lock.yaml` only while the lock entry's ref is still the one `apm.yml` declares (or, without one, the repository's default branch), and only after checking that the commit is still in that ref's history in the dependency's repository; a commit that is gone upstream or only exists in a fork fails the dependency, and `--update` re-resolves it. A changed ref is resolved again (`--frozen` fails instead). Under `--frozen`, every dependency's files are checked before any of them is written. Stale files from a previous install are only removed from `.github/instructions/` and `.github/skills/`; any other path the lockfile names is left alone with a warning.
 
 ### `--mode gh` — gh-skill-install–compatible layout
 
@@ -204,6 +213,32 @@ Example `rulesync.jsonc`:
 
 Run with `npx rulesync install --mode gh`.
 
+A plain `rulesync install --mode gh` installs each source at the commit recorded in `rulesync-gh.lock.yaml`, so a new upstream release or a moved branch is not picked up until you run it with `--update`. A source whose `ref` was changed in `rulesync.jsonc` (or added or dropped) is no longer covered by the lock and is resolved again. `--frozen` fails on such a change instead. Before using a locked commit, rulesync checks that it is still in the history of the locked ref in that repository; a commit that is gone (for example after a force-push) or that only exists in a fork fails the source, and so does a locked ref that is gone upstream (a renamed default branch, a deleted release); `--update` re-resolves it.
+
+At project scope, a deployed file is refused when any path component below the project root — the install directory, the skill directory, or the file itself — is a symbolic link, and the install fails with `Refusing to follow a symbolic link`. This stops a cloned repository from committing a link such as `.agents/skills/x/config -> ../../../.git/config` that would send the remote bytes into another file of the project. User scope is not checked, so a `~/.claude` linked into a dotfiles checkout keeps working.
+
+Files that a previous run deployed and the upstream no longer ships are removed again, but only from that skill's own install directory. A stale file that is itself a symbolic link is removed as a link, without touching its target; a stale file reached through a linked directory is left alone with a warning. Because `rulesync-gh.lock.yaml` is committed with the project, user-scope files are only cleaned up while the current config still installs the same source with the same agent at user scope; otherwise rulesync warns and leaves them for you to remove.
+
+## Sharing MCP and other configuration
+
+In the default install mode, `sources` and its lockfiles cover rules and skills. To share MCP servers, commands, subagents, hooks, or permissions, make the shared Rulesync source tree available separately, such as by checking out your team's configuration repository at a specific commit (for example as a git submodule). Add that tree before your project tree in [`inputRoots`](separate-input-root.md):
+
+```jsonc
+{
+  "inputRoots": ["./team-config/.rulesync", "./.rulesync"],
+}
+```
+
+For example, if the shared tree contains `mcp.jsonc`, `rulesync generate` reads its servers alongside the local ones. Local entries replace shared entries with the same server name. Commands and subagents are merged file by file, so a local file replaces a shared file with the same name (compared case-insensitively). For hooks, permissions, and ignore, the last tree with a file supplies the whole file, and Rulesync warns when it replaces one. See [Merge rules per feature](separate-input-root.md#merge-rules-per-feature) for the full rules.
+
+Keep these caveats in mind:
+
+- The first input root is the required base. With the order above, `rulesync generate` fails when `./team-config/.rulesync` is missing, for example in a fresh clone where the shared checkout or submodule has not been initialized yet.
+- `inputRoots` only affects `rulesync generate`. `install`, `import`, `gitignore`, and the other commands still use `.rulesync/` in the current working directory.
+- `rulesync install --frozen` does not fetch or verify this shared checkout. Pin and update it separately from the Rulesync lockfiles.
+
+Only use shared source trees you [trust](separate-input-root.md#symlinks-and-trust). Shared MCP servers and hooks run commands on each developer's machine, shared permissions widen what agents may do without asking, and shared rules, commands, and subagents become instructions to the agent, so review the changes before bumping the pinned revision.
+
 ## CLI Options
 
 The `install` command accepts these flags:
@@ -238,7 +273,7 @@ rulesync generate
 
 ## Lockfile
 
-The lockfile at `rulesync.lock` (at the project root) records the resolved commit SHA, the skill and rule selections each entry was written for, and per-artifact integrity hashes for each source so that builds are reproducible. Rulesync verifies cached rule and skill content against these hashes before reusing it: a curated rule or skill whose files were edited, added, or removed in place is fetched again at its locked ref (under `--frozen` too) and restored to the locked content. Two cases are checked for presence only: a skill whose name an earlier declared source already installed (the curated directory holds that source's copy, which takes precedence), and a skill locked with an empty integrity by the migration from the legacy lockfile format, until `--update` or a ref change fetches it again and records its hash. It is safe to commit this file. An example:
+The lockfile at `rulesync.lock` (at the project root) records the resolved commit SHA, the skill and rule selections each entry was written for, and per-artifact integrity hashes for each source so that builds are reproducible. Rulesync verifies cached rule and skill content against these hashes before reusing it: a curated rule or skill whose files were edited, added, or removed in place is fetched again at its locked ref (under `--frozen` too) and restored to the locked content. If the content fetched at the locked ref does not match the recorded hash, rulesync warns and takes it; under `--frozen` it refuses to install that source instead. Two cases are checked for presence only: a skill whose name an earlier declared source already installed (the curated directory holds that source's copy, which takes precedence), and a skill locked with an empty integrity by the migration from the legacy lockfile format, until `--update` or a ref change fetches it again and records its hash. It is safe to commit this file. An example:
 
 ```json
 {
@@ -266,6 +301,37 @@ The lockfile at `rulesync.lock` (at the project root) records the resolved commi
 ```
 
 To update locked refs, run `rulesync install --update`.
+
+### Several Entries From One Repository
+
+A repository can be declared more than once, for example a "plugin marketplace" repository whose teams publish skills under their own directories:
+
+```jsonc
+{
+  "sources": [
+    {
+      "source": "https://github.com/org/plugin-marketplace.git",
+      "transport": "git",
+      "ref": "main",
+      "path": "plugins/team-a/skills",
+      "skills": ["skill-a1", "skill-a2"],
+    },
+    {
+      "source": "https://github.com/org/plugin-marketplace.git",
+      "transport": "git",
+      "ref": "main",
+      "path": "plugins/team-b/skills",
+      "skills": ["skill-b1"],
+    },
+  ],
+}
+```
+
+A repository declared once is locked under its plain key (`org/plugin-marketplace`). When several entries resolve to the same repository (however its URL is spelled), each of them is locked under its own key, qualified by the `path`, `rulesPath` and `ref` it declares, such as `org/plugin-marketplace#path=plugins/team-a/skills&ref=main` (the first entry that declares none of those fields keeps the plain key). Entries that declare the same location are told apart by their order (`...&entry=2`). Each entry therefore keeps its own resolved commit, selection and integrity hashes, a plain install reuses every entry's cached skills and rules, `--frozen` checks every entry, and an entry only removes the skills and rules it installed itself. The usual name precedence still applies across the entries: when two of them provide a skill or rule with the same name, the one declared first is used.
+
+A source's key can change while its location does not: adding a second entry for a repository moves the existing entry from the plain key to a qualified one, and removing all but one moves the remaining entry back to the plain key. The lock entry is then carried over to the new key when it locked the same kinds of artifacts (skills, rules or both) as the source takes, from the same `path` and `rulesPath`, for the same `ref`, so the source stays at its locked commit, its curated skills and rules are reused rather than fetched again, and `--frozen` keeps passing; the next plain install writes the lockfile under the new key. An entry recorded for another location, or one written before `skillsPath` was recorded, is not carried over, and the source is resolved and fetched again. Because entries declaring the same location are told apart only by their order, reordering them swaps their lock entries: the next plain install fetches each of them again at its locked commit. `rulesync add` does not add a second entry for a repository that is already declared; edit `rulesync.jsonc` and run `rulesync install` instead.
+
+A locked commit is only reused for the ref it was resolved from: when the `ref` a git or GitHub source declares (in `ref` or in the source string, such as `owner/repo@v2`) differs from the entry's `requestedRef`, a plain `rulesync install` resolves the source again, and `--frozen` fails instead. For a source that declares a `ref`, an entry that records no `requestedRef` (for example one migrated from an older lockfile) keeps its locked commit and passes `--frozen`; the declared ref is recorded on it the next time the entry is written. Removing a source's `ref` altogether is not detected, because the `requestedRef` of a source without one is the default branch it resolved to: the locked commit stays in use until `rulesync install --update`. For the git transport, `ref` must name a branch or a tag exactly (`v1` never matches a branch such as `feature/v1`); an annotated tag resolves to the commit it points at, and a name that is both a branch and a tag pointing at different commits is refused as ambiguous.
 
 ### Checking for Outdated Sources
 
@@ -315,7 +381,7 @@ It is safe (and recommended) to commit this file as well.
 
 ## Authentication
 
-GitHub transport uses the `GITHUB_TOKEN` or `GH_TOKEN` environment variable for authentication. This is required for private repositories and recommended for better rate limits. Git transport relies on your local git credential configuration (SSH keys, credential helpers, etc.). npm transport (experimental) uses the `NPM_TOKEN` environment variable, or the variable named by the per-source `tokenEnv` field; `.npmrc` files are not read.
+GitHub transport uses the `GITHUB_TOKEN` or `GH_TOKEN` environment variable for authentication. This is required for private repositories and recommended for better rate limits. Git transport relies on your local git credential configuration (SSH keys, credential helpers, etc.). npm transport (experimental) uses the `NPM_TOKEN` environment variable, or the variable named by the per-source `tokenEnv` field (which must be `NPM_TOKEN`, `NODE_AUTH_TOKEN`, or end with `_NPM_TOKEN`); `.npmrc` files are not read. A registry other than `https://registry.npmjs.org` only receives the token when its origin is listed in `RULESYNC_NPM_TRUSTED_REGISTRIES` (see [npm Transport](#npm-transport-experimental)).
 
 ```bash
 # Using environment variable

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import * as smolToml from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -10,6 +10,7 @@ import {
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { writeFileContent } from "../../utils/file.js";
+import { fallbackLogger } from "../../utils/logger.js";
 import { ReasonixPermissions } from "./reasonix-permissions.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
 
@@ -36,18 +37,6 @@ describe("ReasonixPermissions", () => {
     it("should return the global ~/.reasonix/config.toml path", () => {
       const paths = ReasonixPermissions.getSettablePaths({ global: true });
       expect(paths).toEqual({ relativeDirPath: ".reasonix", relativeFilePath: "config.toml" });
-    });
-  });
-
-  describe("isDeletable", () => {
-    it("should return false because the config file is shared with MCP/other settings", () => {
-      const instance = ReasonixPermissions.forDeletion({
-        outputRoot: testDir,
-        relativeDirPath: ".",
-        relativeFilePath: "reasonix.toml",
-      });
-
-      expect(instance.isDeletable()).toBe(false);
     });
   });
 
@@ -371,8 +360,165 @@ describe("ReasonixPermissions", () => {
       const parsed = smolToml.parse(instance.getFileContent()) as any;
       expect(parsed.permissions).toEqual({
         allow: ["Bash(npm *)", "Edit(docs/**)", "glob", "grep"],
-        ask: ["task", "web_fetch", "web_search"],
+        ask: ["spawn_agents", "task", "web_fetch", "web_search"],
         deny: ["notebook_edit", "read_file(.env)", "write_file(secrets/**)"],
+      });
+    });
+
+    it("should write an agent rule under both task and spawn_agents and replace stale copies", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'allow = ["spawn_agents", "task", "grep"]'].join("\n"),
+      );
+
+      const rulesyncPermissions = new RulesyncPermissions({
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+        fileContent: JSON.stringify({
+          permission: { agent: { "*": "deny" } },
+        }),
+      });
+
+      const instance = await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions,
+      });
+
+      const parsed = smolToml.parse(instance.getFileContent()) as any;
+      expect(parsed.permissions).toEqual({
+        allow: ["grep"],
+        deny: ["spawn_agents", "task"],
+      });
+    });
+
+    it("should warn when a stricter existing spawn_agents or task entry is replaced by a looser one", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'allow = ["grep"]', 'ask = ["task"]', 'deny = ["spawn_agents"]'].join(
+          "\n",
+        ),
+      );
+      const logger = createMockLogger();
+
+      const instance = await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { agent: { "*": "allow" } } }),
+        }),
+        logger,
+      });
+
+      const parsed = smolToml.parse(instance.getFileContent()) as any;
+      expect(parsed.permissions).toEqual({ allow: ["grep", "spawn_agents", "task"] });
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      const [warning] = logger.warn.mock.calls[0] as [string];
+      expect(warning).toContain("2 stricter existing entries in reasonix.toml");
+      expect(warning).toContain('ask "task"');
+      expect(warning).toContain('deny "spawn_agents"');
+    });
+
+    it("should warn when a stricter pattern agent entry is dropped", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'deny = ["spawn_agents(review)"]'].join("\n"),
+      );
+      const logger = createMockLogger();
+
+      await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { agent: { "*": "allow" } } }),
+        }),
+        logger,
+      });
+
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      const [warning] = logger.warn.mock.calls[0] as [string];
+      expect(warning).toContain('deny "spawn_agents(review)"');
+      expect(warning).toContain(".rulesync/permissions.jsonc");
+    });
+
+    it("should not warn when a raw entry keeps the existing agent deny", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'deny = ["spawn_agents"]'].join("\n"),
+      );
+      const logger = createMockLogger();
+
+      const instance = await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({
+            permission: { agent: { "*": "allow" } },
+            reasonix: { rawDeny: ["spawn_agents"] },
+          }),
+        }),
+        logger,
+      });
+
+      const parsed = smolToml.parse(instance.getFileContent()) as any;
+      expect(parsed.permissions.deny).toEqual(["spawn_agents"]);
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("should not warn when an existing name(*) entry is replaced by the same bare entry", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'deny = ["spawn_agents(*)", "task(*)"]'].join("\n"),
+      );
+      const logger = createMockLogger();
+
+      await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { agent: { "*": "deny" } } }),
+        }),
+        logger,
+      });
+
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("should not warn when the replaced agent entries are no stricter than the generated ones", async () => {
+      await writeFileContent(
+        join(testDir, "reasonix.toml"),
+        ["[permissions]", 'allow = ["spawn_agents"]', 'ask = ["task"]'].join("\n"),
+      );
+      const logger = createMockLogger();
+
+      await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { agent: { "*": "ask" } } }),
+        }),
+        logger,
+      });
+
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("should round-trip an agent rule through generate and import", async () => {
+      const instance = await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({ permission: { agent: { "*": "deny" } } }),
+        }),
+      });
+
+      expect(instance.toRulesyncPermissions().getJson().permission).toEqual({
+        agent: { "*": "deny" },
       });
     });
 
@@ -868,6 +1014,111 @@ describe("ReasonixPermissions", () => {
       expect(logger.warn.mock.calls[0]?.[0]).toContain(".reasonix/config.toml");
     });
 
+    describe("user-only [sandbox] keys", () => {
+      const userOnlySandbox = {
+        allow_devices: ["/dev/nvidia*"],
+        egress_unlisted: "allow",
+        host_authorities: ["docker"],
+        network: false,
+      };
+
+      const generateSandbox = async ({
+        sandbox,
+        global,
+        existing,
+      }: {
+        sandbox: Record<string, unknown>;
+        global: boolean;
+        existing?: Record<string, unknown>;
+      }) => {
+        if (existing !== undefined) {
+          await writeFileContent(
+            join(testDir, ...(global ? [".reasonix", "config.toml"] : ["reasonix.toml"])),
+            smolToml.stringify(existing),
+          );
+        }
+        const logger = createMockLogger();
+        const instance = await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({ permission: {}, reasonix: { sandbox } }),
+          }),
+          global,
+          logger,
+        });
+        const parsed = smolToml.parse(instance.getFileContent()) as any;
+        const messages = logger.warn.mock.calls.map(([message]) => String(message));
+        return { parsed, messages };
+      };
+
+      it("writes them globally and names each one as trust-affecting", async () => {
+        const { parsed, messages } = await generateSandbox({
+          sandbox: userOnlySandbox,
+          global: true,
+        });
+
+        expect(parsed.sandbox).toEqual(userOnlySandbox);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("3 trust-affecting changes to .reasonix/config.toml");
+        expect(messages[0]).toContain("'sandbox.allow_devices'");
+        expect(messages[0]).toContain("'sandbox.egress_unlisted'");
+        expect(messages[0]).toContain("'sandbox.host_authorities'");
+      });
+
+      it("stays quiet about their restrictive values", async () => {
+        const { messages } = await generateSandbox({
+          sandbox: { allow_devices: [], egress_unlisted: " Ask", host_authorities: ["ssh_agent"] },
+          global: true,
+        });
+
+        expect(messages).toEqual([]);
+      });
+
+      it.each<[string, unknown]>([
+        ["egress_unlisted", "ALLOW"],
+        ["egress_unlisted", "alow"],
+        ["egress_unlisted", true],
+        ["host_authorities", ["ssh_agent", "podman"]],
+        ["host_authorities", "docker"],
+        ["allow_devices", "/dev/kvm"],
+      ])("announces %s = %j", async (key, value) => {
+        const { messages } = await generateSandbox({ sandbox: { [key]: value }, global: true });
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain(`'sandbox.${key}'`);
+      });
+
+      it("skips them in project scope and keeps the file's values", async () => {
+        const { parsed, messages } = await generateSandbox({
+          sandbox: userOnlySandbox,
+          global: false,
+          existing: { sandbox: { host_authorities: ["ssh_agent"] } },
+        });
+
+        expect(parsed.sandbox).toEqual({ host_authorities: ["ssh_agent"], network: false });
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain(
+          "skipping reasonix.sandbox.allow_devices, reasonix.sandbox.egress_unlisted, " +
+            "reasonix.sandbox.host_authorities",
+        );
+        expect(messages[0]).toContain("only from the user config");
+      });
+
+      it("still names the other trust-affecting keys in project scope", async () => {
+        const { parsed, messages } = await generateSandbox({
+          sandbox: { egress_unlisted: "allow", network: true },
+          global: false,
+        });
+
+        expect(parsed.sandbox).toEqual({ network: true });
+        expect(messages).toHaveLength(2);
+        expect(messages.join("\n")).toContain("'sandbox.network'");
+        expect(messages.join("\n")).not.toContain("'sandbox.egress_unlisted'");
+      });
+    });
+
     describe("reasonix.mode", () => {
       const generateMode = async ({
         mode,
@@ -954,6 +1205,291 @@ describe("ReasonixPermissions", () => {
         expect(parsed.permissions.mode).toBe("ask");
         expect(messages).toHaveLength(1);
         expect(messages[0]).toContain("only in the user config");
+      });
+    });
+
+    describe("reasonix.askOnExternalOrigin", () => {
+      const generateAskOnExternalOrigin = async ({
+        value,
+        global,
+        existing,
+      }: {
+        value: boolean;
+        global: boolean;
+        existing?: Record<string, unknown>;
+      }) => {
+        if (existing !== undefined) {
+          await writeFileContent(
+            join(testDir, ...(global ? [".reasonix", "config.toml"] : ["reasonix.toml"])),
+            smolToml.stringify(existing),
+          );
+        }
+        const logger = createMockLogger();
+        const instance = await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({
+              permission: {},
+              reasonix: { askOnExternalOrigin: value },
+            }),
+          }),
+          global,
+          logger,
+        });
+        const parsed = smolToml.parse(instance.getFileContent()) as any;
+        const messages = logger.warn.mock.calls.map(([message]) => String(message));
+        return { parsed, messages };
+      };
+
+      it("writes ask_on_external_origin into the global [permissions] table", async () => {
+        const { parsed, messages } = await generateAskOnExternalOrigin({
+          value: true,
+          global: true,
+        });
+        expect(parsed.permissions.ask_on_external_origin).toBe(true);
+        expect(messages).toEqual([]);
+      });
+
+      it("announces turning off a global value that was on", async () => {
+        const { parsed, messages } = await generateAskOnExternalOrigin({
+          value: false,
+          global: true,
+          existing: { permissions: { ask_on_external_origin: true } },
+        });
+        expect(parsed.permissions.ask_on_external_origin).toBe(false);
+        expect(messages.join("\n")).toContain("permissions.ask_on_external_origin");
+      });
+
+      it("stays quiet when false matches the default", async () => {
+        const { parsed, messages } = await generateAskOnExternalOrigin({
+          value: false,
+          global: true,
+        });
+        expect(parsed.permissions.ask_on_external_origin).toBe(false);
+        expect(messages).toEqual([]);
+      });
+
+      it("skips the key in project scope and keeps the file's value", async () => {
+        const { parsed, messages } = await generateAskOnExternalOrigin({
+          value: true,
+          global: false,
+          existing: { permissions: { ask_on_external_origin: false } },
+        });
+        expect(parsed.permissions.ask_on_external_origin).toBe(false);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("only in the user config");
+      });
+
+      it("lifts the key back on global import only", async () => {
+        const content = smolToml.stringify({ permissions: { ask_on_external_origin: true } });
+        const globalInstance = new ReasonixPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".reasonix",
+          relativeFilePath: "config.toml",
+          fileContent: content,
+          global: true,
+        });
+        const projectInstance = new ReasonixPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".",
+          relativeFilePath: "reasonix.toml",
+          fileContent: content,
+        });
+
+        expect(globalInstance.toRulesyncPermissions().getJson().reasonix).toEqual({
+          askOnExternalOrigin: true,
+        });
+        expect(projectInstance.toRulesyncPermissions().getJson().reasonix).toBeUndefined();
+      });
+    });
+
+    describe("reasonix.tools.disabled", () => {
+      it("writes [tools] disabled and keeps the other [tools] keys", async () => {
+        await writeFileContent(
+          join(testDir, "reasonix.toml"),
+          smolToml.stringify({ tools: { bash_timeout_seconds: 60, disabled: ["web_fetch"] } }),
+        );
+        const logger = createMockLogger();
+
+        const instance = await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({
+              permission: {},
+              reasonix: { tools: { disabled: ["web_fetch", "web_search"] } },
+            }),
+          }),
+          logger,
+        });
+
+        const parsed = smolToml.parse(instance.getFileContent()) as any;
+        expect(parsed.tools).toEqual({
+          bash_timeout_seconds: 60,
+          disabled: ["web_fetch", "web_search"],
+        });
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      const generateToolsDisabled = async ({
+        disabled,
+        existing,
+      }: {
+        disabled: string[];
+        existing: Record<string, unknown>;
+      }) => {
+        await writeFileContent(join(testDir, "reasonix.toml"), smolToml.stringify(existing));
+        const logger = createMockLogger();
+        const instance = await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({ permission: {}, reasonix: { tools: { disabled } } }),
+          }),
+          logger,
+        });
+        const parsed = smolToml.parse(instance.getFileContent()) as any;
+        const messages = logger.warn.mock.calls.map(([message]) => String(message));
+        return { parsed, messages };
+      };
+
+      it("announces tools the override turns back on", async () => {
+        const { parsed, messages } = await generateToolsDisabled({
+          disabled: ["web_fetch"],
+          existing: { tools: { disabled: ["bash", "web_fetch"] } },
+        });
+        expect(parsed.tools.disabled).toEqual(["web_fetch"]);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("'tools.disabled'");
+        expect(messages[0]).toContain('"bash"');
+        expect(messages[0]).not.toContain('"web_fetch"');
+      });
+
+      it("announces an empty list that turns every disabled tool back on", async () => {
+        const { messages } = await generateToolsDisabled({
+          disabled: [],
+          existing: { tools: { disabled: ["bash", "ask"] } },
+        });
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain('"bash", "ask"');
+      });
+
+      it("announces a disabled value that is not a list", async () => {
+        const { parsed, messages } = await generateToolsDisabled({
+          disabled: ["web_fetch"],
+          existing: { tools: { disabled: "bash" } },
+        });
+        expect(parsed.tools.disabled).toEqual(["web_fetch"]);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("'tools.disabled'");
+        expect(messages[0]).toContain("not the list Reasonix documents");
+      });
+
+      it("announces a [tools] value that is not a table", async () => {
+        const { parsed, messages } = await generateToolsDisabled({
+          disabled: ["web_fetch"],
+          existing: { tools: "off" },
+        });
+        expect(parsed.tools).toEqual({ disabled: ["web_fetch"] });
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain("'tools'");
+        expect(messages[0]).toContain("not the object Reasonix documents");
+      });
+
+      it("leaves [tools] untouched when the override does not author it", async () => {
+        await writeFileContent(
+          join(testDir, "reasonix.toml"),
+          smolToml.stringify({ tools: { disabled: ["ask"] } }),
+        );
+
+        const instance = await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({ permission: {} }),
+          }),
+        });
+
+        const parsed = smolToml.parse(instance.getFileContent()) as any;
+        expect(parsed.tools).toEqual({ disabled: ["ask"] });
+      });
+
+      it("lifts [tools] disabled back into the override on import", () => {
+        const instance = new ReasonixPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".",
+          relativeFilePath: "reasonix.toml",
+          fileContent: smolToml.stringify({
+            tools: { bash_timeout_seconds: 60, disabled: ["web_fetch"] },
+          }),
+        });
+
+        expect(instance.toRulesyncPermissions().getJson().reasonix).toEqual({
+          tools: { disabled: ["web_fetch"] },
+        });
+      });
+
+      it("warns about non-string [tools] disabled entries it cannot import", () => {
+        const warn = vi.spyOn(fallbackLogger, "warn").mockImplementation(() => {});
+        const instance = new ReasonixPermissions({
+          outputRoot: testDir,
+          relativeDirPath: ".",
+          relativeFilePath: "reasonix.toml",
+          fileContent: ["[tools]", 'disabled = ["web_fetch", 1]'].join("\n"),
+        });
+
+        const json = instance.toRulesyncPermissions().getJson();
+
+        expect(json.reasonix).toEqual({ tools: { disabled: ["web_fetch"] } });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0]?.[0])).toContain("1 non-string entries");
+      });
+    });
+
+    describe("nested .reasonix/reasonix.toml", () => {
+      const generateProject = async () => {
+        const logger = createMockLogger();
+        await ReasonixPermissions.fromRulesyncPermissions({
+          outputRoot: testDir,
+          rulesyncPermissions: new RulesyncPermissions({
+            relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+            relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+            fileContent: JSON.stringify({ permission: { bash: { "git *": "allow" } } }),
+          }),
+          logger,
+        });
+        return logger.warn.mock.calls.map(([message]) => String(message));
+      };
+
+      it("warns when generate would shadow the nested project config", async () => {
+        await writeFileContent(
+          join(testDir, ".reasonix", "reasonix.toml"),
+          smolToml.stringify({ tools: { disabled: ["web_fetch"] } }),
+        );
+
+        const messages = await generateProject();
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain(".reasonix/reasonix.toml exists but reasonix.toml does not");
+      });
+
+      it("warns once per run however many features write the file", async () => {
+        await writeFileContent(join(testDir, ".reasonix", "reasonix.toml"), "");
+
+        expect(await generateProject()).toHaveLength(1);
+        expect(await generateProject()).toEqual([]);
+      });
+
+      it("stays quiet when the root reasonix.toml already exists", async () => {
+        await writeFileContent(join(testDir, ".reasonix", "reasonix.toml"), "");
+        await writeFileContent(join(testDir, "reasonix.toml"), "");
+
+        expect(await generateProject()).toEqual([]);
       });
     });
 
@@ -1172,6 +1708,45 @@ describe("ReasonixPermissions", () => {
       });
     });
 
+    // `task(review)` / `spawn_agents(review)` never match a call in Reasonix:
+    // neither tool's arguments carry a subject key, so only bare rules apply.
+    // They are still read back so a hand-written file round-trips.
+    it("should import both task and spawn_agents as agent, letting the stricter action win", () => {
+      const instance = new ReasonixPermissions({
+        relativeDirPath: ".",
+        relativeFilePath: "reasonix.toml",
+        fileContent: [
+          "[permissions]",
+          'allow = ["task", "spawn_agents(review)"]',
+          'ask = ["spawn_agents"]',
+          'deny = ["task(review)"]',
+        ].join("\n"),
+      });
+
+      const config = instance.toRulesyncPermissions().getJson();
+
+      expect(config.permission).toEqual({
+        agent: { "*": "ask", review: "deny" },
+      });
+    });
+
+    it("should import legacy Agent, task and spawn_agents with conflicting actions as one agent rule, deny winning", () => {
+      const instance = new ReasonixPermissions({
+        relativeDirPath: ".",
+        relativeFilePath: "reasonix.toml",
+        fileContent: [
+          "[permissions]",
+          'allow = ["Agent", "spawn_agents"]',
+          'ask = ["task"]',
+          'deny = ["Agent"]',
+        ].join("\n"),
+      });
+
+      expect(instance.toRulesyncPermissions().getJson().permission).toEqual({
+        agent: { "*": "deny" },
+      });
+    });
+
     it("should lift exact Bash=<literal> entries into the reasonix override instead of minting a category", () => {
       const instance = new ReasonixPermissions({
         relativeDirPath: ".",
@@ -1229,6 +1804,36 @@ describe("ReasonixPermissions", () => {
       expect(globalConfig.reasonix.mode).toBe("deny");
       // Inert in a project file, so it stays there instead of entering the override.
       expect(projectConfig.reasonix?.mode).toBeUndefined();
+    });
+
+    it("should lift the user-only [sandbox] keys from the global config only", async () => {
+      const sandboxToml = [
+        "[sandbox]",
+        "network = false",
+        'allow_devices = ["/dev/nvidia*"]',
+        'egress_unlisted = "allow"',
+        'host_authorities = ["docker"]',
+      ].join("\n");
+      await writeFileContent(join(testDir, ".reasonix", "config.toml"), sandboxToml);
+      await writeFileContent(join(testDir, "reasonix.toml"), sandboxToml);
+
+      const globalConfig = (
+        await ReasonixPermissions.fromFile({ outputRoot: testDir, global: true })
+      )
+        .toRulesyncPermissions()
+        .getJson() as Record<string, any>;
+      const projectConfig = (await ReasonixPermissions.fromFile({ outputRoot: testDir }))
+        .toRulesyncPermissions()
+        .getJson() as Record<string, any>;
+
+      expect(globalConfig.reasonix.sandbox).toEqual({
+        network: false,
+        allow_devices: ["/dev/nvidia*"],
+        egress_unlisted: "allow",
+        host_authorities: ["docker"],
+      });
+      // Inert in a project file, so they stay there instead of entering the override.
+      expect(projectConfig.reasonix.sandbox).toEqual({ network: false });
     });
 
     it("should not lift a mode Reasonix does not document", async () => {
@@ -1314,16 +1919,38 @@ describe("ReasonixPermissions", () => {
     });
   });
 
-  describe("forDeletion", () => {
-    it("should create a minimal instance for deletion", () => {
-      const instance = ReasonixPermissions.forDeletion({
+  describe("tool names that match Object.prototype members", () => {
+    it("generates a canonical category named like a prototype member verbatim", async () => {
+      const instance = await ReasonixPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: new RulesyncPermissions({
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: RULESYNC_PERMISSIONS_FILE_NAME,
+          fileContent: JSON.stringify({
+            permission: { valueOf: { x: "allow", y: "deny" }, toString: { "*": "ask" } },
+          }),
+        }),
+      });
+
+      const parsed = smolToml.parse(instance.getFileContent()) as any;
+      expect(parsed.permissions.allow).toEqual(["valueOf(x)"]);
+      expect(parsed.permissions.ask).toEqual(["toString"]);
+      expect(parsed.permissions.deny).toEqual(["valueOf(y)"]);
+    });
+
+    it("imports a native tool named like a prototype member as its own category", () => {
+      const instance = new ReasonixPermissions({
         outputRoot: testDir,
         relativeDirPath: ".",
         relativeFilePath: "reasonix.toml",
+        fileContent: ["[permissions]", 'allow = ["valueOf(foo)", "toString"]'].join("\n"),
       });
 
-      expect(instance).toBeInstanceOf(ReasonixPermissions);
-      expect(instance.isDeletable()).toBe(false);
+      const config = instance.toRulesyncPermissions().getJson();
+      expect(config.permission).toEqual({
+        valueOf: { foo: "allow" },
+        toString: { "*": "allow" },
+      });
     });
   });
 });

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -108,6 +108,21 @@ describe("KiroIdeSubagent", () => {
     expect(subagent).toBeInstanceOf(KiroIdeSubagent);
     expect(subagent.getBody()).toBe("Do the thing.");
     expect(subagent.getFrontmatter().name).toBe("helper");
+  });
+
+  it("derives an omitted nested agent name from its path", () => {
+    const subagent = new KiroIdeSubagent({
+      outputRoot: testDir,
+      relativeDirPath: join(".kiro", "agents"),
+      relativeFilePath: join("team", "planner.md"),
+      frontmatter: { description: "Plans tasks" },
+      body: "Plan.",
+      fileContent: "",
+    });
+
+    const rulesyncSubagent = subagent.toRulesyncSubagent();
+    expect(rulesyncSubagent.getFrontmatter().name).toBe("team/planner");
+    expect(rulesyncSubagent.getRelativeFilePath()).toBe(join("team", "planner.md"));
   });
 
   it("targets the kiro-ide tool", () => {

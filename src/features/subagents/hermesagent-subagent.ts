@@ -13,12 +13,15 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import type { SharedWritePath } from "../../lib/shared-file-derive.js";
 import { type ValidationResult } from "../../types/ai-file.js";
 import {
-  getHermesagentConfigSharedFileKey,
   getHermesagentRelativeDirPath,
   getHermesagentRulesyncOutputRoot,
   getHermesagentSharedConfigWritePaths,
 } from "../../utils/hermesagent.js";
-import { applySharedConfigPatch, parseSharedConfig } from "../shared/shared-config-gateway.js";
+import {
+  getHermesPluginEnabledConfigContent,
+  getHermesQueueUserMessagePython,
+  hermesSlashName,
+} from "../shared/hermes-plugin-commands.js";
 import { RulesyncSubagent } from "./rulesync-subagent.js";
 import {
   ToolSubagent,
@@ -38,14 +41,14 @@ function subagentSlug(relativeFilePath: string): string {
 }
 
 function hermesCommandName(slug: string): string {
-  return `rulesync_subagent_${slug}`;
+  return hermesSlashName(`rulesync-subagent-${slug}`);
 }
 
 function getPluginManifestContent(): string {
   return [
     "name: rulesync-subagents",
     'version: "1.0.0"',
-    "description: Exposes RuleSync subagents as Hermes native delegation commands.",
+    "description: Exposes RuleSync subagents as Hermes slash commands that queue a delegation prompt.",
     "",
   ].join("\n");
 }
@@ -54,9 +57,12 @@ function getPluginInitContent(): string {
   return `"""RuleSync-generated Hermes subagent commands."""
 
 import json
+import logging
+import re
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
 SUBAGENTS_DIR = Path(__file__).resolve().parents[2] / "rulesync" / "subagents"
 
 
@@ -76,52 +82,71 @@ def _load_subagents():
     return subagents
 
 
-def _register_subagent(ctx, subagent):
+def _command_name(subagent, slug):
+    # The spec carries the name Rulesync normalized; Hermes' messaging gateway
+    # resolves plugin commands with "_" turned into "-", so keep it hyphenated.
+    hermes = subagent.get("hermes")
+    name = hermes.get("command") if isinstance(hermes, dict) else None
+    name = name or f"rulesync-subagent-{slug}"
+    # Mirrors hermesSlashName() in src/features/shared/hermes-plugin-commands.ts.
+    name = re.sub(r"[ _]", "-", str(name).lower())
+    name = re.sub(r"[^a-z0-9-]", "", name)
+    return re.sub(r"-{2,}", "-", name).strip("-")
+
+
+${getHermesQueueUserMessagePython({ pluginName: "rulesync-subagents" })}
+
+def _register_subagent(ctx, subagent, registered):
     slug = subagent.get("slug")
     if not slug:
         return
 
-    command_name = f"rulesync_subagent_{slug}"
+    command_name = _command_name(subagent, slug)
+    if command_name in registered:
+        logger.warning(
+            "rulesync-subagents: %s and %s both map to /%s; keeping the first.",
+            registered[command_name],
+            subagent.get("_path"),
+            command_name,
+        )
+        return
+    registered[command_name] = subagent.get("_path")
+
     name = subagent.get("name") or slug
     description = subagent.get("description") or f"Delegate work to the {name} RuleSync subagent."
     system_prompt = subagent.get("prompt") or ""
 
     def handler(args=None, **kwargs):
-        del kwargs
         user_context = ""
         if isinstance(args, dict):
             user_context = args.get("context") or args.get("task") or args.get("prompt") or ""
         elif args is not None:
             user_context = str(args)
 
-        context_parts = []
+        # A slash command runs outside any agent turn, so calling delegate_task
+        # here fails with "delegate_task requires a parent agent context".
+        # Queue the brief as a user message instead; the agent then delegates.
+        parts = [
+            f"Use the delegate_task tool to hand the following task to a subagent "
+            f"acting as the {name} RuleSync subagent.",
+            f"Goal: {description}",
+        ]
         if system_prompt:
-            context_parts.append(system_prompt)
+            parts.append(f"Subagent instructions:\\n{system_prompt}")
         if user_context:
-            context_parts.append(user_context)
+            parts.append(f"Task details:\\n{user_context}")
 
-        # delegate_task takes no model-facing "toolsets" argument: a subagent
-        # inherits the parent's enabled toolsets (role="orchestrator" is the
-        # only knob that changes them). "tasks" is the only shape its schema
-        # advertises; a top-level "goal" is an unadvertised legacy path.
-        return ctx.dispatch_tool(
-            "delegate_task",
-            {
-                "tasks": [
-                    {
-                        "goal": description,
-                        "context": "\\n\\n".join(context_parts),
-                    },
-                ],
-            },
-        )
+        label = f"the {name} subagent task"
+        error = _queue_user_message(ctx, "\\n\\n".join(parts), kwargs, label)
+        return error or f"Queued {label}; the agent will delegate it."
 
     ctx.register_command(command_name, handler, description)
 
 
 def register(ctx):
+    registered = {}
     for subagent in _load_subagents():
-        _register_subagent(ctx, subagent)
+        _register_subagent(ctx, subagent, registered)
 `;
 }
 
@@ -132,23 +157,11 @@ function getEnabledPluginConfigContent({
   currentContent: string;
   global: boolean;
 }): string {
-  const config = parseSharedConfig({ format: "yaml", fileContent: currentContent });
-  const plugins =
-    config.plugins && typeof config.plugins === "object"
-      ? (config.plugins as Record<string, unknown>)
-      : {};
-  const enabled = Array.isArray(plugins.enabled) ? plugins.enabled : [];
-
-  return applySharedConfigPatch({
-    fileKey: getHermesagentConfigSharedFileKey({ global }),
+  return getHermesPluginEnabledConfigContent({
+    currentContent,
+    global,
     feature: "subagents",
-    existingContent: currentContent,
-    patch: {
-      plugins: {
-        ...plugins,
-        enabled: Array.from(new Set([...enabled, "rulesync-subagents"])),
-      },
-    },
+    pluginName: "rulesync-subagents",
   });
 }
 
@@ -168,7 +181,7 @@ function getSubagentSpec(rulesyncSubagent: RulesyncSubagent): Record<string, unk
     prompt: rulesyncSubagent.getBody(),
     hermes: {
       command: hermesCommandName(slug),
-      dispatch: "delegate_task",
+      dispatch: "inject_message",
     },
   };
 }
@@ -213,9 +226,10 @@ export class HermesagentSubagent extends ToolSubagent {
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {
-    const targets = rulesyncSubagent.getFrontmatter().targets;
-
-    return !targets || targets.includes("*") || targets.includes("hermesagent");
+    return this.isTargetedByRulesyncSubagentDefault({
+      rulesyncSubagent,
+      toolTarget: "hermesagent",
+    });
   }
 
   static fromRulesyncSubagents({
@@ -306,12 +320,6 @@ export class HermesagentSubagent extends ToolSubagent {
    */
   static getExtraSharedWritePaths(): SharedWritePath[] {
     return getHermesagentSharedConfigWritePaths();
-  }
-
-  static getSettablePathsForRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): string[] {
-    const slug = subagentSlug(rulesyncSubagent.getRelativePathFromCwd());
-
-    return [join(HERMESAGENT_RULESYNC_SUBAGENTS_DIR_PATH, `${slug}.json`)];
   }
 
   toRulesyncSubagent(): RulesyncSubagent {

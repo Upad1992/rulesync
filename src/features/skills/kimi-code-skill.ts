@@ -10,6 +10,7 @@ import {
 } from "../../constants/kimi-code-paths.js";
 import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import type { ValidationResult } from "../../types/ai-dir.js";
+import type { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { getHomeDirectory, readFileContent } from "../../utils/file.js";
 import { parseFrontmatterWithYamlRepair } from "../../utils/frontmatter.js";
@@ -131,30 +132,12 @@ export class KimiCodeSkill extends ToolSkill {
     return KimiCodeSkillFrontmatterSchema.parse(this.requireMainFileFrontmatter());
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   override getImportIdentity(): string {
     return this.getFrontmatter().name.toLowerCase();
   }
 
   validate(): ValidationResult {
-    if (!this.mainFile) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-    const result = KimiCodeSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    return result.success
-      ? { success: true, error: null }
-      : {
-          success: false,
-          error: new Error(
-            `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-          ),
-        };
+    return this.validateMainFileFrontmatter(KimiCodeSkillFrontmatterSchema);
   }
 
   /**
@@ -228,10 +211,7 @@ export class KimiCodeSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("kimi-code");
-  }
+  protected static override readonly toolTarget: ToolTarget = "kimi-code";
 
   /**
    * Commands are emitted into the Kimi-specific skills tree as
@@ -266,15 +246,13 @@ export class KimiCodeSkill extends ToolSkill {
       ...params,
       getSettablePaths: (options) => this.getSettablePaths(options),
     });
-    const result = KimiCodeSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid frontmatter in ${join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
+    const frontmatter = this.parseLoadedFrontmatter({
+      schema: KimiCodeSkillFrontmatterSchema,
+      loaded,
+    });
     return new this({
       ...loaded,
-      frontmatter: result.data,
+      frontmatter,
       validate: true,
     });
   }

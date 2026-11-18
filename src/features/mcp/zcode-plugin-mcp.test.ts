@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
@@ -42,6 +42,47 @@ describe("ZcodePluginMcp", () => {
       },
     });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("socket"));
+  });
+
+  it("carries timeoutMs, cwd, protocolVersion and alwaysLoad into the plugin's .mcp.json and back", async () => {
+    const mcp = await ZcodePluginMcp.fromRulesyncMcp({
+      outputRoot: ".",
+      rulesyncMcp: buildRulesyncMcp({
+        local: {
+          command: "srv",
+          cwd: "./tools",
+          timeout: 30000,
+          protocolVersion: "legacy",
+          alwaysLoad: true,
+        },
+        remote: { type: "sse", url: "https://example.com/sse", alwaysLoad: false },
+      }),
+    });
+
+    expect(JSON.parse(mcp.getFileContent())).toEqual({
+      mcpServers: {
+        local: {
+          command: "srv",
+          args: [],
+          cwd: "./tools",
+          timeoutMs: 30000,
+          protocolVersion: "legacy",
+          alwaysLoad: true,
+        },
+        remote: { type: "sse", url: "https://example.com/sse", alwaysLoad: false },
+      },
+    });
+    expect(mcp.toRulesyncMcp().getMcpServers()).toEqual({
+      local: {
+        command: "srv",
+        args: [],
+        cwd: "./tools",
+        timeout: 30000,
+        protocolVersion: "legacy",
+        alwaysLoad: true,
+      },
+      remote: { type: "sse", url: "https://example.com/sse", alwaysLoad: false },
+    });
   });
 
   it("imports both the mcpServers wrapper and a bare server map", () => {

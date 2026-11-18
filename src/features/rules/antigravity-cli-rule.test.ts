@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -58,13 +58,6 @@ describe("AntigravityCliRule", () => {
       const paths = AntigravityCliRule.getSettablePaths({ global: true });
 
       expect(paths.nonRoot?.relativeDirPath).toBe(join(".gemini", "config", "rules"));
-    });
-
-    it("should drop the .gemini prefix from global paths when excludeToolDir is set", () => {
-      const paths = AntigravityCliRule.getSettablePaths({ global: true, excludeToolDir: true });
-
-      expect(paths.root.relativeDirPath).toBe(".");
-      expect(paths.nonRoot?.relativeDirPath).toBe(join("config", "rules"));
     });
   });
 

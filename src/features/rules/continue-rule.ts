@@ -11,7 +11,11 @@ import { ValidationResult } from "../../types/ai-file.js";
 import type { RulesyncTargets } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncRule, RulesyncRuleFrontmatter } from "./rulesync-rule.js";
 import {
   ToolRule,
@@ -21,7 +25,6 @@ import {
   ToolRuleParams,
   ToolRuleSettablePaths,
   ToolRuleSettablePathsGlobal,
-  buildToolPath,
 } from "./tool-rule.js";
 
 /**
@@ -109,12 +112,10 @@ export class ContinueRule extends ToolRule {
 
   static getSettablePaths({
     global,
-    excludeToolDir,
   }: {
     global?: boolean;
-    excludeToolDir?: boolean;
   } = {}): ContinueRuleSettablePaths | ContinueRuleSettablePathsGlobal {
-    const rulesDirPath = buildToolPath(CONTINUE_DIR, "rules", excludeToolDir);
+    const rulesDirPath = join(CONTINUE_DIR, "rules");
     if (global) {
       return {
         root: {
@@ -394,16 +395,12 @@ export class ContinueRule extends ToolRule {
       return { success: true, error: null };
     }
 
-    const result = ContinueRuleFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: ContinueRuleFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   getFrontmatter(): ContinueRuleFrontmatter {
@@ -414,10 +411,5 @@ export class ContinueRule extends ToolRule {
     return this.body;
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "continue",
-    });
-  }
+  protected static override readonly toolTarget = "continue";
 }

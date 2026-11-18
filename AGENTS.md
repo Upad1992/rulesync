@@ -43,7 +43,7 @@ This is Rulesync, a Node.js CLI tool that automatically generates configuration 
 
 # Guidelines for Adding or Modifying Features
 
-- Check whether `rules-processor.ts` needs an updated Additional Convention, especially values within `additionalConvention`. For example, if you remove support for Cursor's Skill feature simulation, remove `skills: { skillClass: CursorSkill }` within convention entry for Cursor.
+- Check whether `tool-rule-factories.ts` needs an updated Additional Convention, especially values within `additionalConvention`. For example, if you remove support for Cursor's Skill feature simulation, remove `skills: { skillClass: CursorSkill }` within convention entry for Cursor.
 - Review frontmatter in both rulesync files (`rulesync-{feature}.ts`) and tool files (`{tool}-{feature}.ts`). For overlapping parameters (e.g., `description`), prefer the rulesync value by default, but if the tool file defines the parameter, that tool-specific value takes precedence.
 - Gitignore entries are derived from each tool's `getSettablePaths` in `gitignore-derive.ts`, so they update automatically; only add to `HAND_MAINTAINED_GITIGNORE_ENTRIES` in `gitignore-entries.ts` for paths a tool does not emit itself (third-party by-products, shared or global-only trees). Run `pnpm dev gitignore` to update the project `.gitignore`.
 - Consider project scope and global scope support. Simulated support should cover project scope only. For native support, implement both project and global scope when the target tool supports them. Consult the tool’s official documentation to decide scope support.
@@ -127,7 +127,7 @@ This is Rulesync, a Node.js CLI tool that automatically generates configuration 
 - `getHomeDirectory()` in `src/utils/file.ts` respects the `HOME_DIR` environment variable regardless of `NODE_ENV`. When `HOME_DIR` is set, it always returns that value. This is used by E2E tests to specify a pseudo-home directory for global mode testing without depending on `NODE_ENV` (which may not be available in compiled binaries).
 - When `NODE_ENV` is `test`:
   - All logs by `Logger` in `src/utils/logger.ts` are suppressed.
-    - When you want to log in test, use `console.log` and run `npx vitest run --silent=false` to see the logs.
+    - When you want to log in test, use `console.log` and run `pnpm exec vp test run --silent=false` to see the logs.
   - `getHomeDirectory()` in `src/utils/file.ts` throws an error if `HOME_DIR` is not set, to enforce explicit mocking.
   - `isEnvTest()` in `src/utils/vitest.ts` is a function that dynamically checks `process.env.NODE_ENV === "test"` at call time. Note: bun compiled binaries may not respect runtime `NODE_ENV` changes, so prefer `HOME_DIR` for E2E tests.
 

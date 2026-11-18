@@ -5,7 +5,11 @@ import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import {
   resolveAntigravityCommandSkillName,
   rulesyncSkillTakesPrecedence,
@@ -26,7 +30,7 @@ import {
 export type AntigravitySharedCommandParams = {
   frontmatter: AntigravityCommandFrontmatter;
   body: string;
-} & AiFileParams;
+} & Omit<AiFileParams, "fileContent">;
 
 /**
  * Shared command generator for Google Antigravity 2.0 (IDE and CLI).
@@ -127,15 +131,12 @@ export class AntigravitySharedCommand extends ToolCommand {
       ...(Object.keys(restFields).length > 0 && { antigravity: restFields }),
     };
 
-    const fileContent = stringifyFrontmatter(this.body, rulesyncFrontmatter);
-
     return new RulesyncCommand({
       outputRoot: ".",
       frontmatter: rulesyncFrontmatter,
       body: this.body,
       relativeDirPath: RulesyncCommand.getSettablePaths().relativeDirPath,
       relativeFilePath: this.relativeFilePath,
-      fileContent,
       validate: true,
     });
   }
@@ -193,7 +194,6 @@ export class AntigravitySharedCommand extends ToolCommand {
       body,
       relativeDirPath: join(this.getSkillsRelativeDirPath({ global }), name),
       relativeFilePath: SKILL_FILE_NAME,
-      fileContent: stringifyFrontmatter(body, antigravityFrontmatter),
       validate,
     });
   }
@@ -203,16 +203,12 @@ export class AntigravitySharedCommand extends ToolCommand {
       return { success: true, error: null };
     }
 
-    const result = AntigravityCommandFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: AntigravityCommandFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static async fromFile({
@@ -237,7 +233,6 @@ export class AntigravitySharedCommand extends ToolCommand {
       relativeFilePath,
       frontmatter: result.data,
       body: content.trim(),
-      fileContent,
       validate,
     });
   }
@@ -253,7 +248,6 @@ export class AntigravitySharedCommand extends ToolCommand {
       relativeFilePath,
       frontmatter: { description: "" },
       body: "",
-      fileContent: "",
       validate: false,
     });
   }

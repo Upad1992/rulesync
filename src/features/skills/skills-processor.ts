@@ -16,6 +16,7 @@ import {
   formatCuratedCaseCollisionWarning,
   groupSpellingsByCaseFoldedIdentity,
   mergeByCaseInsensitiveIdentity,
+  sweepRefusalReason,
 } from "../../types/feature-processor.js";
 import { skillsProcessorToolTargetTuple } from "../../types/tool-target-tuples.js";
 import { ToolTarget } from "../../types/tool-targets.js";
@@ -35,6 +36,7 @@ import { AgentsmdSkill } from "./agentsmd-skill.js";
 import { AgentsSkillsSkill } from "./agentsskills-skill.js";
 import { AiassistantSkill } from "./aiassistant-skill.js";
 import { AmpSkill } from "./amp-skill.js";
+import { AndroidstudioSkill } from "./androidstudio-skill.js";
 import { AntigravityCliSkill } from "./antigravity-cli-skill.js";
 import { AntigravityIdeSkill } from "./antigravity-ide-skill.js";
 import { AntigravityPluginSkill } from "./antigravity-plugin-skill.js";
@@ -60,6 +62,7 @@ import { DevinPluginSkill } from "./devin-plugin-skill.js";
 import { DevinSkill } from "./devin-skill.js";
 import { DshSkill } from "./dsh-skill.js";
 import { FactorydroidSkill } from "./factorydroid-skill.js";
+import { FirebenderSkill } from "./firebender-skill.js";
 import { GitlabduoSkill } from "./gitlabduo-skill.js";
 import { GooseSkill } from "./goose-skill.js";
 import { GrokcliSkill } from "./grokcli-skill.js";
@@ -76,6 +79,7 @@ import { MimocodeSkill } from "./mimocode-skill.js";
 import { MusecodeSkill } from "./musecode-skill.js";
 import { OmpSkill } from "./omp-skill.js";
 import { OpenCodeSkill } from "./opencode-skill.js";
+import { Opencodev1Skill } from "./opencodev1-skill.js";
 import { PiSkill } from "./pi-skill.js";
 import { PoolSkill } from "./pool-skill.js";
 import { QoderSkill } from "./qoder-skill.js";
@@ -96,7 +100,7 @@ import {
   ToolSkillFromFlatFileParams,
   ToolSkillFromRulesyncSkillParams,
   ToolSkillSettablePaths,
-  isAgentSkillsInteropRoot,
+  isLenientImportSkillRoot,
   toolSkillImportRoots,
   toolSkillSearchRoots,
 } from "./tool-skill.js";
@@ -104,6 +108,7 @@ import { TraeSkill } from "./trae-skill.js";
 import { VibePluginSkill } from "./vibe-plugin-skill.js";
 import { VibeSkill } from "./vibe-skill.js";
 import { WarpSkill } from "./warp-skill.js";
+import { XumSkill } from "./xum-skill.js";
 import { ZcodePluginSkill } from "./zcode-plugin-skill.js";
 import { ZcodeSkill } from "./zcode-skill.js";
 import { ZedSkill } from "./zed-skill.js";
@@ -200,6 +205,18 @@ type ToolSkillFactory = {
      * directory-based tool cannot make it start deleting files.
      */
     canSweepFlatFileName?(params: { fileName: string }): boolean;
+    /**
+     * Optional generate-time hook for a tool whose own settings can make it
+     * ignore the directory rulesync writes to (e.g. Amp's
+     * `amp.skills.disableGlobalAgentsSkills`). Called once per run, only when
+     * at least one skill is generated for the tool; every returned message is
+     * logged as a warning.
+     */
+    getGenerationWarnings?(params: {
+      outputRoot: string;
+      global: boolean;
+      logger: Logger;
+    }): Promise<string[]>;
   };
   meta: {
     /** Whether the tool supports project (workspace-level) skills */
@@ -213,27 +230,12 @@ type ToolSkillFactory = {
      * reason (unparseable YAML, invalid frontmatter, unreadable files) — is
      * warned about and skipped instead of aborting the whole import run.
      * Covers both directory-form skills and `fromFlatFile` loaders.
-     * Independent of this flag, the Agent Skills interop roots
-     * (`.agents/skills/` and equivalents — see
-     * {@link isAgentSkillsInteropRoot}) are always imported leniently.
+     * Independent of this flag, the lenient import roots (the Agent Skills
+     * interop roots such as `.agents/skills/`, and Amp's
+     * `~/.config/amp/skills/` — see {@link isLenientImportSkillRoot}) are
+     * always imported leniently.
      */
     lenientImport?: boolean;
-    /**
-     * Whether the upstream tool reads the project skills from the **committed**
-     * repository through a root too generic to ignore (GitLab Duo's top-level
-     * `skills/`). The gitignore derivation skips such outputs: a recursive entry
-     * for `skills/` would swallow every unrelated `skills` directory in the tree.
-     *
-     * The `--delete` orphan sweep also leaves the other skill directories in
-     * such a project root alone (stale files inside a skill directory this run
-     * generates are still cleaned up, as for any tool): a
-     * repository's top-level `skills/` routinely holds hand-authored skills
-     * (skill collections, skills distributed to other tools) that no
-     * `.rulesync/skills/` source accounts for, and nothing on disk tells them
-     * apart from a skill rulesync generated earlier. A stale generated skill
-     * there has to be removed by hand instead.
-     */
-    committedOutput?: boolean;
   };
 };
 
@@ -288,6 +290,16 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
       // https://www.jetbrains.com/help/ai-assistant/agent-skills.html
       class: AiassistantSkill,
       meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: false },
+    },
+  ],
+  [
+    "androidstudio",
+    {
+      // Gemini in Android Studio (Quail 1+) loads Agent Skills from
+      // `.android-studio/skills/` at the project root or in the home directory.
+      // https://developer.android.com/studio/gemini/skills
+      class: AndroidstudioSkill,
+      meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
     },
   ],
   [
@@ -514,6 +526,16 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
     },
   ],
   [
+    "firebender",
+    {
+      // Firebender reads <name>/SKILL.md directories from .firebender/skills/
+      // (project) and ~/.firebender/skills/ (user).
+      // https://docs.firebender.com/api-reference/skills
+      class: FirebenderSkill,
+      meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
+    },
+  ],
+  [
     "goose",
     {
       class: GooseSkill,
@@ -530,20 +552,21 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
   [
     "gitlabduo",
     {
-      // GitLab Duo reads project skills from a top-level `skills/` directory
-      // (used by the GitLab UI flows too, from the committed repository) and
-      // user skills from `~/.gitlab/duo/skills/` (CLI only, behind
-      // `--enable-global-skills`).
+      // GitLab Duo reads project skills from the cross-tool `.agents/skills/`
+      // directory and a top-level `skills/` directory (`.agents/skills/` wins
+      // on a name clash), and user skills from `~/.gitlab/duo/skills/` (CLI
+      // only, behind `--enable-global-skills`). rulesync writes the former and
+      // imports from both.
       // https://docs.gitlab.com/user/duo_agent_platform/customize/agent_skills/
       class: GitlabduoSkill,
       meta: {
         supportsProject: true,
         supportsSimulated: false,
         supportsGlobal: true,
-        // `skills/` is a common, unrelated directory name, so a malformed
-        // SKILL.md there is skipped on import rather than aborting the run.
+        // The import-only `skills/` is a common, unrelated directory name, so a
+        // malformed SKILL.md there is skipped on import rather than aborting
+        // the run.
         lenientImport: true,
-        committedOutput: true,
       },
     },
   ],
@@ -660,6 +683,13 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
     "opencode",
     {
       class: OpenCodeSkill,
+      meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Skill,
       meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
     },
   ],
@@ -798,6 +828,16 @@ export const toolSkillFactories = new Map<SkillsProcessorToolTarget, ToolSkillFa
     },
   ],
   [
+    "xum",
+    {
+      // Xum skills are directories (`<name>/SKILL.md`) under `.xum/skills/`
+      // (project) / `~/.xum/skills/` (user).
+      // https://xum.cdr.dev/agents/agent-skills
+      class: XumSkill,
+      meta: { supportsProject: true, supportsSimulated: false, supportsGlobal: true },
+    },
+  ],
+  [
     "devin",
     {
       class: DevinSkill,
@@ -859,22 +899,17 @@ const defaultGetFactory: GetFactory = (target) => {
 };
 
 // Derive tool target arrays from factory metadata
-const allToolTargetKeys = [...toolSkillFactories.keys()];
+const skillsProcessorToolTargetsProject: ToolTarget[] = [...toolSkillFactories]
+  .filter(([, factory]) => factory.meta.supportsProject)
+  .map(([target]) => target);
 
-const skillsProcessorToolTargetsProject: ToolTarget[] = allToolTargetKeys.filter((target) => {
-  const factory = toolSkillFactories.get(target);
-  return factory?.meta.supportsProject ?? true;
-});
+const skillsProcessorToolTargetsSimulated: ToolTarget[] = [...toolSkillFactories]
+  .filter(([, factory]) => factory.meta.supportsSimulated)
+  .map(([target]) => target);
 
-const skillsProcessorToolTargetsSimulated: ToolTarget[] = allToolTargetKeys.filter((target) => {
-  const factory = toolSkillFactories.get(target);
-  return factory?.meta.supportsSimulated ?? false;
-});
-
-export const skillsProcessorToolTargetsGlobal: ToolTarget[] = allToolTargetKeys.filter((target) => {
-  const factory = toolSkillFactories.get(target);
-  return factory?.meta.supportsGlobal ?? false;
-});
+const skillsProcessorToolTargetsGlobal: ToolTarget[] = [...toolSkillFactories]
+  .filter(([, factory]) => factory.meta.supportsGlobal)
+  .map(([target]) => target);
 
 export class SkillsProcessor extends DirFeatureProcessor {
   private readonly toolTarget: SkillsProcessorToolTarget;
@@ -986,6 +1021,17 @@ export class SkillsProcessor extends DirFeatureProcessor {
         }),
       )
     ).filter((skill): skill is ToolSkill => skill !== null);
+
+    if (toolSkills.length > 0 && factory.class.getGenerationWarnings) {
+      const warnings = await factory.class.getGenerationWarnings({
+        outputRoot: this.outputRoot,
+        global: this.global,
+        logger: this.logger,
+      });
+      for (const warning of warnings) {
+        this.logger.warn(warning);
+      }
+    }
 
     return toolSkills;
   }
@@ -1179,7 +1225,7 @@ export class SkillsProcessor extends DirFeatureProcessor {
       const relativeDirPath = typeof root === "string" ? root : root.relativeDirPath;
       const isConfiguredRoot = configuredRootPaths.has(relativeDirPath);
       // A root the tool's own config points at is arbitrary user territory,
-      // the Agent Skills interop roots hold foreign-authored skills, and tools
+      // the lenient import roots hold foreign-authored skills, and tools
       // flagged `lenientImport` follow a lenient-validation rule for every root
       // (the Agent Skills guide's prescription, or the tool's own loader keeping
       // the other skills when one is broken, as Claude Code does) — in all three cases
@@ -1188,7 +1234,7 @@ export class SkillsProcessor extends DirFeatureProcessor {
       const isLenientRoot =
         isConfiguredRoot ||
         factory.meta.lenientImport === true ||
-        isAgentSkillsInteropRoot(relativeDirPath);
+        isLenientImportSkillRoot(relativeDirPath);
       const skillsDirPath = join(rootOutputRoot, relativeDirPath);
       if (!(await directoryExists(skillsDirPath))) {
         continue;
@@ -1396,6 +1442,10 @@ export class SkillsProcessor extends DirFeatureProcessor {
     });
   }
 
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
+
   /**
    * The tool's skills roots that exist on disk, each paired with its absolute
    * path and vetted as writable inside this run's output root. Shared by the
@@ -1432,6 +1482,21 @@ export class SkillsProcessor extends DirFeatureProcessor {
         );
         continue;
       }
+      // `assertWritablePathInsideRoot` checks the deepest existing path only; a
+      // link further up (a committed `.cursor -> .claude`) would let this
+      // target's sweep delete another directory's skills.
+      const sweepRefusal = await sweepRefusalReason({
+        rootPath: this.outputRoot,
+        dirPath: skillsDirPath,
+        allowInRootLinks: this.sweepsThroughInRootLinks(),
+      });
+      if (sweepRefusal !== null) {
+        this.logger.warn(
+          `Skipping the orphan sweep for ${quoteForLog(skillsDirPath)}; nothing under it is ` +
+            `deleted: ${sweepRefusal}`,
+        );
+        continue;
+      }
       existingRoots.push({ root, skillsDirPath });
     }
     return existingRoots;
@@ -1439,14 +1504,6 @@ export class SkillsProcessor extends DirFeatureProcessor {
 
   async loadToolDirsToDelete(): Promise<AiDir[]> {
     const factory = this.getFactory(this.toolTarget);
-    if (factory.meta.committedOutput === true && !this.global) {
-      // See `committedOutput`: the committed project root is shared with the
-      // user's own skills, so nothing in it is swept as an orphan.
-      this.logger.debug(
-        `Skipping the orphan sweep for ${this.toolTarget} skills: the project root is committed and user-owned`,
-      );
-      return [];
-    }
     const paths = factory.class.getSettablePaths({ global: this.global });
     const roots = toolSkillSearchRoots(paths);
 
@@ -1641,13 +1698,6 @@ export class SkillsProcessor extends DirFeatureProcessor {
 Simulated skills are specialized capabilities that can be invoked to handle specific types of tasks. When you determine that a skill would be helpful for the current task, read the corresponding SKILL.md file and execute its instructions.
 
 ${toonContent}`;
-  }
-
-  /**
-   * Return the tool targets that this processor supports in global mode
-   */
-  static getToolTargetsGlobal(): ToolTarget[] {
-    return skillsProcessorToolTargetsGlobal;
   }
 
   /**

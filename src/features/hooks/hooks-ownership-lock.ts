@@ -1,7 +1,10 @@
+import { join } from "node:path";
+
 import { z } from "zod/mini";
 
 import type { ValidationResult } from "../../types/ai-file.js";
 import { ToolFile } from "../../types/tool-file.js";
+import { readFileContentOrNull } from "../../utils/file.js";
 
 /**
  * Current lock format version. Bump when {@link HooksOwnershipLockSchema}
@@ -70,6 +73,22 @@ export function parseHooksOwnershipLock(content: string | null): ReadonlySet<str
   return new Set(result.data.owned.map((ref) => ownedHookKey(ref)));
 }
 
+/**
+ * Read the lock written next to a hooks destination on the previous run and
+ * return its owned set (empty when the lock is missing or unreadable).
+ */
+export async function readPreviouslyOwnedHooks({
+  outputRoot,
+  relativeDirPath,
+}: {
+  outputRoot: string;
+  relativeDirPath: string;
+}): Promise<ReadonlySet<string>> {
+  return parseHooksOwnershipLock(
+    await readFileContentOrNull(join(outputRoot, relativeDirPath, HOOKS_OWNERSHIP_LOCK_FILE_NAME)),
+  );
+}
+
 function compareOwnedHookRefs(a: OwnedHookRef, b: OwnedHookRef): number {
   const left = ownedHookKey(a);
   const right = ownedHookKey(b);
@@ -93,7 +112,7 @@ export function serializeHooksOwnershipLock(owned: readonly OwnedHookRef[]): str
  * The ownership record itself. It is a rulesync by-product rather than tool
  * configuration, so it is deletable: dropping the target should take it along.
  */
-export class HooksOwnershipLockFile extends ToolFile {
+class HooksOwnershipLockFile extends ToolFile {
   override isDeletable(): boolean {
     return true;
   }

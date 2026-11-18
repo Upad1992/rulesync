@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_PERMISSIONS_FILE_NAME,
@@ -81,8 +81,8 @@ describe("JuniePermissions", () => {
       // Junie has no `deny`, so canonical deny is downgraded to `ask` + warned.
       expect(json.rules.executables).toEqual({
         rules: [
-          { prefix: "git ", action: "allow" },
           { pattern: "rm *", action: "ask" },
+          { prefix: "git ", action: "allow" },
         ],
       });
       expect(json.rules.fileEditing).toEqual({ rules: [{ pattern: "src/**", action: "allow" }] });
@@ -113,8 +113,8 @@ describe("JuniePermissions", () => {
       // `write` deny also downgrades to `ask` (Junie has no `deny`).
       expect(json.rules.fileEditing).toEqual({
         rules: [
-          { pattern: "src/**", action: "allow" },
           { pattern: "dist/**", action: "ask" },
+          { pattern: "src/**", action: "allow" },
         ],
       });
     });

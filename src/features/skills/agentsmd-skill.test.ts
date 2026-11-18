@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { SKILL_FILE_NAME } from "../../constants/general.js";
 import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
@@ -137,6 +137,25 @@ This is the body of the agentsmd skill.`;
       );
     });
 
+    it("should reject invalid frontmatter before warning about an empty description", async () => {
+      const skillDir = join(testDir, ".agents", "skills", "invalid-skill");
+      await ensureDir(skillDir);
+      await writeFileContent(
+        join(skillDir, SKILL_FILE_NAME),
+        ["---", "name: 123", 'description: ""', "---", "", "Body."].join("\n"),
+      );
+      const warnSpy = vi.spyOn(fallbackLogger, "warn").mockImplementation(() => {});
+
+      try {
+        await expect(
+          AgentsmdSkill.fromDir({ outputRoot: testDir, dirName: "invalid-skill" }),
+        ).rejects.toThrow(/Invalid frontmatter/);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it("should throw error when SKILL.md not found", async () => {
       const skillDir = join(testDir, ".agents", "skills", "empty-skill");
       await ensureDir(skillDir);
@@ -229,6 +248,31 @@ This is the body of the agentsmd skill.`;
         compatibility: "Requires Python 3.14+ and uv",
         metadata: { version: "1" },
         "allowed-tools": "Read Bash(git:*)",
+      });
+    });
+
+    it("should emit the opted-in agentsskills disable-model-invocation exactly as the native writer does", () => {
+      const rulesyncSkill = new RulesyncSkill({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+        dirName: "test-skill",
+        frontmatter: {
+          name: "test-skill",
+          description: "Test skill description",
+          agentsskills: { "disable-model-invocation": true },
+        },
+        body: "Test body content",
+        validate: true,
+      });
+
+      const agentsmdSkill = AgentsmdSkill.fromRulesyncSkill({ rulesyncSkill });
+      const agentsSkillsSkill = AgentsSkillsSkill.fromRulesyncSkill({ rulesyncSkill });
+
+      expect(agentsmdSkill.getFrontmatter()).toEqual(agentsSkillsSkill.getFrontmatter());
+      expect(agentsmdSkill.getFrontmatter()).toEqual({
+        name: "test-skill",
+        description: "Test skill description",
+        "disable-model-invocation": true,
       });
     });
 

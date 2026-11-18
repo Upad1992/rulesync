@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_CONFIG_RELATIVE_FILE_PATH } from "../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../test-utils/test-directories.js";
@@ -420,6 +420,67 @@ This is a global rule file.
 
       expect(result.success).toBe(true);
       expect(result.config?.global).toBe(false);
+    });
+  });
+
+  describe("executeImport with CLI-parity options", () => {
+    const writeClaudeMd = async (dir: string): Promise<void> => {
+      await writeFileContent(join(dir, "CLAUDE.md"), "# Claude Code Rules\n\nA test rule.\n");
+    };
+
+    it("should accept a one-element targets list like the CLI's --targets", async () => {
+      await writeClaudeMd(testDir);
+
+      const result = await executeImport({ targets: ["claudecode"], features: ["rules"] });
+
+      expect(result.success).toBe(true);
+      expect(result.config?.target).toBe("claudecode");
+      expect(result.result?.rulesCount).toBeGreaterThan(0);
+    });
+
+    it("should reject more than one target, as the CLI does", async () => {
+      const result = await executeImport({ targets: ["claudecode", "cursor"] });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Only one tool can be imported at a time");
+    });
+
+    it("should reject an empty targets list", async () => {
+      const result = await executeImport({ targets: [] });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("target is required");
+    });
+
+    it("should reject target and targets together", async () => {
+      const result = await executeImport({ target: "claudecode", targets: ["claudecode"] });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("either target or targets");
+    });
+
+    it("should read the tool configuration from outputRoot inside the project", async () => {
+      await writeClaudeMd(join(testDir, "packages", "app"));
+
+      const result = await executeImport({
+        target: "claudecode",
+        features: ["rules"],
+        outputRoot: join("packages", "app"),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.config?.outputRoots).toEqual([join(testDir, "packages", "app")]);
+      expect(result.result?.rulesCount).toBeGreaterThan(0);
+    });
+
+    it.each([
+      ["a relative path escaping the project", "../outside"],
+      ["an absolute path outside the project", "/etc"],
+    ])("should reject outputRoot with %s", async (_label, outputRoot) => {
+      const result = await executeImport({ target: "claudecode", outputRoot });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("outputRoot must stay inside the project directory");
     });
   });
 });

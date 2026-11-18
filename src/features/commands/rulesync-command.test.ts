@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -34,7 +34,6 @@ describe("RulesyncCommand", () => {
       relativeFilePath: "test-command.md",
       frontmatter: validFrontmatter,
       body: "This is the command body content",
-      fileContent: "", // This will be overridden by constructor
     };
   });
 

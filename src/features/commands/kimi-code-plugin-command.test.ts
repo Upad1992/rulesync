@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -30,7 +30,6 @@ describe("KimiCodePluginCommand", () => {
       relativeFilePath,
       frontmatter: frontmatter as RulesyncCommand["frontmatter"],
       body: "Review pull request $ARGUMENTS.",
-      fileContent: "",
     });
 
   it("writes the description and body into the plugin's commands/ directory", () => {

@@ -13,7 +13,7 @@ import { toPosixPath } from "../utils/file.js";
  * Two behaviors are derived from this single list:
  *
  * - They are deliberately **not** gitignored (`DERIVED_PATHS_NOT_GITIGNORED` in
- *   `src/cli/commands/gitignore-derive.ts`), because a user may hand-author
+ *   `src/lib/gitignore-derive.ts`), because a user may hand-author
  *   settings in them that should stay version-controlled.
  * - Because they are committable, rulesync must not **create** one just to hold
  *   an empty payload — that would be pure `git status` noise. See
@@ -67,6 +67,12 @@ export const SHARED_USER_MANAGED_CONFIG_PATHS: readonly string[] = [
   // the user's own patches sit beside the MCP rows rulesync writes.
   ".dsh/cordis.patch.yml",
   ".factory/settings.json",
+  // Firebender config: the project-root file (documented as version-controlled
+  // and shared with the team) and the personal one under `~/.firebender/`. Both
+  // carry the user's own settings (`rules`, `commands`, `worktrees`, ...)
+  // beside the `ignore`, `mcpServers` and `agents` keys rulesync writes.
+  "firebender.json",
+  ".firebender/firebender.json",
   ".grok/config.toml",
   // Grok sandbox profiles: rulesync owns only `[profiles.rulesync]`; the
   // user's own custom profiles sit beside it in both scopes.
@@ -98,6 +104,10 @@ export const SHARED_USER_MANAGED_CONFIG_PATHS: readonly string[] = [
   // `.tabnine/agent/` layout and carry the user's own settings beside the
   // `mcpServers`, `hooks` and `tools` blocks.
   ".tabnine/agent/settings.json",
+  // TRAE hooks: the IDE creates `.trae/hooks.json` itself (with `version`),
+  // so the file stays committable. Generation keeps `version` and other
+  // top-level keys but replaces the whole `hooks` key.
+  ".trae/hooks.json",
   ".vibe/config.toml",
   // ZCode config: the workspace file and the user one under `~/.zcode/cli/`.
   // Both carry the user's own ZCode settings beside the `mcp` block.

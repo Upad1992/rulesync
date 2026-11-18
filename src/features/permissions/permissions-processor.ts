@@ -22,8 +22,7 @@ import { ClaudecodePermissions } from "./claudecode-permissions.js";
 import { ClinePermissions } from "./cline-permissions.js";
 import { CodebuddyPermissions } from "./codebuddy-permissions.js";
 import { CodewhalePermissions } from "./codewhale-permissions.js";
-import { createCodewhaleProjectConfigFile } from "./codewhale-project-config.js";
-import { CodexcliPermissions, createCodexcliBashRulesFile } from "./codexcli-permissions.js";
+import { CodexcliPermissions } from "./codexcli-permissions.js";
 import { CommandcodePermissions } from "./commandcode-permissions.js";
 import { ContinuePermissions } from "./continue-permissions.js";
 import { CopilotPermissions } from "./copilot-permissions.js";
@@ -45,6 +44,7 @@ import { LettacodePermissions } from "./lettacode-permissions.js";
 import { MimocodePermissions } from "./mimocode-permissions.js";
 import { OmpPermissions } from "./omp-permissions.js";
 import { OpencodePermissions } from "./opencode-permissions.js";
+import { Opencodev1Permissions } from "./opencodev1-permissions.js";
 import { PiPermissions } from "./pi-permissions.js";
 import { PoolPermissions } from "./pool-permissions.js";
 import { QoderPermissions } from "./qoder-permissions.js";
@@ -56,19 +56,20 @@ import { RulesyncPermissions } from "./rulesync-permissions.js";
 import { TabninePermissions } from "./tabnine-permissions.js";
 import { TaktPermissions } from "./takt-permissions.js";
 import type {
-  ToolPermissionsForDeletionParams,
+  ToolPermissionsAuxiliaryFilesParams,
   ToolPermissionsFromFileParams,
   ToolPermissionsFromRulesyncPermissionsParams,
   ToolPermissionsSettablePaths,
 } from "./tool-permissions.js";
 import { ToolPermissions } from "./tool-permissions.js";
+import { TraePermissions } from "./trae-permissions.js";
 import { VibePermissions } from "./vibe-permissions.js";
 import { WarpPermissions } from "./warp-permissions.js";
 import { WarpcliPermissions } from "./warpcli-permissions.js";
 import { ZedPermissions } from "./zed-permissions.js";
 import { ZoocodePermissions } from "./zoocode-permissions.js";
 
-export type PermissionsProcessorToolTarget = (typeof permissionsProcessorToolTargetTuple)[number];
+type PermissionsProcessorToolTarget = (typeof permissionsProcessorToolTargetTuple)[number];
 
 export const PermissionsProcessorToolTargetSchema = z.enum(permissionsProcessorToolTargetTuple);
 
@@ -78,13 +79,18 @@ type ToolPermissionsFactory = {
       params: ToolPermissionsFromRulesyncPermissionsParams,
     ): ToolPermissions | Promise<ToolPermissions>;
     fromFile(params: ToolPermissionsFromFileParams): Promise<ToolPermissions>;
-    forDeletion(params: ToolPermissionsForDeletionParams): ToolPermissions;
     getSettablePaths(options?: { global?: boolean }): ToolPermissionsSettablePaths;
+    /**
+     * Companion files written after the main permissions file, e.g. Codex
+     * CLI's bash rules file.
+     */
+    getAuxiliaryFiles?(
+      params: ToolPermissionsAuxiliaryFilesParams,
+    ): ToolFile[] | Promise<ToolFile[]>;
   };
   meta: {
     supportsProject: boolean;
     supportsGlobal: boolean;
-    supportsImport: boolean;
   };
 };
 
@@ -102,7 +108,6 @@ export const toolPermissionsFactories = new Map<
         // `~/.config/amp/settings.json` (global).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -116,7 +121,6 @@ export const toolPermissionsFactories = new Map<
         // workspace-scoped permissions file.
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -131,7 +135,6 @@ export const toolPermissionsFactories = new Map<
         // model, so only project scope is generated.
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -142,7 +145,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -157,7 +159,6 @@ export const toolPermissionsFactories = new Map<
         // https://bob.ibm.com/docs/shell/configuration/approval-settings
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -168,7 +169,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -179,7 +179,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -190,7 +189,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -208,7 +206,6 @@ export const toolPermissionsFactories = new Map<
         // https://github.com/Hmbown/Codewhale/blob/main/docs/CONFIGURATION.md#enforced-repo-law-invariants
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -219,7 +216,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -230,7 +226,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -245,7 +240,6 @@ export const toolPermissionsFactories = new Map<
         // https://docs.continue.dev/cli/tool-permissions
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -255,14 +249,14 @@ export const toolPermissionsFactories = new Map<
       class: CopilotPermissions,
       meta: {
         // GitHub Copilot Chat in VS Code has no standalone policy file; the
-        // adapter manages the `chat.tools.*.autoApprove` maps and
-        // `chat.permissions.default` in the workspace `.vscode/settings.json`.
+        // adapter manages the `chat.tools.*.autoApprove` maps,
+        // `chat.permissions.default` and `chat.defaultConfiguration` in the
+        // workspace `.vscode/settings.json`.
         // VS Code's user-scope settings.json is at a platform-dependent path
         // outside rulesync's home-relative global model, so only project scope
         // is supported.
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -277,7 +271,6 @@ export const toolPermissionsFactories = new Map<
         // `~/.copilot/settings.json` (user, both lists).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -294,7 +287,6 @@ export const toolPermissionsFactories = new Map<
         // https://github.com/charmbracelet/crush/blob/main/docs/config/README.md
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -305,7 +297,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -319,7 +310,6 @@ export const toolPermissionsFactories = new Map<
         // file, so there is no project scope to write.
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -333,7 +323,6 @@ export const toolPermissionsFactories = new Map<
         // (project) and `~/.config/devin/config.json` (global).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -348,7 +337,6 @@ export const toolPermissionsFactories = new Map<
         // (global).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -362,7 +350,6 @@ export const toolPermissionsFactories = new Map<
         // permission file (mirrors the Rovodev adapter).
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -379,7 +366,6 @@ export const toolPermissionsFactories = new Map<
         // https://docs.x.ai/build/settings), so both scopes are generated.
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -390,7 +376,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -401,7 +386,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -416,7 +400,6 @@ export const toolPermissionsFactories = new Map<
         // feature is global-only, mirroring the Junie hooks surface.
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -427,7 +410,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -438,7 +420,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -452,7 +433,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -463,7 +443,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -474,7 +453,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -485,7 +463,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -498,7 +475,6 @@ export const toolPermissionsFactories = new Map<
         // and `~/.omp/agent/config.yml` (global, default profile).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -509,7 +485,16 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
+      },
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Permissions,
+      meta: {
+        supportsProject: true,
+        supportsGlobal: true,
       },
     },
   ],
@@ -523,7 +508,6 @@ export const toolPermissionsFactories = new Map<
         // itself (plain names replace it, `+name` / `-name` entries adjust it).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -539,7 +523,6 @@ export const toolPermissionsFactories = new Map<
         // https://docs.poolside.ai/settings-file-reference
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -550,7 +533,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -561,7 +543,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -575,7 +556,6 @@ export const toolPermissionsFactories = new Map<
         // `~/.reasonix/config.toml` (global).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -594,7 +574,6 @@ export const toolPermissionsFactories = new Map<
         // model, so only project scope is supported.
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -610,7 +589,6 @@ export const toolPermissionsFactories = new Map<
         // the `--config-file` CLI flag).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -625,7 +603,6 @@ export const toolPermissionsFactories = new Map<
         // https://docs.tabnine.com/main/getting-started/tabnine-cli/features/settings/settings-reference
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -640,7 +617,6 @@ export const toolPermissionsFactories = new Map<
         // `~/.takt/config.yaml` (global).
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -651,7 +627,6 @@ export const toolPermissionsFactories = new Map<
       meta: {
         supportsProject: true,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -666,7 +641,6 @@ export const toolPermissionsFactories = new Map<
         // per platform, resolved in WarpPermissions.getSettablePaths.
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -682,7 +656,6 @@ export const toolPermissionsFactories = new Map<
         // https://docs.warp.dev/agents/cli/permissions-and-profiles/
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
       },
     },
   ],
@@ -699,7 +672,18 @@ export const toolPermissionsFactories = new Map<
         // https://github.com/zed-industries/zed/blob/main/crates/settings_content/src/project.rs
         supportsProject: false,
         supportsGlobal: true,
-        supportsImport: true,
+      },
+    },
+  ],
+  [
+    "trae",
+    {
+      class: TraePermissions,
+      meta: {
+        // TRAE keeps its permission policy in the user file
+        // `~/.trae/permission/global.json`; there is no project-scoped one.
+        supportsProject: false,
+        supportsGlobal: true,
       },
     },
   ],
@@ -716,7 +700,6 @@ export const toolPermissionsFactories = new Map<
         // model, so only project scope is supported.
         supportsProject: true,
         supportsGlobal: false,
-        supportsImport: true,
       },
     },
   ],
@@ -725,6 +708,10 @@ export const toolPermissionsFactories = new Map<
 export class PermissionsProcessor extends FeatureProcessor {
   private readonly toolTarget: PermissionsProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
 
   constructor({
     outputRoot = process.cwd(),
@@ -796,18 +783,10 @@ export class PermissionsProcessor extends FeatureProcessor {
     try {
       const factory = toolPermissionsFactories.get(this.toolTarget);
       if (!factory) throw new Error(`Unsupported tool target: ${this.toolTarget}`);
-      const paths = factory.class.getSettablePaths({ global: this.global });
 
-      if (forDeletion) {
-        const toolPermissions = factory.class.forDeletion({
-          outputRoot: this.outputRoot,
-          relativeDirPath: paths.relativeDirPath,
-          relativeFilePath: paths.relativeFilePath,
-          global: this.global,
-        });
-        const list = toolPermissions.isDeletable?.() !== false ? [toolPermissions] : [];
-        return list;
-      }
+      // Permission settings live in shared config files that are never
+      // deleted outright (see `ToolPermissions.isDeletable`).
+      if (forDeletion) return [];
 
       const toolPermissions = await factory.class.fromFile({
         outputRoot: this.outputRoot,
@@ -854,38 +833,30 @@ export class PermissionsProcessor extends FeatureProcessor {
       logger: this.logger,
       global: this.global,
     });
-    if (this.toolTarget === "codewhale" && !this.global) {
-      const projectConfigFile = await createCodewhaleProjectConfigFile({
+    const auxiliaryFiles =
+      (await factory.class.getAuxiliaryFiles?.({
         outputRoot: this.outputRoot,
         config: effectivePermissions.getJson(),
+        global: this.global,
         logger: this.logger,
-      });
-      return projectConfigFile ? [toolPermissions, projectConfigFile] : [toolPermissions];
-    }
-    if (this.toolTarget !== "codexcli") {
-      return [toolPermissions];
-    }
-
-    const bashRulesFile = createCodexcliBashRulesFile({
-      outputRoot: this.outputRoot,
-      config: effectivePermissions.getJson(),
-      logger: this.logger,
-    });
-    return [toolPermissions, bashRulesFile];
+      })) ?? [];
+    return [toolPermissions, ...auxiliaryFiles];
   }
 
   async convertToolFilesToRulesyncFiles(toolFiles: ToolFile[]): Promise<RulesyncFile[]> {
     const permissions = toolFiles.filter((f): f is ToolPermissions => f instanceof ToolPermissions);
-    return permissions.map((p) => p.toRulesyncPermissions());
+    return permissions.map((p) => p.toRulesyncPermissions({ logger: this.logger }));
   }
 
+  /**
+   * Every permissions target supports import, so `importOnly` (kept for parity
+   * with the other processors) does not narrow the list.
+   */
   static getToolTargets({
     global = false,
-    importOnly = false,
   }: { global?: boolean; importOnly?: boolean } = {}): ToolTarget[] {
     return [...toolPermissionsFactories.entries()]
       .filter(([, f]) => (global ? f.meta.supportsGlobal : f.meta.supportsProject))
-      .filter(([, f]) => (importOnly ? f.meta.supportsImport : true))
       .map(([target]) => target);
   }
 }

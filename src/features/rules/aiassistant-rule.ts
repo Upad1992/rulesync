@@ -125,7 +125,6 @@ export class AiassistantRule extends ToolRule {
   static getSettablePaths(
     _options: {
       global?: boolean;
-      excludeToolDir?: boolean;
     } = {},
   ): AiassistantRuleSettablePaths {
     return {
@@ -412,10 +411,5 @@ export class AiassistantRule extends ToolRule {
     return { success: true, error: null };
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "aiassistant",
-    });
-  }
+  protected static override readonly toolTarget = "aiassistant";
 }

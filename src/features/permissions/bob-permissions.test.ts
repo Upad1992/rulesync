@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -60,16 +60,6 @@ describe("BobPermissions", () => {
           relativeFilePath: "settings.json",
         });
       }
-    });
-  });
-
-  describe("isDeletable", () => {
-    it("is not deletable (shared settings file)", () => {
-      const permissions = BobPermissions.forDeletion({
-        relativeDirPath: join(".bob", "settings"),
-        relativeFilePath: "settings.json",
-      });
-      expect(permissions.isDeletable()).toBe(false);
     });
   });
 
@@ -528,9 +518,36 @@ describe("BobPermissions", () => {
 
       const permissions = await BobPermissions.fromFile({ outputRoot: testDir, global: true });
       expect(permissions.toRulesyncPermissions().getJson()).toEqual({
-        permission: { bash: { "git status": "allow", rm: "deny" } },
+        permission: { bash: { "git status": "allow", rm: "deny", "rm *": "deny" } },
         bob: { approval: { allowed_permissions: ["execute"] } },
       });
+    });
+
+    // Bob compares both lists as literal prefixes: `npm *` approves only
+    // commands starting with that text, while the canonical glob would approve
+    // every npm command, and the `npm publish` deny must keep its prefix reach.
+    it("keeps glob-shaped allows out and widens prefix denies on import", async () => {
+      const logger = createMockLogger();
+      await writeSettings(
+        testDir,
+        JSON.stringify({
+          approval: {
+            allowedExecutors: [
+              {
+                toolId: "execute_command",
+                approvedCommands: ["npm *", "*", "git status"],
+                deniedCommands: ["npm publish"],
+              },
+            ],
+          },
+        }),
+      );
+
+      const permissions = await BobPermissions.fromFile({ outputRoot: testDir, global: true });
+      expect(permissions.toRulesyncPermissions({ logger }).getJson().permission).toEqual({
+        bash: { "git status": "allow", "npm publish": "deny", "npm publish *": "deny" },
+      });
+      expect(warnings(logger).join("\n")).toContain('"npm *", "*"');
     });
 
     it("lifts the group switches into the bob override", async () => {

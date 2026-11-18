@@ -8,6 +8,8 @@ import {
   TRAE_COMMANDS_DIR_NAME,
   TRAE_COMMANDS_DIR_PATH,
   TRAE_DIR,
+  TRAE_PERMISSION_DIR_NAME,
+  TRAE_PERMISSION_DIR_PATH,
   TRAE_SKILLS_DIR_NAME,
   TRAE_SKILLS_DIR_PATH,
 } from "../constants/trae-paths.js";
@@ -33,4 +35,14 @@ export function getTraeCommandsDirPath({ global }: { global: boolean }): string 
 
 export function getTraeAgentsDirPath({ global }: { global: boolean }): string {
   return global ? join(getTraeUserDir(), TRAE_AGENTS_DIR_NAME) : TRAE_AGENTS_DIR_PATH;
+}
+
+/**
+ * Trae permissions are user-scope only, so the global path is resolved through
+ * `getTraeUserDir()`: `~/.trae-cn/permission/` on Trae CN and
+ * `~/.trae/permission/` otherwise. The project path exists for symmetry with
+ * the other helpers but is never used by the permissions processor.
+ */
+export function getTraePermissionDirPath({ global }: { global: boolean }): string {
+  return global ? join(getTraeUserDir(), TRAE_PERMISSION_DIR_NAME) : TRAE_PERMISSION_DIR_PATH;
 }

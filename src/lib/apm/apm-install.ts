@@ -1,22 +1,33 @@
-import { createHash } from "node:crypto";
 import { join, posix } from "node:path";
 
 import { Semaphore } from "es-toolkit/promise";
 
-import { FETCH_CONCURRENCY_LIMIT, MAX_FILE_SIZE } from "../../constants/rulesync-paths.js";
+import {
+  FETCH_CONCURRENCY_LIMIT,
+  formatMegabytes,
+  MAX_FILE_SIZE,
+  MAX_FILE_SIZE_MB,
+} from "../../constants/rulesync-paths.js";
 import type { GitHubFileEntry } from "../../types/fetch.js";
 import { formatError } from "../../utils/error.js";
-import { checkPathTraversal, removeFile, toPosixPath, writeFileContent } from "../../utils/file.js";
+import {
+  assertNoSymlinkBelowRoot,
+  checkPathTraversal,
+  PathOutsideRootError,
+  removeFileWithoutFollowingSymlinks,
+  toPosixPath,
+  writeFileContent,
+} from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { GitHubClient, GitHubClientError, logGitHubAuthHints } from "../github-client.js";
 import { listDirectoryRecursive, withSemaphore } from "../github-utils.js";
+import { computeInstallContentHash, RULESYNC_CONTENT_HASH_REGEX } from "../install-content-hash.js";
 import {
   type ApmLock,
   type ApmLockDependency,
   createEmptyApmLock,
   findApmLockDependency,
   readApmLock,
-  RULESYNC_CONTENT_HASH_REGEX,
   writeApmLock,
 } from "./apm-lock.js";
 import { type ApmDependency, readApmManifest } from "./apm-manifest.js";
@@ -43,6 +54,9 @@ const APM_PRIMITIVES: Array<{ sourceDir: string; deployDir: string; packageType:
     packageType: "apm_package",
   },
 ];
+
+/** One file a dependency deploys: its project-relative path and its content. */
+type ApmDeployment = { path: string; content: string };
 
 export type ApmInstallOptions = {
   /** Force re-resolve all refs, ignoring the lockfile. */
@@ -101,7 +115,12 @@ export async function installApm(params: {
   //   frozen=false — each dep's promise resolves to a result object so that
   //                   one failing dep does not abort the others.
   type DepResult =
-    | { status: "ok"; lockEntry: ApmLockDependency; deployedCount: number }
+    | {
+        status: "ok";
+        lockEntry: ApmLockDependency;
+        deployedCount: number;
+        pendingWrites: ApmDeployment[];
+      }
     | { status: "failed"; previous: ApmLockDependency | undefined };
 
   const frozen = options.frozen ?? false;
@@ -121,6 +140,7 @@ export async function installApm(params: {
       status: "ok",
       lockEntry: installed.lockEntry,
       deployedCount: installed.deployedFiles.length,
+      pendingWrites: installed.pendingWrites,
     };
   };
 
@@ -147,6 +167,19 @@ export async function installApm(params: {
           }
         }),
       );
+
+  // Under --frozen every dependency deferred its writes until its hash check
+  // passed. Every target of every dependency is checked before any is
+  // written, so a dependency rejected late (a failed hash check, a symbolic
+  // link) does not leave the files of the dependencies before it on disk.
+  if (frozen) {
+    await writeFrozenApmDeployments({
+      projectRoot,
+      deployments: results.flatMap((result) =>
+        result.status === "ok" ? result.pendingWrites : [],
+      ),
+    });
+  }
 
   let totalDeployed = 0;
   let failedCount = 0;
@@ -251,8 +284,10 @@ function assertFrozenLockCoversManifest(params: {
 /**
  * Remove files that a previous install deployed but that are no longer part of
  * any current dependency's `deployed_files`. Each entry is path-traversal
- * hardened (shape check + `checkPathTraversal`) and offending rows are skipped
- * with a warn log rather than fatal.
+ * hardened (shape check + `checkPathTraversal`), must lie under one of the
+ * `APM_PRIMITIVES` deploy directories, and is removed without following a
+ * symbolic link (a stale entry that is itself a link is unlinked). Offending
+ * rows are skipped with a warn log rather than fatal.
  */
 async function removeStaleApmFiles(params: {
   existingLock: ApmLock;
@@ -275,6 +310,15 @@ async function removeStaleApmFiles(params: {
       logger.warn(`Refusing to remove stale apm file with suspicious path: "${relativePath}".`);
       continue;
     }
+    // Only files under a directory this install deploys to are ever removed:
+    // a lockfile committed to the repository could otherwise name any file of
+    // the checkout, such as `.git/HEAD`.
+    if (!APM_PRIMITIVES.some(({ deployDir }) => relativePath.startsWith(`${deployDir}/`))) {
+      logger.warn(
+        `Refusing to remove stale apm file outside the apm deploy directories: "${relativePath}".`,
+      );
+      continue;
+    }
     try {
       checkPathTraversal({ relativePath, intendedRootDir: projectRoot });
     } catch {
@@ -282,9 +326,19 @@ async function removeStaleApmFiles(params: {
       continue;
     }
     const absolute = join(projectRoot, relativePath);
-    // `removeFile` is best-effort and swallows ENOENT, so missing files are
-    // a no-op. This keeps a corrupted partial-install from blowing up here.
-    await removeFile(absolute);
+    // checkPathTraversal is textual only: a symbolic link already inside the
+    // project could still lead the removal elsewhere. A stale entry that is
+    // itself a link is unlinked without following it.
+    try {
+      await removeFileWithoutFollowingSymlinks({ rootPath: projectRoot, targetPath: absolute });
+    } catch (error) {
+      logger.warn(
+        error instanceof PathOutsideRootError
+          ? `Refusing to remove stale apm file "${relativePath}": ${error.message}`
+          : `Skipping removal of stale apm file "${relativePath}": ${formatError(error)}`,
+      );
+      continue;
+    }
     logger.debug(`Removed stale apm file: ${relativePath}`);
   }
 }
@@ -298,28 +352,29 @@ async function installDependency(params: {
   frozen: boolean;
   update: boolean;
   logger: Logger;
-}): Promise<{ lockEntry: ApmLockDependency; deployedFiles: string[] }> {
+}): Promise<{
+  lockEntry: ApmLockDependency;
+  deployedFiles: string[];
+  pendingWrites: ApmDeployment[];
+}> {
   const { dep, client, semaphore, projectRoot, existingLock, frozen, update, logger } = params;
   const repoUrl = canonicalRepoUrl(dep);
   const locked = existingLock ? findApmLockDependency(existingLock, repoUrl) : undefined;
 
-  let resolvedRef: string;
-  let resolvedSha: string;
-  if (locked && !update && locked.resolved_commit && locked.resolved_ref) {
-    resolvedRef = locked.resolved_ref;
-    resolvedSha = locked.resolved_commit;
-    logger.debug(`Using locked commit for ${repoUrl}: ${resolvedSha}`);
-  } else {
-    resolvedRef = dep.ref ?? (await client.getDefaultBranch(dep.owner, dep.repo));
-    resolvedSha = await client.resolveRefToSha(dep.owner, dep.repo, resolvedRef);
-    logger.debug(`Resolved ${repoUrl} ref "${resolvedRef}" -> ${resolvedSha}`);
-  }
+  const { resolvedRef, resolvedSha } = await resolveApmDependencyRef({
+    dep,
+    locked: update ? undefined : locked,
+    client,
+    repoUrl,
+    frozen,
+    logger,
+  });
 
   // Collect (path, content) pairs before writing to disk. This lets us hash
   // them up-front and, under --frozen, refuse to overwrite good files with
   // tampered bytes. Under non-frozen we still write as we go for incremental
   // progress feedback on large dep trees.
-  const deployed: Array<{ path: string; content: string }> = [];
+  const deployed: ApmDeployment[] = [];
   for (const primitive of APM_PRIMITIVES) {
     const remoteBase = dep.path
       ? toPosixPath(posix.join(dep.path, primitive.sourceDir))
@@ -353,16 +408,9 @@ async function installDependency(params: {
 
   deployed.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const deployedFiles = deployed.map((d) => d.path);
-  const contentHash = computeContentHash(deployed);
+  const contentHash = computeInstallContentHash(deployed);
 
   assertFrozenContentHashMatches({ frozen, locked, contentHash, repoUrl, logger });
-
-  // Under --frozen we deferred all writes until after the hash check passed.
-  if (frozen) {
-    for (const { path: deployRelative, content } of deployed) {
-      await writeFileContent(join(projectRoot, deployRelative), content);
-    }
-  }
 
   const lockEntry: ApmLockDependency = {
     repo_url: repoUrl,
@@ -379,7 +427,90 @@ async function installDependency(params: {
 
   logger.info(`Installed ${deployedFiles.length} file(s) from ${repoUrl}@${shortSha(resolvedSha)}`);
 
-  return { lockEntry, deployedFiles };
+  // Under --frozen nothing was written yet: the caller writes every
+  // dependency's files at once, after all of them passed their checks.
+  return { lockEntry, deployedFiles, pendingWrites: frozen ? deployed : [] };
+}
+
+/**
+ * Write the deployments every dependency deferred under --frozen, checking
+ * every target for a symbolic link before writing any of them.
+ */
+async function writeFrozenApmDeployments(params: {
+  projectRoot: string;
+  deployments: ApmDeployment[];
+}): Promise<void> {
+  const { projectRoot, deployments } = params;
+  for (const { path: deployRelative } of deployments) {
+    await assertNoSymlinkBelowRoot({
+      rootPath: projectRoot,
+      targetPath: join(projectRoot, deployRelative),
+    });
+  }
+  for (const { path: deployRelative, content } of deployments) {
+    await writeApmFile({ projectRoot, deployRelative, content });
+  }
+}
+
+/**
+ * Resolve the commit a dependency is installed from: the locked commit when
+ * the lock pins one for the ref the manifest declares (the default branch when
+ * it declares none), otherwise the ref's current commit.
+ *
+ * The ref the locked commit is checked against comes from the manifest or the
+ * repository, never from the lock alone, and the locked commit must still be
+ * part of that ref's history in this very repository, as in gh mode. GitHub
+ * serves commits of a whole fork network through the parent repository, so a
+ * lockfile edited to pin a commit that only exists in a fork would otherwise
+ * install the fork's bytes under the trusted source's name.
+ */
+async function resolveApmDependencyRef(params: {
+  dep: ApmDependency;
+  locked: ApmLockDependency | undefined;
+  client: GitHubClient;
+  repoUrl: string;
+  frozen: boolean;
+  logger: Logger;
+}): Promise<{ resolvedRef: string; resolvedSha: string }> {
+  const { dep, locked, client, repoUrl, frozen, logger } = params;
+  const declaredRef = dep.ref ?? (await client.getDefaultBranch(dep.owner, dep.repo));
+  if (locked?.resolved_commit && locked.resolved_ref) {
+    const pinError = ({ detail, cause }: { detail: string; cause?: unknown }): Error =>
+      new Error(
+        `rulesync-apm.lock.yaml pins ${repoUrl} to ${locked.resolved_commit} (ref ${locked.resolved_ref}), but ${detail}. Run 'rulesync install --mode apm --update' to re-resolve it.`,
+        cause === undefined ? undefined : { cause },
+      );
+    if (locked.resolved_ref === declaredRef) {
+      let status: string;
+      try {
+        status = await client.compareCommits({
+          owner: dep.owner,
+          repo: dep.repo,
+          base: locked.resolved_commit,
+          head: declaredRef,
+        });
+      } catch (error) {
+        throw pinError({
+          detail: `it could not be checked against the ref: ${formatError(error)}`,
+          cause: error,
+        });
+      }
+      if (status !== "identical" && status !== "ahead") {
+        throw pinError({ detail: `that commit is not in the ref's history (${status})` });
+      }
+      logger.debug(`Using locked commit for ${repoUrl}: ${locked.resolved_commit}`);
+      return { resolvedRef: declaredRef, resolvedSha: locked.resolved_commit };
+    }
+    if (frozen) {
+      throw pinError({ detail: `the ref to install is ${declaredRef}` });
+    }
+    logger.debug(
+      `Locked ref "${locked.resolved_ref}" for ${repoUrl} differs from "${declaredRef}"; re-resolving.`,
+    );
+  }
+  const resolvedSha = await client.resolveRefToSha(dep.owner, dep.repo, declaredRef);
+  logger.debug(`Resolved ${repoUrl} ref "${declaredRef}" -> ${resolvedSha}`);
+  return { resolvedRef: declaredRef, resolvedSha };
 }
 
 /**
@@ -399,7 +530,7 @@ async function collectPrimitiveDeployments(params: {
   resolvedSha: string;
   repoUrl: string;
   frozen: boolean;
-  deployed: Array<{ path: string; content: string }>;
+  deployed: ApmDeployment[];
   logger: Logger;
 }): Promise<void> {
   const {
@@ -420,7 +551,7 @@ async function collectPrimitiveDeployments(params: {
   for (const file of files) {
     if (file.size > MAX_FILE_SIZE) {
       logger.warn(
-        `Skipping "${file.path}" from ${repoUrl}: ${(file.size / 1024 / 1024).toFixed(2)}MB exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit.`,
+        `Skipping "${file.path}" from ${repoUrl}: ${formatMegabytes(file.size)}MB exceeds ${MAX_FILE_SIZE_MB}MB limit.`,
       );
       continue;
     }
@@ -442,15 +573,34 @@ async function collectPrimitiveDeployments(params: {
     const byteLength = Buffer.byteLength(content, "utf8");
     if (byteLength > MAX_FILE_SIZE) {
       logger.warn(
-        `Skipping "${file.path}" from ${repoUrl}: fetched ${(byteLength / 1024 / 1024).toFixed(2)}MB exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit.`,
+        `Skipping "${file.path}" from ${repoUrl}: fetched ${formatMegabytes(byteLength)}MB exceeds ${MAX_FILE_SIZE_MB}MB limit.`,
       );
       continue;
     }
     deployed.push({ path: deployRelative, content });
     if (!frozen) {
-      await writeFileContent(join(projectRoot, deployRelative), content);
+      await writeApmFile({ projectRoot, deployRelative, content });
     }
   }
+}
+
+/**
+ * Write one deployed apm file, refusing a target reached through a symbolic
+ * link below the project root. `checkPathTraversal` only checks the path
+ * text, so a link committed to the project would otherwise redirect the
+ * write — out of the project (`.github/instructions -> ~/.ssh`), or into a
+ * sensitive file inside it (`.github/instructions/x.instructions.md ->
+ * ../../.git/config`).
+ */
+async function writeApmFile(params: {
+  projectRoot: string;
+  deployRelative: string;
+  content: string;
+}): Promise<void> {
+  const { projectRoot, deployRelative, content } = params;
+  const targetPath = join(projectRoot, deployRelative);
+  await assertNoSymlinkBelowRoot({ rootPath: projectRoot, targetPath });
+  await writeFileContent(targetPath, content);
 }
 
 /**
@@ -488,22 +638,6 @@ function assertFrozenContentHashMatches(params: {
       );
     }
   }
-}
-
-/**
- * SHA-256 over a canonical, order-independent representation of the deployed
- * files. Written into `content_hash` so that `--frozen` installs can refuse
- * to trust tampered output.
- */
-function computeContentHash(files: Array<{ path: string; content: string }>): string {
-  const hash = createHash("sha256");
-  for (const { path, content } of files) {
-    hash.update(path);
-    hash.update("\0");
-    hash.update(content);
-    hash.update("\0");
-  }
-  return `sha256:${hash.digest("hex")}`;
 }
 
 async function listPrimitiveFiles(params: {

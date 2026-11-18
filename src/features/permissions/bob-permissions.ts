@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { BOB_GLOBAL_SETTINGS_DIR_PATH, BOB_SETTINGS_FILE_NAME } from "../../constants/bob-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
+import type { AiFileParams } from "../../types/ai-file.js";
 import type {
   BobPermissionsOverride,
   PermissionAction,
@@ -11,7 +11,7 @@ import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { type Logger, warnWithFallback } from "../../utils/logger.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
-import { isPlainObject } from "../../utils/type-guards.js";
+import { isPlainObject, toStringArray } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
   parseSharedConfig,
@@ -24,15 +24,15 @@ import {
   partitionCommandRules,
   SHELL_PERMISSION_CATEGORY,
   warnAboutUnwrittenCommandRules,
+  widenToPrefixGlob,
 } from "./shell-command-categories.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
 } from "./tool-permissions.js";
-import { buildVscodeCommandLists } from "./vscode-command-lists.js";
+import { buildVscodeCommandLists, importVscodeCommandLists } from "./vscode-command-lists.js";
 
 const TOOL_LABEL = "IBM Bob";
 
@@ -67,13 +67,6 @@ type BobOverrideApproval = NonNullable<BobPermissionsOverride["approval"]>;
 const EXECUTE_COMMAND_TOOL_ID = "execute_command";
 
 const SURFACE_LABEL = `${APPROVAL_KEY}.allowedExecutors[${EXECUTE_COMMAND_TOOL_ID}].approvedCommands/deniedCommands`;
-
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((entry): entry is string => typeof entry === "string");
-}
 
 function isExecuteCommandEntry(entry: unknown): entry is Record<string, unknown> {
   return isPlainObject(entry) && entry.toolId === EXECUTE_COMMAND_TOOL_ID;
@@ -277,7 +270,7 @@ function warnAboutNewAutoApprovals({
   logger?: Logger | undefined;
 }): void {
   const existingApproval = isPlainObject(settings[APPROVAL_KEY]) ? settings[APPROVAL_KEY] : {};
-  const existingGroups = new Set(asStringArray(existingApproval.allowed_permissions));
+  const existingGroups = new Set(toStringArray(existingApproval.allowed_permissions));
   const existingOutside = new Set(
     (Array.isArray(existingApproval.permissionOptions) ? existingApproval.permissionOptions : [])
       .filter(isPlainObject)
@@ -310,16 +303,6 @@ function warnAboutNewAutoApprovals({
       `${filePath}, Bob's user settings, so this applies to every project on this machine. ` +
       `Check it if .rulesync/permissions.jsonc arrived with a repository you cloned.`,
   );
-}
-
-/**
- * The widest glob a pattern stands for once Bob compares it as a command
- * prefix: `git` also covers `git push --force`. Used only to compare allows
- * against the restrictions, where widening can only withhold more allows,
- * never fail open.
- */
-function widenToPrefixGlob(pattern: string): string {
-  return pattern.endsWith("*") ? pattern : `${pattern}*`;
 }
 
 /**
@@ -471,14 +454,6 @@ export class BobPermissions extends ToolPermissions {
     });
   }
 
-  /**
-   * `~/.bob/settings/settings.json` holds Bob's other settings and the hooks
-   * feature's `hooks` key, so it must never be deleted by this feature.
-   */
-  override isDeletable(): boolean {
-    return false;
-  }
-
   static getSettablePaths(_options: { global?: boolean } = {}): ToolPermissionsSettablePaths {
     // Global only: `~/.bob/settings/settings.json` (the processor resolves the
     // home directory through outputRoot). Bob documents no project-scoped
@@ -578,7 +553,7 @@ export class BobPermissions extends ToolPermissions {
     });
   }
 
-  toRulesyncPermissions(): RulesyncPermissions {
+  toRulesyncPermissions({ logger }: { logger?: Logger } = {}): RulesyncPermissions {
     const settings = parseBobSettings({
       fileContent: this.getFileContent(),
       filePath: join(this.getRelativeDirPath(), this.getRelativeFilePath()),
@@ -590,15 +565,15 @@ export class BobPermissions extends ToolPermissions {
         : [];
     const entry = executors.find(isExecuteCommandEntry);
 
-    const rules: Record<string, PermissionAction> = {};
-    for (const pattern of asStringArray(entry?.approvedCommands)) {
-      rules[pattern] = "allow";
-    }
-    // Applied second: Bob's `deniedCommands` takes precedence over
-    // `approvedCommands`, so a pattern in both lists imports as `deny`.
-    for (const pattern of asStringArray(entry?.deniedCommands)) {
-      rules[pattern] = "deny";
-    }
+    // Bob compares both lists as literal command prefixes (`deniedCommands`
+    // wins); see `importVscodeCommandLists` for the lowering into globs.
+    const rules = importVscodeCommandLists({
+      allowed: toStringArray(entry?.approvedCommands),
+      denied: toStringArray(entry?.deniedCommands),
+      toolLabel: TOOL_LABEL,
+      logger,
+      prefixSemantics: "documented-prefix",
+    });
 
     const permission: Record<string, Record<string, PermissionAction>> = {};
     if (Object.keys(rules).length > 0) {
@@ -612,24 +587,6 @@ export class BobPermissions extends ToolPermissions {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): BobPermissions {
-    return new BobPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "{}",
-      validate: false,
     });
   }
 }

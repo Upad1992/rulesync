@@ -4,13 +4,11 @@ import {
   COMMANDCODE_DIR,
   COMMANDCODE_SETTINGS_FILE_NAME,
 } from "../../constants/commandcode-paths.js";
-import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import {
   CANONICAL_TO_COMMANDCODE_EVENT_NAMES,
   COMMANDCODE_HOOK_EVENTS,
   COMMANDCODE_TO_CANONICAL_EVENT_NAMES,
 } from "../../types/hooks.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import {
@@ -27,8 +25,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
-  type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
 } from "./tool-hooks.js";
@@ -48,7 +44,7 @@ const COMMANDCODE_NO_MATCHER_EVENTS: ReadonlySet<string> = new Set(["stop", "ses
 // commands, so dot-relative scripts are anchored to it the way Claude Code
 // anchors them to `$CLAUDE_PROJECT_DIR`. `timeout` is in seconds (canonical
 // unit). Only `command` hooks exist.
-const COMMANDCODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
+export const COMMANDCODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
   supportedEvents: COMMANDCODE_HOOK_EVENTS,
   canonicalToToolEventNames: CANONICAL_TO_COMMANDCODE_EVENT_NAMES,
   toolToCanonicalEventNames: COMMANDCODE_TO_CANONICAL_EVENT_NAMES,
@@ -87,13 +83,6 @@ function parseCommandcodeSettings(fileContent: string, filePath?: string): Recor
  * @see https://commandcode.ai/docs/settings
  */
 export class CommandcodeHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   override isDeletable(): boolean {
     // settings.json carries user-managed settings beyond hooks, so it is never
     // removed wholesale; clearing hooks happens via an in-place merge.
@@ -107,23 +96,6 @@ export class CommandcodeHooks extends ToolHooks {
       relativeDirPath: COMMANDCODE_DIR,
       relativeFilePath: COMMANDCODE_SETTINGS_FILE_NAME,
     };
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    validate = true,
-    global = false,
-  }: ToolHooksFromFileParams): Promise<CommandcodeHooks> {
-    const paths = CommandcodeHooks.getSettablePaths({ global });
-    const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
-    const fileContent = (await readFileContentOrNull(filePath)) ?? '{"hooks":{}}';
-    return new CommandcodeHooks({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: paths.relativeFilePath,
-      fileContent,
-      validate,
-    });
   }
 
   static async fromRulesyncHooks({
@@ -166,17 +138,10 @@ export class CommandcodeHooks extends ToolHooks {
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
     const configPath = join(this.getRelativeDirPath(), this.getRelativeFilePath());
-    let settings: Record<string, unknown>;
-    try {
-      settings = parseCommandcodeSettings(this.getFileContent(), configPath);
-    } catch (error) {
-      throw new Error(
-        `Failed to parse Command Code hooks content in ${configPath}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const settings: Record<string, unknown> = this.parseFileContentOrThrow({
+      displayName: "Command Code",
+      parse: (fileContent) => parseCommandcodeSettings(fileContent, configPath),
+    });
     const hooks = toolHooksToCanonical({
       logger,
       hooks: settings.hooks,
@@ -188,24 +153,6 @@ export class CommandcodeHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): CommandcodeHooks {
-    return new CommandcodeHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

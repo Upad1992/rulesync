@@ -8,18 +8,28 @@ import {
   REASONIX_GLOBAL_PERMISSIONS_FILE_NAME,
   REASONIX_PROJECT_PERMISSIONS_FILE_NAME,
 } from "../../constants/reasonix-paths.js";
+import {
+  RULESYNC_PERMISSIONS_FILE_NAME,
+  RULESYNC_RELATIVE_DIR_PATH,
+} from "../../constants/rulesync-paths.js";
 import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
-import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
+import type {
+  PermissionAction,
+  PermissionsConfig,
+  ReasonixPermissionsOverride,
+} from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull, toPosixPath } from "../../utils/file.js";
-import type { Logger } from "../../utils/logger.js";
+import { type Logger, warnWithFallback } from "../../utils/logger.js";
+import { getOrCreateOwn, invertRecord, lookupOwn } from "../../utils/own-lookup.js";
+import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
-import { isRecord } from "../../utils/type-guards.js";
+import { isRecord, toStringArray } from "../../utils/type-guards.js";
 import {
   REASONIX_LEGACY_READ_TOOL_NAME,
   REASONIX_READ_TOOL_NAME,
-  toReasonixStringArray as toStringArray,
   toReasonixTable as toPermissionsTable,
+  warnIfReasonixNestedProjectConfigShadowed,
 } from "../shared/reasonix-config-table.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
@@ -34,9 +44,10 @@ import {
   type TrustAffectingSandboxPath,
   warnOnTrustAffectingEntries,
 } from "./sandbox-trust.js";
+import { honorAllToolsRestrictions } from "./shadowed-allows.js";
+import { buildToolPatternEntry, parseToolPatternEntry } from "./tool-pattern-entry.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -48,7 +59,8 @@ import {
  *
  * Reasonix matches a rule's tool exactly against its registered tools, which
  * are snake_case (`read_file`, `write_file`, `grep`, `glob`, `web_fetch`,
- * `web_search`, `notebook_edit`, `task`). Only `Bash`, `Edit` (every file
+ * `web_search`, `notebook_edit`, and `task` up to v2.57.x / `spawn_agents` from
+ * v2.58.0). Only `Bash`, `Edit` (every file
  * writer: `write_file`, `edit_file`, `multi_edit`, `notebook_edit`, ...),
  * `Browser` and `Computer` are Claude-Code-style family aliases
  * (`canonicalRuleTool` / `groupOf`), so a `Read(...)` or `Write(...)` rule
@@ -69,6 +81,24 @@ const CANONICAL_TO_REASONIX_TOOL_NAMES: Record<string, string> = {
   glob: "glob",
   notebookedit: "notebook_edit",
   agent: "task",
+};
+
+/**
+ * Reasonix tool names a canonical category writes beside its primary name, for
+ * a tool Reasonix renamed. studio-v2.58.0 replaced the `task` delegation family
+ * with `spawn_agents` (commit ad2c96347), while the 1.x line and v2 up to
+ * v2.57.x still register `task`. When Reasonix loads the config file it checks
+ * only a rule's syntax: a rule naming a tool the running build lacks matches
+ * nothing (v2.34.0+ reports it as dormant) and is not rejected. (The v2 Web UI
+ * permissions editor refuses to newly add such a rule with `ErrUnknownTool`,
+ * but keeps the ones already in the file.) So writing both names keeps an
+ * `agent` rule in force on old and new builds alike. Both names are read back
+ * to the same category.
+ * @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.58.0/internal/runtime/delegation/spawn.go
+ * @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.57.0/internal/runtime/delegation/task.go
+ */
+const CANONICAL_TO_EXTRA_REASONIX_TOOL_NAMES: Record<string, readonly string[]> = {
+  agent: ["spawn_agents"],
 };
 
 /**
@@ -93,24 +123,33 @@ const CANONICAL_TO_LEGACY_REASONIX_TOOL_NAMES: Record<string, string> = {
  * Reverse mapping from Reasonix tool names (current and legacy spellings) to
  * rulesync canonical names.
  */
-const REASONIX_TO_CANONICAL_TOOL_NAMES: Record<string, string> = Object.fromEntries([
-  ...Object.entries(CANONICAL_TO_LEGACY_REASONIX_TOOL_NAMES).map(([k, v]) => [v, k]),
-  ...Object.entries(CANONICAL_TO_REASONIX_TOOL_NAMES).map(([k, v]) => [v, k]),
-]);
+const REASONIX_TO_CANONICAL_TOOL_NAMES: Record<string, string> = {
+  ...invertRecord(CANONICAL_TO_LEGACY_REASONIX_TOOL_NAMES),
+  ...invertRecord(CANONICAL_TO_REASONIX_TOOL_NAMES),
+  ...Object.fromEntries(
+    Object.entries(CANONICAL_TO_EXTRA_REASONIX_TOOL_NAMES).flatMap(([canonical, names]) =>
+      names.map((name) => [name, canonical]),
+    ),
+  ),
+};
 
 /** Every Reasonix tool name a canonical category owns on generate. */
 function reasonixToolNamesOf(canonical: string): string[] {
-  const legacy = CANONICAL_TO_LEGACY_REASONIX_TOOL_NAMES[canonical];
-  const current = toReasonixToolName(canonical);
-  return legacy === undefined ? [current] : [current, legacy];
+  const legacy = lookupOwn({ record: CANONICAL_TO_LEGACY_REASONIX_TOOL_NAMES, key: canonical });
+  const current = toReasonixToolNames(canonical);
+  return legacy === undefined ? current : [...current, legacy];
 }
 
-function toReasonixToolName(canonical: string): string {
-  return CANONICAL_TO_REASONIX_TOOL_NAMES[canonical] ?? canonical;
+/** The Reasonix tool names a canonical category's rules are written under. */
+function toReasonixToolNames(canonical: string): string[] {
+  const primary =
+    lookupOwn({ record: CANONICAL_TO_REASONIX_TOOL_NAMES, key: canonical }) ?? canonical;
+  const extra = lookupOwn({ record: CANONICAL_TO_EXTRA_REASONIX_TOOL_NAMES, key: canonical });
+  return extra === undefined ? [primary] : [primary, ...extra];
 }
 
 function toCanonicalToolName(reasonixName: string): string {
-  return REASONIX_TO_CANONICAL_TOOL_NAMES[reasonixName] ?? reasonixName;
+  return lookupOwn({ record: REASONIX_TO_CANONICAL_TOOL_NAMES, key: reasonixName }) ?? reasonixName;
 }
 
 /**
@@ -130,35 +169,6 @@ function isReasonixExactCommandEntry(entry: string): boolean {
   return parenIndex === -1 || eqIndex < parenIndex;
 }
 
-/**
- * Parse a Reasonix permission entry like "Bash(npm run *)" into tool name and pattern.
- * If no parentheses, returns the tool name with "*" as the pattern.
- */
-function parseReasonixPermissionEntry(entry: string): { toolName: string; pattern: string } {
-  const parenIndex = entry.indexOf("(");
-  if (parenIndex === -1) {
-    return { toolName: entry, pattern: "*" };
-  }
-  const toolName = entry.slice(0, parenIndex);
-  // Verify closing parenthesis exists at the end before extracting the pattern
-  if (!entry.endsWith(")")) {
-    return { toolName, pattern: "*" };
-  }
-  const pattern = entry.slice(parenIndex + 1, -1);
-  return { toolName, pattern: pattern || "*" };
-}
-
-/**
- * Build a Reasonix permission entry like "Bash(npm run *)".
- * If the pattern is "*", returns just the tool name.
- */
-function buildReasonixPermissionEntry(toolName: string, pattern: string): string {
-  if (pattern === "*") {
-    return toolName;
-  }
-  return `${toolName}(${pattern})`;
-}
-
 type ReasonixConfig = Record<string, unknown>;
 
 type ReasonixPermissionsTable = Record<string, unknown> & {
@@ -173,6 +183,9 @@ const REASONIX_TOOL_LABEL = "Reasonix";
 
 /** The `[permissions]` key the override's `allowDynamicBash` writes and reads. */
 const REASONIX_ALLOW_DYNAMIC_BASH_KEY = "allow_dynamic_bash";
+
+/** The `[permissions]` key the override's `askOnExternalOrigin` writes and reads. */
+const REASONIX_ASK_ON_EXTERNAL_ORIGIN_KEY = "ask_on_external_origin";
 
 /**
  * `[sandbox]` keys whose authored value loosens the enforcement layer beneath
@@ -216,7 +229,76 @@ const REASONIX_TRUST_AFFECTING_SANDBOX_PATHS: readonly TrustAffectingSandboxPath
       "may reach is decided by this path rather than by the project directory",
     widens: escapesTheProject,
   },
+  {
+    path: ["allow_devices"],
+    reason:
+      "binds host device nodes into the Linux Bash sandbox, which otherwise sees a private /dev",
+    widens: isNonEmptyList,
+  },
+  {
+    path: ["egress_unlisted"],
+    reason:
+      "lets sandboxed Bash reach hosts that allowed_domains does not name without asking first",
+    widens: (value) =>
+      typeof value !== "string" || !["", "ask"].includes(value.trim().toLowerCase()),
+  },
+  {
+    path: ["host_authorities"],
+    reason:
+      "lets sandboxed Bash call host services beyond the SSH agent, such as a container daemon " +
+      "socket, which amounts to host-wide execution",
+    widens: (value) =>
+      !Array.isArray(value) ||
+      value.some((entry) => typeof entry !== "string" || entry.trim() !== "ssh_agent"),
+  },
 ];
+
+/**
+ * `[sandbox]` keys Reasonix reads only from the user config. In project scope
+ * `narrowSandbox` replaces each of them with the user's value (and reports a
+ * project `egress_unlisted` as user-only), so a repository cannot hand itself a
+ * device, a host service or unprompted egress. A project-scope generate skips
+ * them with a warning, the way `applyPermissionsMode` treats `mode`.
+ *
+ * @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.44.0/internal/contract/config/project_scope.go
+ * @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.44.0/internal/contract/config/config.go
+ */
+const REASONIX_USER_ONLY_SANDBOX_KEYS: readonly string[] = [
+  "allow_devices",
+  "egress_unlisted",
+  "host_authorities",
+];
+
+/**
+ * Removes the user-only `[sandbox]` keys from a project-scope override, warning
+ * once about what was skipped. The keys are left alone in the file, so whatever
+ * it already had survives the shallow merge. Global scope keeps them all, and
+ * a non-table override is returned as is, so the trust check still reports its
+ * shape rather than seeing nothing.
+ */
+function dropUserOnlySandboxKeys({
+  sandbox,
+  global,
+  relativeFilePath,
+  logger,
+}: {
+  sandbox: unknown;
+  global: boolean;
+  relativeFilePath: string;
+  logger?: Logger;
+}): unknown {
+  if (global || !isRecord(sandbox)) return sandbox;
+  const skipped = REASONIX_USER_ONLY_SANDBOX_KEYS.filter((key) => sandbox[key] !== undefined);
+  if (skipped.length === 0) return sandbox;
+  logger?.warn(
+    `Reasonix permissions: skipping ${skipped.map((key) => `reasonix.sandbox.${key}`).join(", ")} ` +
+      `for the project-scoped ${relativeFilePath}; Reasonix reads ${
+        skipped.length === 1 ? "this key" : "these keys"
+      } only from the user config and replaces a project value with the user's, so generate ` +
+      "it with --global instead.",
+  );
+  return Object.fromEntries(Object.entries(sandbox).filter(([key]) => !skipped.includes(key)));
+}
 
 /**
  * Whether a `workspace_root` points somewhere other than inside the project the
@@ -396,6 +478,114 @@ function applyPermissionsMode({
   ];
 }
 
+/**
+ * Writes the override's `askOnExternalOrigin` into `[permissions]`. Reasonix
+ * honors the key only in the user config (`narrowPermissions` in
+ * `project_scope.go`), so a project-scope generate skips it with a warning and
+ * leaves whatever the file had. Turning it on only adds prompts, so that is
+ * quiet; turning off a value the file had on is reported, since Auto and YOLO
+ * then run calls that repeat text from a web page or tool result without asking.
+ * As with `applyAllowDynamicBash`, only a literal `true` counts as quiet, so a
+ * value a `--no-validate` run let through is never written in silence.
+ *
+ * @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.47.1/docs/GUIDE.md
+ */
+function applyAskOnExternalOrigin({
+  permissions,
+  override,
+  global,
+  relativeFilePath,
+  logger,
+}: {
+  permissions: ReasonixPermissionsTable;
+  override: ReasonixPermissionsOverride | undefined;
+  global: boolean;
+  relativeFilePath: string;
+  logger?: Logger;
+}): TrustAffectingEntry[] {
+  const authored = override?.askOnExternalOrigin;
+  if (authored === undefined) return [];
+  if (!global) {
+    logger?.warn(
+      `Reasonix permissions: skipping reasonix.askOnExternalOrigin for the project-scoped ` +
+        `${relativeFilePath}; Reasonix honors [permissions] ask_on_external_origin only in the ` +
+        "user config and ignores a project value, so generate it with --global instead.",
+    );
+    return [];
+  }
+  const previous = permissions[REASONIX_ASK_ON_EXTERNAL_ORIGIN_KEY];
+  permissions[REASONIX_ASK_ON_EXTERNAL_ORIGIN_KEY] = authored;
+  if (authored === true || (previous !== true && authored === false)) return [];
+  return [
+    {
+      label: `permissions.${REASONIX_ASK_ON_EXTERNAL_ORIGIN_KEY}`,
+      reason:
+        "lets Auto and YOLO run a call that repeats text from a web page or tool result " +
+        "without asking first",
+    },
+  ];
+}
+
+/**
+ * The `tools` patch entry — the `[tools]` table with the override's `disabled`
+ * list laid over it, or nothing when the override does not author one — and the
+ * trust rows it carries. Adding a name only removes a tool, and a project file
+ * can only add to the user's list, so that stays quiet. The list is replaced
+ * whole, though, so a name the file had turned off and the override leaves out
+ * is turned back on, and that is reported, as are a `[tools]` or a `disabled`
+ * the file holds in a shape that cannot be read. Only `disabled` is written:
+ * the rest of `[tools]` (timeouts, search backends, ...) stays as it is.
+ */
+function applyToolsDisabled({
+  existing,
+  override,
+}: {
+  existing: unknown;
+  override: ReasonixPermissionsOverride | undefined;
+}): { patch: { tools?: Record<string, unknown> }; entries: TrustAffectingEntry[] } {
+  const disabled = override?.tools?.disabled;
+  if (disabled === undefined) return { patch: {}, entries: [] };
+  const patch = { tools: { ...asReasonixRecord(existing), disabled } };
+  if (existing === undefined) return { patch, entries: [] };
+  if (!isRecord(existing)) {
+    return {
+      patch,
+      entries: [
+        {
+          label: "tools",
+          reason: replacedUnreadableReason({ shape: "object", toolLabel: REASONIX_TOOL_LABEL }),
+        },
+      ],
+    };
+  }
+  const before = existing.disabled;
+  if (before === undefined) return { patch, entries: [] };
+  if (!Array.isArray(before)) {
+    return {
+      patch,
+      entries: [
+        {
+          label: "tools.disabled",
+          reason: replacedUnreadableReason({ shape: "list", toolLabel: REASONIX_TOOL_LABEL }),
+        },
+      ],
+    };
+  }
+  const reEnabled = uniq(before.filter((name) => !disabled.includes(name as string)));
+  if (reEnabled.length === 0) return { patch, entries: [] };
+  return {
+    patch,
+    entries: [
+      {
+        label: "tools.disabled",
+        reason: `turns back on ${reEnabled
+          .map((name) => quoteValueForWarning(name))
+          .join(", ")}, which the file had turned off`,
+      },
+    ],
+  };
+}
+
 function parseReasonixConfig(fileContent: string): ReasonixConfig {
   const parsed = smolToml.parse(fileContent || smolToml.stringify({}));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -445,13 +635,6 @@ export class ReasonixPermissions extends ToolPermissions {
     this.toml = parseReasonixConfig(this.getFileContent());
   }
 
-  override isDeletable(): boolean {
-    // The Reasonix config file may hold many other settings (providers, ui,
-    // agent, MCP `[[plugins]]`, …), so it must never be deleted when no
-    // rulesync-managed permission rules remain.
-    return false;
-  }
-
   static getSettablePaths({ global }: { global?: boolean } = {}): ToolPermissionsSettablePaths {
     // Project config lives at the repository root (`./reasonix.toml`), while the
     // global config lives at `~/.reasonix/config.toml`; the home root is supplied
@@ -493,6 +676,11 @@ export class ReasonixPermissions extends ToolPermissions {
     logger,
     global = false,
   }: ToolPermissionsFromRulesyncPermissionsParams): Promise<ReasonixPermissions> {
+    await warnIfReasonixNestedProjectConfigShadowed({
+      outputRoot,
+      global,
+      logger,
+    });
     const paths = this.getSettablePaths({ global });
     const filePath = join(outputRoot, paths.relativeDirPath, paths.relativeFilePath);
     const relativeFilePathForLog = toPosixPath(join(paths.relativeDirPath, paths.relativeFilePath));
@@ -500,7 +688,7 @@ export class ReasonixPermissions extends ToolPermissions {
     const parsed = parseReasonixConfig(existingContent);
 
     const config = rulesyncPermissions.getJson();
-    const { allow, ask, deny } = convertRulesyncToReasonixPermissions(config);
+    const { allow, ask, deny } = convertRulesyncToReasonixPermissions({ config, logger });
 
     // Determine which tool names are managed by the permissions config
     const managedToolNames = new Set(
@@ -530,7 +718,7 @@ export class ReasonixPermissions extends ToolPermissions {
     if (logger && managedToolNames.has(REASONIX_READ_TOOL_NAME)) {
       const readToolNames = new Set(reasonixToolNamesOf("read"));
       const droppedReadDenyEntries = toStringArray(existingPermissions.deny).filter((entry) => {
-        const { toolName } = parseReasonixPermissionEntry(entry);
+        const { toolName } = parseToolPatternEntry(entry);
         return readToolNames.has(toolName);
       });
       if (droppedReadDenyEntries.length > 0) {
@@ -539,6 +727,18 @@ export class ReasonixPermissions extends ToolPermissions {
         );
       }
     }
+
+    warnOnLoosenedAgentEntries({
+      existingPermissions,
+      managedToolNames,
+      generated: {
+        allow: [...allow, ...rawAllow],
+        ask: [...ask, ...rawAsk],
+        deny: [...deny, ...rawDeny],
+      },
+      relativeFilePath: relativeFilePathForLog,
+      logger,
+    });
 
     // `mode` (the writer fallback: ask|allow|deny) has no equivalent in
     // rulesync's canonical permissions model, so any existing value is
@@ -565,22 +765,41 @@ export class ReasonixPermissions extends ToolPermissions {
         logger,
       }),
     );
+    trustAffecting.push(
+      ...applyAskOnExternalOrigin({
+        permissions: mergedPermissions,
+        override,
+        global,
+        relativeFilePath: relativeFilePathForLog,
+        logger,
+      }),
+    );
 
     const patch: Record<string, unknown> = { permissions: mergedPermissions };
+
+    const toolsDisabled = applyToolsDisabled({ existing: parsed.tools, override });
+    Object.assign(patch, toolsDisabled.patch);
+    trustAffecting.push(...toolsDisabled.entries);
 
     // Overlay the Reasonix-scoped override's `[sandbox]`/`[agent]` tables. Shallow
     // merged at the table's top level, so the override's keys win while unrelated
     // sibling keys the user set directly (e.g. `[agent].model`) are preserved.
     if (override?.sandbox !== undefined) {
+      const authoredSandbox = dropUserOnlySandboxKeys({
+        sandbox: override.sandbox,
+        global,
+        relativeFilePath: relativeFilePathForLog,
+        logger,
+      });
       const mergedSandbox = {
         ...asReasonixRecord(parsed.sandbox),
-        ...asReasonixRecord(override.sandbox),
+        ...asReasonixRecord(authoredSandbox),
       };
       patch.sandbox = mergedSandbox;
       trustAffecting.push(
         ...collectSandboxOverlayEntries({
           existing: parsed.sandbox,
-          authored: override.sandbox,
+          authored: authoredSandbox,
           merged: mergedSandbox,
         }),
       );
@@ -669,7 +888,14 @@ export class ReasonixPermissions extends ToolPermissions {
     // shallow on generate but the extract is whole-table for `[sandbox]`, so an
     // existing `[sandbox]` key the override did not author is pulled into the
     // override on the next import.
-    const sandbox = asReasonixRecord(this.toml.sandbox);
+    // The user-only keys are lifted from the user config alone, as `mode` is
+    // below: Reasonix ignores them in a project file, and a project generate
+    // would only skip them again.
+    const sandbox = Object.fromEntries(
+      Object.entries(asReasonixRecord(this.toml.sandbox)).filter(
+        ([key]) => this.global || !REASONIX_USER_ONLY_SANDBOX_KEYS.includes(key),
+      ),
+    );
     const agentPlanMode = pickReasonixKeys(this.toml.agent, [
       ...REASONIX_OVERRIDE_AGENT_KEYS,
       ...REASONIX_RETIRED_AGENT_KEYS,
@@ -691,6 +917,24 @@ export class ReasonixPermissions extends ToolPermissions {
       REASONIX_PERMISSION_MODES.has(permissions.mode)
     ) {
       reasonixOverride.mode = permissions.mode;
+    }
+    // `ask_on_external_origin` is user-config only, like `mode`.
+    const askOnExternalOrigin = permissions[REASONIX_ASK_ON_EXTERNAL_ORIGIN_KEY];
+    if (this.global && typeof askOnExternalOrigin === "boolean") {
+      reasonixOverride.askOnExternalOrigin = askOnExternalOrigin;
+    }
+    const toolsDisabled = asReasonixRecord(this.toml.tools).disabled;
+    if (Array.isArray(toolsDisabled)) {
+      const names = toStringArray(toolsDisabled);
+      if (names.length < toolsDisabled.length) {
+        warnWithFallback(
+          undefined,
+          `Reasonix permissions: ${this.getRelativePathFromCwd()} [tools] disabled holds ` +
+            `${toolsDisabled.length - names.length} non-string entries; they are not imported ` +
+            "into reasonix.tools.disabled, so the next generate drops them.",
+        );
+      }
+      reasonixOverride.tools = { disabled: names };
     }
     if (Object.keys(sandbox).length > 0) reasonixOverride.sandbox = sandbox;
     if (Object.keys(agentPlanMode).length > 0) reasonixOverride.agent = agentPlanMode;
@@ -719,20 +963,6 @@ export class ReasonixPermissions extends ToolPermissions {
       };
     }
   }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): ReasonixPermissions {
-    return new ReasonixPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: smolToml.stringify({}),
-      validate: false,
-    });
-  }
 }
 
 /**
@@ -759,7 +989,7 @@ function preserveExistingEntries({
     if (isReasonixExactCommandEntry(entry)) {
       return !rawOwnedEntries.has(entry);
     }
-    return !managedToolNames.has(parseReasonixPermissionEntry(entry).toolName);
+    return !managedToolNames.has(parseToolPatternEntry(entry).toolName);
   };
   const allow = toStringArray(existingPermissions.allow).filter(isPreserved);
   const ask = toStringArray(existingPermissions.ask).filter(isPreserved);
@@ -776,6 +1006,85 @@ function preserveExistingEntries({
   }
 
   return { allow, ask, deny };
+}
+
+/**
+ * `spawn_agents` became a managed name with Reasonix v2.58.0 support, so a
+ * stricter rule the user wrote for it by hand (e.g. a v2.58-era
+ * `deny = ["spawn_agents"]` next to an older `agent: allow` source) would be
+ * silently replaced by a looser one. Name every such loosening.
+ */
+function warnOnLoosenedAgentEntries({
+  existingPermissions,
+  managedToolNames,
+  generated,
+  relativeFilePath,
+  logger,
+}: {
+  existingPermissions: ReasonixPermissionsTable;
+  managedToolNames: Set<string>;
+  generated: { allow: string[]; ask: string[]; deny: string[] };
+  relativeFilePath: string;
+  logger?: Logger;
+}): void {
+  if (!logger || !managedToolNames.has("spawn_agents")) return;
+  const loosened = findLoosenedEntries({
+    existingPermissions,
+    toolNames: new Set(reasonixToolNamesOf("agent")),
+    generated,
+  });
+  if (loosened.length === 0) return;
+  logger.warn(
+    `Permissions feature manages the Reasonix delegation tools ('task', 'spawn_agents') through the 'agent' category ` +
+      `and will replace ${loosened.length} stricter existing entries in ${relativeFilePath}: ${loosened.join(", ")}. ` +
+      `To keep them, tighten the 'agent' category in ${RULESYNC_RELATIVE_DIR_PATH}/${RULESYNC_PERMISSIONS_FILE_NAME} ` +
+      `or move them to 'reasonix.rawDeny' / 'reasonix.rawAsk'.`,
+  );
+}
+
+const PERMISSION_STRICTNESS = { allow: 0, ask: 1, deny: 2 } as const;
+
+/**
+ * Existing entries for `toolNames` whose action is stricter than the one the
+ * generated lists give the same entry, formatted `<list> "<entry>"`. An entry
+ * the generated lists drop counts as no stricter than `allow`.
+ */
+function findLoosenedEntries({
+  existingPermissions,
+  toolNames,
+  generated,
+}: {
+  existingPermissions: ReasonixPermissionsTable;
+  toolNames: Set<string>;
+  generated: { allow: string[]; ask: string[]; deny: string[] };
+}): string[] {
+  const generatedStrictness = new Map<string, number>();
+  for (const list of ["allow", "ask", "deny"] as const) {
+    for (const entry of generated[list]) {
+      const key = normalizeToolPatternEntry(entry);
+      generatedStrictness.set(
+        key,
+        Math.max(generatedStrictness.get(key) ?? 0, PERMISSION_STRICTNESS[list]),
+      );
+    }
+  }
+  const loosened: string[] = [];
+  for (const list of ["ask", "deny"] as const) {
+    for (const entry of toStringArray(existingPermissions[list])) {
+      if (isReasonixExactCommandEntry(entry)) continue;
+      if (!toolNames.has(parseToolPatternEntry(entry).toolName)) continue;
+      const key = normalizeToolPatternEntry(entry);
+      if ((generatedStrictness.get(key) ?? 0) < PERMISSION_STRICTNESS[list]) {
+        loosened.push(`${list} "${entry}"`);
+      }
+    }
+  }
+  return loosened;
+}
+
+/** Spell an entry the way rulesync writes it, so `name(*)` equals `name`. */
+function normalizeToolPatternEntry(entry: string): string {
+  return buildToolPatternEntry(parseToolPatternEntry(entry));
 }
 
 /** Sort, dedupe and set a permissions array key, deleting it when empty. */
@@ -795,7 +1104,13 @@ function setOrDeleteEntries(
 /**
  * Convert rulesync permissions config to Reasonix allow/ask/deny arrays.
  */
-function convertRulesyncToReasonixPermissions(config: PermissionsConfig): {
+function convertRulesyncToReasonixPermissions({
+  config,
+  logger,
+}: {
+  config: PermissionsConfig;
+  logger?: Logger;
+}): {
   allow: string[];
   ask: string[];
   deny: string[];
@@ -804,20 +1119,30 @@ function convertRulesyncToReasonixPermissions(config: PermissionsConfig): {
   const ask: string[] = [];
   const deny: string[] = [];
 
-  for (const [category, rules] of Object.entries(config.permission)) {
-    const reasonixToolName = toReasonixToolName(category);
-    for (const [pattern, action] of Object.entries(rules)) {
-      const entry = buildReasonixPermissionEntry(reasonixToolName, pattern);
-      switch (action) {
-        case "allow":
-          allow.push(entry);
-          break;
-        case "ask":
-          ask.push(entry);
-          break;
-        case "deny":
-          deny.push(entry);
-          break;
+  // `*` restrictions reach `bash` and withhold the allows they cover in the
+  // other categories. A pattern-specific `*` deny/ask is still written as a
+  // `*(<pattern>)` entry, as before: no primary source says the tool reads a
+  // `*` tool name literally, so the entry may enforce it.
+  const permission = honorAllToolsRestrictions({
+    permission: config.permission,
+    toolLabel: "Reasonix",
+    logger,
+  });
+  for (const [category, rules] of Object.entries(permission)) {
+    for (const reasonixToolName of toReasonixToolNames(category)) {
+      for (const [pattern, action] of Object.entries(rules)) {
+        const entry = buildToolPatternEntry({ toolName: reasonixToolName, pattern });
+        switch (action) {
+          case "allow":
+            allow.push(entry);
+            break;
+          case "ask":
+            ask.push(entry);
+            break;
+          case "deny":
+            deny.push(entry);
+            break;
+        }
       }
     }
   }
@@ -837,15 +1162,20 @@ function convertReasonixToRulesyncPermissions(params: {
 
   const processEntries = (entries: string[], action: PermissionAction) => {
     for (const entry of entries) {
-      const { toolName, pattern } = parseReasonixPermissionEntry(entry);
+      const { toolName, pattern } = parseToolPatternEntry(entry);
       const canonical = toCanonicalToolName(toolName);
-      if (!permission[canonical]) {
-        permission[canonical] = {};
+      // A `__proto__` or `constructor` name would not land as a plain own key,
+      // so such entries are dropped, as the other permissions adapters do.
+      if (isPrototypePollutionKey(canonical) || isPrototypePollutionKey(pattern)) {
+        continue;
       }
-      permission[canonical][pattern] = action;
+      getOrCreateOwn({ record: permission, key: canonical, create: () => ({}) })[pattern] = action;
     }
   };
 
+  // Later lists overwrite earlier ones, so when two Reasonix names of one
+  // category (e.g. `task` and `spawn_agents`) disagree, the stricter action
+  // wins: deny over ask over allow.
   processEntries(params.allow, "allow");
   processEntries(params.ask, "ask");
   processEntries(params.deny, "deny");

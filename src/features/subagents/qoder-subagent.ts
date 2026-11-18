@@ -7,9 +7,14 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -24,7 +29,7 @@ import {
  *
  * @see https://docs.qoder.com/en/cli/04-extending-qoder-cli/subagent
  */
-export const QoderSubagentFrontmatterSchema = z.looseObject({
+const QoderSubagentFrontmatterSchema = z.looseObject({
   name: z.string(),
   description: z.optional(z.string()),
   model: z.optional(z.string()),
@@ -133,26 +138,26 @@ export class QoderSubagent extends ToolSubagent {
       "description",
     ]);
 
-    const result = QoderSubagentFrontmatterSchema.safeParse({
-      name: rulesyncFrontmatter.name,
-      description: rulesyncFrontmatter.description,
-      ...qoderSection,
+    const qoderFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: QoderSubagentFrontmatterSchema,
+      frontmatter: {
+        name: rulesyncFrontmatter.name,
+        description: rulesyncFrontmatter.description,
+        ...qoderSection,
+      },
+      toolTarget: "qoder",
+      rulesyncSubagent,
     });
-    if (!result.success) {
-      throw new Error(
-        `Invalid qoder subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
 
     const body = rulesyncSubagent.getBody();
 
     return new QoderSubagent({
       outputRoot,
-      frontmatter: result.data,
+      frontmatter: qoderFrontmatter,
       body,
       relativeDirPath: this.getSettablePaths({ global }).relativeDirPath,
       relativeFilePath: rulesyncSubagent.getRelativeFilePath(),
-      fileContent: stringifyFrontmatter(body, result.data),
+      fileContent: stringifyFrontmatter(body, qoderFrontmatter),
       validate,
     });
   }
@@ -161,16 +166,13 @@ export class QoderSubagent extends ToolSubagent {
     if (!this.frontmatter) {
       return { success: true, error: null };
     }
-    const result = QoderSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+
+    return validateFrontmatterSchema({
+      schema: QoderSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

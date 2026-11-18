@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { dump, load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
@@ -124,7 +124,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "review-pr.md",
-        fileContent: "",
         frontmatter: {
           targets: ["rovodev"],
           description: "Review a pull request",
@@ -147,7 +146,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "review-pr.md",
-        fileContent: "",
         frontmatter: {
           targets: ["rovodev"],
           description: "Review a pull request",
@@ -165,7 +163,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "no-desc.md",
-        fileContent: "",
         frontmatter: {
           targets: ["rovodev"],
         },
@@ -184,7 +181,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["*"], description: "Test" },
         body: "Body",
       });
@@ -197,7 +193,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["rovodev"], description: "Test" },
         body: "Body",
       });
@@ -210,7 +205,6 @@ describe("RovodevCommand", () => {
         outputRoot: testDir,
         relativeDirPath: ".rulesync/commands",
         relativeFilePath: "test.md",
-        fileContent: "",
         frontmatter: { targets: ["other-tool"] as any, description: "Test" },
         body: "Body",
       });

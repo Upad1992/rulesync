@@ -1,11 +1,61 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_HOOKS_RELATIVE_FILE_PATH } from "../../constants/rulesync-paths.js";
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
+import {
+  AMP_HOOK_EVENTS,
+  AMP_OVERRIDE_ONLY_HOOK_EVENTS,
+  ANTIGRAVITY_HOOK_EVENTS,
+  AUGMENTCODE_HOOK_EVENTS,
+  BOB_HOOK_EVENTS,
+  CLAUDE_HOOK_EVENTS,
+  CLINE_HOOK_EVENTS,
+  CODEBUDDY_HOOK_EVENTS,
+  CODEBUDDY_MATCHER_HOOK_EVENTS,
+  CODEWHALE_HOOK_EVENTS,
+  CODEWHALE_MATCHER_HOOK_EVENTS,
+  CODEXCLI_HOOK_EVENTS,
+  COMMANDCODE_HOOK_EVENTS,
+  CONTINUE_HOOK_EVENTS,
+  COPILOTCLI_HOOK_EVENTS,
+  COPILOT_HOOK_EVENTS,
+  COPILOT_MATCHER_HOOK_EVENTS,
+  CORTEXCODE_HOOK_EVENTS,
+  CRUSH_HOOK_EVENTS,
+  CURSOR_HOOK_EVENTS,
+  DEEPAGENTS_HOOK_EVENTS,
+  DEVIN_HOOK_EVENTS,
+  FACTORYDROID_HOOK_EVENTS,
+  FIREBENDER_HOOK_EVENTS,
+  GITLABDUO_HOOK_EVENTS,
+  GOOSE_HOOK_EVENTS,
+  GROKCLI_HOOK_EVENTS,
+  HERMESAGENT_HOOK_EVENTS,
+  JUNIE_HOOK_EVENTS,
+  KILO_HOOK_EVENTS,
+  KIMI_CODE_HOOK_EVENTS,
+  KIRO_HOOK_EVENTS,
+  KIRO_IDE_HOOK_EVENTS,
+  LETTACODE_HOOK_EVENTS,
+  OMP_HOOK_EVENTS,
+  OPENCODE_HOOK_EVENTS,
+  OPENCODE_MATCHER_HOOK_EVENTS,
+  OPENCODE_V2_HOOK_EVENTS,
+  OPENCODE_V2_MATCHER_HOOK_EVENTS,
+  PI_HOOK_EVENTS,
+  POOL_HOOK_EVENTS,
+  QODER_HOOK_EVENTS,
+  QWENCODE_HOOK_EVENTS,
+  REASONIX_HOOK_EVENTS,
+  TABNINE_HOOK_EVENTS,
+  TRAE_HOOK_EVENTS,
+  VIBE_HOOK_EVENTS,
+  ZCODE_HOOK_EVENTS,
+} from "../../types/hooks.js";
 import { ensureDir, writeFileContent } from "../../utils/file.js";
 import { ClaudecodeHooks } from "./claudecode-hooks.js";
 import { CodexcliConfigToml, CodexcliHooks } from "./codexcli-hooks.js";
@@ -522,7 +572,7 @@ describe("HooksProcessor", () => {
       expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("prompt-type"));
     });
 
-    it("should not log http-type warning for bob, which writes them as https handlers (issue #3074)", async () => {
+    it("should not log http-type warning for bob, which writes them as http handlers (issue #3074)", async () => {
       const config = {
         version: 1,
         hooks: {
@@ -541,7 +591,7 @@ describe("HooksProcessor", () => {
       const toolFiles = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
 
       expect(toolFiles).toHaveLength(1);
-      expect(toolFiles[0]?.getFileContent()).toContain('"type": "https"');
+      expect(toolFiles[0]?.getFileContent()).toContain('"type": "http"');
       expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("http-type"));
     });
 
@@ -616,9 +666,32 @@ describe("HooksProcessor", () => {
       // The event list must be part of the same message, and must name only the
       // events that actually carry a disabled hook.
       expect(logger.warn).toHaveBeenCalledWith(
-        'Emitting "enabled: false" hook(s) as active for claudecode (only the kiro-cli / kiro-ide / zcode hooks formats support the flag): preToolUse',
+        'Emitting "enabled: false" hook(s) as active for claudecode (only the kiro-cli / kiro-ide / cortexcode / zcode / zcode-plugin hooks formats support the flag): preToolUse',
       );
     });
+
+    it.each(["cortexcode", "kiro-ide", "kiro-cli", "zcode", "zcode-plugin"] as const)(
+      "should write a disabled hook for %s without warning that it stays active",
+      async (toolTarget) => {
+        const config = {
+          version: 1,
+          hooks: { preToolUse: [{ type: "command", command: "lint.sh", enabled: false }] },
+        };
+        const rulesyncHooks = new RulesyncHooks({
+          outputRoot: testDir,
+          relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+          relativeFilePath: "hooks.json",
+          fileContent: JSON.stringify(config),
+          validate: false,
+        });
+
+        const processor = new HooksProcessor({ logger, outputRoot: testDir, toolTarget });
+        const toolFiles = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+
+        expect(toolFiles.some((f) => /"enabled":\s*false/.test(f.getFileContent()))).toBe(true);
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('"enabled: false"'));
+      },
+    );
 
     it("should not warn about a disabled hook on an event the target cannot emit", async () => {
       const config = {
@@ -667,7 +740,7 @@ describe("HooksProcessor", () => {
       },
     );
 
-    it("should log warning when matcher hooks exist and target does not support them", async () => {
+    it("should warn only about matcher hooks on events copilot does not match on", async () => {
       const config = {
         version: 1,
         hooks: {
@@ -676,6 +749,7 @@ describe("HooksProcessor", () => {
             { type: "command", command: "all-tools.sh" },
           ],
           postToolUse: [{ type: "command", command: "format.sh", matcher: "Edit" }],
+          sessionStart: [{ type: "command", command: "start.sh", matcher: "startup" }],
         },
       };
       const rulesyncHooks = new RulesyncHooks({
@@ -690,10 +764,8 @@ describe("HooksProcessor", () => {
       await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
 
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining("Skipped matcher hook(s) for copilot (not supported)"),
+        "Skipped matcher hook(s) for copilot (not supported): sessionStart",
       );
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("preToolUse"));
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("postToolUse"));
     });
 
     it("should not log matcher warning for targets that support matchers", async () => {
@@ -715,6 +787,64 @@ describe("HooksProcessor", () => {
       await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
 
       expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("matcher"));
+    });
+
+    it("should keep Copilot CLI matchers on matcher-aware events without a skipped-matcher warning", async () => {
+      const rulesyncHooks = new RulesyncHooks({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: "hooks.json",
+        fileContent: JSON.stringify({
+          hooks: {
+            preToolUse: [{ command: "guard.sh", matcher: "bash" }],
+            preCompact: [{ command: "compact.sh", matcher: "auto" }],
+          },
+        }),
+        validate: false,
+      });
+
+      const processor = new HooksProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "copilotcli",
+      });
+      const [toolFile] = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("matcher"));
+      const content = JSON.parse(toolFile?.getFileContent() ?? "{}");
+      expect(content.hooks.preToolUse[0].matcher).toBe("bash");
+      expect(content.hooks.preCompact[0].matcher).toBe("auto");
+    });
+
+    it("should only report the Copilot CLI adapter's matcher drop on other events", async () => {
+      const rulesyncHooks = new RulesyncHooks({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: "hooks.json",
+        fileContent: JSON.stringify({
+          hooks: {
+            sessionStart: [{ command: "start.sh", matcher: "startup" }],
+          },
+        }),
+        validate: false,
+      });
+
+      const processor = new HooksProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "copilotcli",
+      });
+      const [toolFile] = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("Skipped matcher hook(s)"),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("dropping matcher \"startup\" on 'sessionStart'"),
+      );
+      const content = JSON.parse(toolFile?.getFileContent() ?? "{}");
+      expect(content.hooks.sessionStart[0].matcher).toBeUndefined();
+      expect(JSON.stringify(content.hooks.sessionStart[0])).toContain("start.sh");
     });
 
     it("should warn and skip OpenCode matchers on the shell events", async () => {
@@ -742,6 +872,52 @@ describe("HooksProcessor", () => {
       );
       expect(toolFile?.getFileContent()).not.toContain("filtered.sh");
       expect(toolFile?.getFileContent()).toContain("guard.sh");
+    });
+
+    it("should emit the V2 plugin for opencode and keep the V1 plugin for opencodev1", async () => {
+      const rulesyncHooks = new RulesyncHooks({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: "hooks.json",
+        fileContent: JSON.stringify({
+          hooks: {
+            stop: [{ command: "stop.sh" }],
+            afterFileEdit: [{ command: "edited.sh" }],
+            postToolUseFailure: [{ command: "failed.sh", matcher: "shell" }],
+          },
+        }),
+        validate: false,
+      });
+
+      const v2Processor = new HooksProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "opencode",
+      });
+      const [v2File] = await v2Processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+      const v2Content = v2File?.getFileContent() ?? "";
+      expect(v2Content).toContain("setup: async (ctx) => {");
+      expect(v2Content).toContain("stop.sh");
+      expect(v2Content).toContain("failed.sh");
+      // `file.edited` is a V1-only event OpenCode 2.x no longer publishes.
+      expect(v2Content).not.toContain("edited.sh");
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Skipped hook event(s) for opencode (not supported): afterFileEdit",
+        ),
+      );
+
+      const v1Processor = new HooksProcessor({
+        logger,
+        outputRoot: testDir,
+        toolTarget: "opencodev1",
+      });
+      const [v1File] = await v1Processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+      const v1Content = v1File?.getFileContent() ?? "";
+      expect(v1Content).toContain("export const RulesyncHooksPlugin");
+      expect(v1Content).toContain("stop.sh");
+      expect(v1Content).toContain("edited.sh");
+      expect(v1Content).not.toContain("failed.sh");
     });
 
     it("should warn and skip Amp matchers outside tool events", async () => {
@@ -836,6 +1012,7 @@ describe("HooksProcessor", () => {
         "antigravity-ide",
         "antigravity-plugin",
         "cursor",
+        "firebender",
         "claudecode",
         "claudecode-plugin",
         "codebuddy",
@@ -847,6 +1024,7 @@ describe("HooksProcessor", () => {
         "kilo",
         "mimocode",
         "opencode",
+        "opencodev1",
         "pi",
         "omp",
         "factorydroid",
@@ -866,6 +1044,7 @@ describe("HooksProcessor", () => {
         "cortexcode",
         "gitlabduo",
         "tabnine",
+        "trae",
         "vibe",
         "vibe-plugin",
         "pool",
@@ -886,6 +1065,7 @@ describe("HooksProcessor", () => {
         "antigravity-cli",
         "antigravity-ide",
         "cursor",
+        "firebender",
         "claudecode",
         "codebuddy",
         "codewhale",
@@ -896,6 +1076,7 @@ describe("HooksProcessor", () => {
         "kilo",
         "mimocode",
         "opencode",
+        "opencodev1",
         "pi",
         "omp",
         "factorydroid",
@@ -915,6 +1096,7 @@ describe("HooksProcessor", () => {
         "junie",
         "gitlabduo",
         "tabnine",
+        "trae",
         "vibe",
         "pool",
         "qoder",
@@ -947,6 +1129,7 @@ describe("HooksProcessor", () => {
         "antigravity-ide",
         "antigravity-plugin",
         "cursor",
+        "firebender",
         "claudecode",
         "claudecode-plugin",
         "codebuddy",
@@ -971,6 +1154,7 @@ describe("HooksProcessor", () => {
         "cortexcode",
         "gitlabduo",
         "tabnine",
+        "trae",
         "vibe",
         "vibe-plugin",
         "pool",
@@ -990,6 +1174,7 @@ describe("HooksProcessor", () => {
         "antigravity-cli",
         "antigravity-ide",
         "cursor",
+        "firebender",
         "claudecode",
         "codebuddy",
         "codewhale",
@@ -1013,6 +1198,7 @@ describe("HooksProcessor", () => {
         "junie",
         "gitlabduo",
         "tabnine",
+        "trae",
         "vibe",
         "pool",
         "qoder",
@@ -1129,5 +1315,648 @@ describe("HooksProcessor logger plumbing", () => {
     expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining(`For claudecode: Dropping "shell" from a "prompt" hook`),
     );
+  });
+});
+
+describe("HooksProcessor per-hook if condition", () => {
+  let testDir: string;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    ({ testDir, cleanup } = await setupTestDirectory({ home: true }));
+    vi.spyOn(process, "cwd").mockReturnValue(testDir);
+  });
+
+  afterEach(async () => {
+    await cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const conditionalDef = {
+    type: "command",
+    matcher: "Bash",
+    if: "Bash(git status *)",
+    command: "./conditional-approve.sh",
+  };
+  const plainDef = { type: "command", matcher: "Bash", command: "./plain-hook.sh" };
+
+  it.each([...toolHooksFactories.entries()])(
+    "never emits a hook without its if condition for %s",
+    async (target, factory) => {
+      const warnLogger = createMockLogger();
+      const rulesyncHooks = new RulesyncHooks({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: "hooks.json",
+        fileContent: JSON.stringify({
+          version: 1,
+          hooks: {
+            preToolUse: [conditionalDef, plainDef],
+            permissionRequest: [conditionalDef, plainDef],
+          },
+        }),
+        validate: true,
+      });
+      const processor = new HooksProcessor({
+        logger: warnLogger,
+        outputRoot: testDir,
+        toolTarget: target,
+        global: !factory.meta.supportsProject,
+      });
+      const files = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+      const content = files.map((file) => file.getFileContent()).join("\n");
+
+      if (factory.supportsPerHookIf) {
+        expect(content).toContain("conditional-approve.sh");
+        expect(content).toContain("git status");
+        return;
+      }
+      expect(content).not.toContain("conditional-approve.sh");
+      const emitsAnyEvent = ["preToolUse", "permissionRequest"].some((event) =>
+        (factory.supportedEvents as readonly string[]).includes(event),
+      );
+      if (emitsAnyEvent) {
+        expect(warnLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Skipped hook(s) with an "if" condition'),
+        );
+      }
+    },
+  );
+
+  it("keeps the hook in a tool-specific override block out of a target without if support", async () => {
+    const rulesyncHooks = new RulesyncHooks({
+      outputRoot: testDir,
+      relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+      relativeFilePath: "hooks.json",
+      fileContent: JSON.stringify({
+        version: 1,
+        hooks: {},
+        codexcli: { hooks: { preToolUse: [conditionalDef, plainDef] } },
+      }),
+      validate: true,
+    });
+    const processor = new HooksProcessor({ logger, outputRoot: testDir, toolTarget: "codexcli" });
+    const files = await processor.convertRulesyncFilesToToolFiles([rulesyncHooks]);
+    const content = files.map((file) => file.getFileContent()).join("\n");
+    expect(content).not.toContain("conditional-approve.sh");
+    expect(content).toContain("plain-hook.sh");
+  });
+});
+
+describe("toolHooksFactories capability table", () => {
+  // Pins every capability the processor reads (events, hook types, matcher
+  // support, override-block handling, scope/import support) so a refactor of
+  // where these values come from cannot change any of them.
+  const expected = new Map<string, Record<string, unknown>>([
+    [
+      "amp",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: AMP_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: ["preToolUse", "postToolUse"],
+        dropsUnknownOverrideEvents: true,
+        overrideOnlyEvents: AMP_OVERRIDE_ONLY_HOOK_EVENTS,
+      },
+    ],
+    [
+      "antigravity-cli",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "antigravity-ide",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "antigravity-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: ANTIGRAVITY_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "cursor",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CURSOR_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "firebender",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: FIREBENDER_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "claudecode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CLAUDE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt", "http", "mcp_tool", "agent"],
+        supportsMatcher: true,
+        supportsPerHookIf: true,
+      },
+    ],
+    [
+      "claudecode-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: CLAUDE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt", "http", "mcp_tool", "agent"],
+        supportsMatcher: true,
+        supportsPerHookIf: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "codebuddy",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CODEBUDDY_HOOK_EVENTS,
+        supportedHookTypes: ["command", "http", "prompt", "agent"],
+        supportsMatcher: true,
+        matcherEvents: CODEBUDDY_MATCHER_HOOK_EVENTS,
+      },
+    ],
+    [
+      "codewhale",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CODEWHALE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: CODEWHALE_MATCHER_HOOK_EVENTS,
+      },
+    ],
+    [
+      "codexcli",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CODEXCLI_HOOK_EVENTS,
+        supportedHookTypes: ["command", "mcp_tool"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "commandcode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: COMMANDCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: ["preToolUse", "postToolUse"],
+      },
+    ],
+    [
+      "copilot",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: COPILOT_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: COPILOT_MATCHER_HOOK_EVENTS,
+      },
+    ],
+    [
+      "copilotcli",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: COPILOTCLI_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt", "http"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "kilo",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: KILO_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: OPENCODE_MATCHER_HOOK_EVENTS,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "mimocode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: OPENCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: OPENCODE_MATCHER_HOOK_EVENTS,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "opencode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: OPENCODE_V2_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: OPENCODE_V2_MATCHER_HOOK_EVENTS,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "opencodev1",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: OPENCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: OPENCODE_MATCHER_HOOK_EVENTS,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "pi",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: PI_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "omp",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: OMP_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "factorydroid",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: FACTORYDROID_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "cline",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: false },
+        supportedEvents: CLINE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: false,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "goose",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: GOOSE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "hermesagent",
+      {
+        meta: { supportsProject: false, supportsGlobal: true, supportsImport: true },
+        supportedEvents: HERMESAGENT_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "kimi-code",
+      {
+        meta: { supportsProject: false, supportsGlobal: true, supportsImport: true },
+        supportedEvents: KIMI_CODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "deepagents",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: DEEPAGENTS_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "kiro",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: KIRO_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "kiro-cli",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: KIRO_IDE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsMatcher: true,
+        supportsPerHookEnabled: true,
+        supportsPerHookConfirm: true,
+      },
+    ],
+    [
+      "kiro-ide",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: KIRO_IDE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsMatcher: true,
+        supportsPerHookEnabled: true,
+        supportsPerHookConfirm: true,
+      },
+    ],
+    [
+      "lettacode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: LETTACODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: ["preToolUse", "postToolUse", "postToolUseFailure", "permissionRequest"],
+      },
+    ],
+    [
+      "devin",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: DEVIN_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "devin-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: DEVIN_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "augmentcode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: AUGMENTCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "augmentcode-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: AUGMENTCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "bob",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: BOB_HOOK_EVENTS,
+        supportedHookTypes: ["command", "http"],
+        supportsMatcher: true,
+        matcherEvents: ["preToolUse", "postToolUse"],
+      },
+    ],
+    [
+      "continue",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CONTINUE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "http", "prompt", "agent"],
+        supportsMatcher: true,
+        matcherEvents: [
+          "preToolUse",
+          "postToolUse",
+          "postToolUseFailure",
+          "permissionRequest",
+          "sessionStart",
+          "sessionEnd",
+          "notification",
+          "subagentStart",
+          "subagentStop",
+          "preCompact",
+          "configChange",
+        ],
+      },
+    ],
+    [
+      "cortexcode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CORTEXCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt"],
+        supportsPerHookEnabled: true,
+        supportsMatcher: true,
+        matcherEvents: [
+          "preToolUse",
+          "postToolUse",
+          "permissionRequest",
+          "sessionStart",
+          "sessionEnd",
+          "preCompact",
+          "subagentStop",
+          "notification",
+          "setup",
+        ],
+      },
+    ],
+    [
+      "junie",
+      {
+        meta: { supportsProject: false, supportsGlobal: true, supportsImport: true },
+        supportedEvents: JUNIE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "gitlabduo",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: GITLABDUO_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "tabnine",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: TABNINE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "trae",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: TRAE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        matcherEvents: ["preToolUse", "postToolUse", "notification"],
+      },
+    ],
+    [
+      "vibe",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: VIBE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "vibe-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: VIBE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "pool",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: POOL_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "qoder",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: QODER_HOOK_EVENTS,
+        supportedHookTypes: ["command", "http", "prompt", "agent"],
+        supportsMatcher: true,
+        supportsPerHookIf: true,
+        matcherEvents: [
+          "sessionStart",
+          "sessionEnd",
+          "preToolUse",
+          "postToolUse",
+          "postToolUseFailure",
+          "stopFailure",
+          "subagentStart",
+          "subagentStop",
+          "preCompact",
+          "postCompact",
+          "notification",
+          "configChange",
+          "instructionsLoaded",
+          "fileChanged",
+          "elicitation",
+          "elicitationResult",
+          "permissionRequest",
+          "permissionDenied",
+          "setup",
+        ],
+      },
+    ],
+    [
+      "qwencode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: QWENCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command", "prompt", "http", "function"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "reasonix",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: REASONIX_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        dropsUnknownOverrideEvents: true,
+      },
+    ],
+    [
+      "grokcli",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: GROKCLI_HOOK_EVENTS,
+        supportedHookTypes: ["command", "http"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "crush",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: CRUSH_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+      },
+    ],
+    [
+      "zcode",
+      {
+        meta: { supportsProject: true, supportsGlobal: true, supportsImport: true },
+        supportedEvents: ZCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        supportsPerHookEnabled: true,
+      },
+    ],
+    [
+      "zcode-plugin",
+      {
+        meta: { supportsProject: true, supportsGlobal: false, supportsImport: true },
+        supportedEvents: ZCODE_HOOK_EVENTS,
+        supportedHookTypes: ["command"],
+        supportsMatcher: true,
+        supportsPerHookEnabled: true,
+      },
+    ],
+  ]);
+
+  it("lists the targets in the same order", () => {
+    expect([...toolHooksFactories.keys()]).toEqual([...expected.keys()]);
+  });
+
+  it.each([...expected.entries()])("pins the capabilities of %s", (target, capabilities) => {
+    const { class: _class, ...actual } = toolHooksFactories.get(target as never)!;
+    expect(actual).toStrictEqual(capabilities);
   });
 });

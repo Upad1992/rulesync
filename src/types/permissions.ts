@@ -9,6 +9,10 @@ import { z } from "zod/mini";
 export const PermissionActionSchema = z.enum(["allow", "ask", "deny"]);
 export type PermissionAction = z.infer<typeof PermissionActionSchema>;
 
+export function isPermissionAction(value: unknown): value is PermissionAction {
+  return PermissionActionSchema.safeParse(value).success;
+}
+
 /**
  * Whether a key in a permission block — a category name or a pattern — is
  * blank, that is empty or only whitespace. Shared with the import-side filter
@@ -83,7 +87,6 @@ const ToolScopedPermissionSchema = z.record(PermissionCategorySchema, Permission
 const CanonicalPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
 });
-export type CanonicalPermissionsOverride = z.infer<typeof CanonicalPermissionsOverrideSchema>;
 
 /**
  * One Codewhale `[[rules]]` record of `~/.codewhale/permissions.toml`, written
@@ -113,16 +116,29 @@ const CodewhalePermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   rules: z.optional(z.array(CodewhalePermissionRuleSchema)),
 });
-export type CodewhalePermissionsOverride = z.infer<typeof CodewhalePermissionsOverrideSchema>;
 
 /**
- * The starting permission level VS Code Copilot Chat gives new chat sessions
- * (`chat.permissions.default`). Values are VS Code's own: `default` (Default
+ * The values VS Code's `chat.permissions.default` setting accepts: the starting
+ * permission level of new Local-harness chat sessions — `default` (Default
  * Permissions), `autoApprove` (Bypass Approvals) and `autopilot` (Autopilot).
  *
  * @see https://code.visualstudio.com/docs/agents/reference/ai-settings
  */
-export const COPILOT_DEFAULT_PERMISSION_MODES = ["default", "autoApprove", "autopilot"] as const;
+export const COPILOT_LOCAL_PERMISSION_LEVELS = ["default", "autoApprove", "autopilot"] as const;
+export type CopilotLocalPermissionLevel = (typeof COPILOT_LOCAL_PERMISSION_LEVELS)[number];
+
+/**
+ * The starting permission level the `copilot.defaultPermissionMode` override
+ * sets for new chat sessions: the {@link COPILOT_LOCAL_PERMISSION_LEVELS}, plus
+ * `assisted` (Assisted permissions, GA for Copilot-harness sessions since VS
+ * Code 1.144 and unavailable to Local sessions). Each value is written to both
+ * `chat.permissions.default` (Local sessions) and the `approvals` / `mode` of
+ * `chat.defaultConfiguration` (Copilot-harness sessions, VS Code 1.144+).
+ *
+ * @see https://code.visualstudio.com/updates/v1_144
+ * @see https://github.com/microsoft/vscode/blob/1.144.0/src/vs/workbench/contrib/chat/browser/chat.shared.contribution.ts
+ */
+const COPILOT_DEFAULT_PERMISSION_MODES = [...COPILOT_LOCAL_PERMISSION_LEVELS, "assisted"] as const;
 export type CopilotDefaultPermissionMode = (typeof COPILOT_DEFAULT_PERMISSION_MODES)[number];
 
 /** `chat.agent.sandbox.enabled`: `"off"` or `"on"`. */
@@ -175,7 +191,7 @@ export type CopilotSandbox = z.infer<typeof CopilotSandboxSchema>;
 /**
  * Tool-scoped override block for GitHub Copilot in VS Code.
  * `defaultPermissionMode` writes the workspace `chat.permissions.default`
- * setting, and `sandbox` writes the `chat.agent.sandbox.*` settings; neither
+ * and `chat.defaultConfiguration` settings, and `sandbox` writes the `chat.agent.sandbox.*` settings; neither
  * has a canonical category.
  */
 const CopilotPermissionsOverrideSchema = z.looseObject({
@@ -183,25 +199,54 @@ const CopilotPermissionsOverrideSchema = z.looseObject({
   defaultPermissionMode: z.optional(z.enum(COPILOT_DEFAULT_PERMISSION_MODES)),
   sandbox: z.optional(CopilotSandboxSchema),
 });
-export type CopilotPermissionsOverride = z.infer<typeof CopilotPermissionsOverrideSchema>;
+
+/**
+ * The permission mode the GitHub Copilot CLI starts new interactive sessions
+ * in (`defaultPermissionMode` of `~/.copilot/settings.json`): `manual` prompts
+ * for every request not already allowed, `assisted` lets a model review
+ * eligible requests (Assisted Permissions, non-experimental since v1.0.104),
+ * and `allow-all` is equivalent to `--allow-all`. These are the CLI's own
+ * values and differ from the VS Code `copilot` target's
+ * {@link COPILOT_DEFAULT_PERMISSION_MODES}.
+ *
+ * @see https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference
+ */
+export const COPILOTCLI_DEFAULT_PERMISSION_MODES = ["manual", "assisted", "allow-all"] as const;
+export type CopilotcliDefaultPermissionMode = (typeof COPILOTCLI_DEFAULT_PERMISSION_MODES)[number];
+
+/**
+ * Tool-scoped override block for the GitHub Copilot CLI.
+ * `defaultPermissionMode` writes the user-scope `defaultPermissionMode` key of
+ * `~/.copilot/settings.json`; it has no canonical category, and the repository
+ * settings file does not accept it.
+ */
+const CopilotcliPermissionsOverrideSchema = z.looseObject({
+  permission: z.optional(ToolScopedPermissionSchema),
+  defaultPermissionMode: z.optional(z.enum(COPILOTCLI_DEFAULT_PERMISSION_MODES)),
+});
 
 /**
  * oh-my-pi's `tools.approvalMode` values: the tool tiers it auto-approves
- * before prompting. `always-ask` auto-approves only read-only tools, `write`
- * also workspace writes, and `yolo` (oh-my-pi's default) every tier.
+ * before prompting. `always-ask` auto-approves only read-only tools,
+ * `always-ask-cached` (Ask and remember) also prompts before file reads and
+ * lets a prompt remember the granted file or folder, `write` also
+ * auto-approves workspace writes, and `yolo` (oh-my-pi's default) every tier.
  *
  * @see https://github.com/can1357/oh-my-pi/blob/main/docs/approval-mode.md
  */
-export const OMP_APPROVAL_MODES = ["always-ask", "write", "yolo"] as const;
+export const OMP_APPROVAL_MODES = ["always-ask", "always-ask-cached", "write", "yolo"] as const;
 export type OmpApprovalMode = (typeof OMP_APPROVAL_MODES)[number];
 
 /**
  * Tool-scoped override block for oh-my-pi (`omp`). `approvalMode` writes the
- * `tools.approvalMode` key of `config.yml`, which has no canonical category.
+ * `tools.approvalMode` key of `config.yml`, and `restrictedFolders` the
+ * `tools.restrictedFolders` list (folders where every action prompts in every
+ * approval mode, `yolo` included); neither has a canonical category.
  */
 const OmpPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   approvalMode: z.optional(z.enum(OMP_APPROVAL_MODES)),
+  restrictedFolders: z.optional(z.array(z.string())),
 });
 export type OmpPermissionsOverride = z.infer<typeof OmpPermissionsOverrideSchema>;
 
@@ -210,10 +255,13 @@ const KimiCodePermissionsOverrideSchema = z.looseObject({
   defaultPermissionMode: z.optional(z.enum(["manual", "yolo", "auto"])),
   /**
    * Kimi's `[permission] dangerous_command_guard` switch (Kimi Code 0.40.0,
-   * default `true`). `false` turns off the built-in dangerous-command policy
-   * (no confirmation for `rm -rf`, `shutdown` and the like).
+   * default `true`). Since Kimi Code 2.3.0, `false` turns off every built-in
+   * guard confirmation policy: dangerous commands (`rm -rf`, `shutdown` and the
+   * like), sensitive-file access (`.env`, `id_rsa`, ...) and git control-path
+   * access. Before 2.3.0 it only covered dangerous commands.
    *
    * @see https://moonshotai.github.io/kimi-code/en/configuration/config-files.html#permission
+   * @see https://github.com/MoonshotAI/kimi-code/pull/4250
    */
   dangerousCommandGuard: z.optional(z.boolean()),
   rules: z.optional(
@@ -243,7 +291,6 @@ const KimiCodePermissionsOverrideSchema = z.looseObject({
     }),
   ),
 });
-export type KimiCodePermissionsOverride = z.infer<typeof KimiCodePermissionsOverrideSchema>;
 
 /**
  * OpenCode-specific permission value. Unlike the shared canonical block, which
@@ -286,7 +333,6 @@ export type OpencodePermissionsOverride = z.infer<typeof OpencodePermissionsOver
 const HermesPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
 });
-export type HermesPermissionsOverride = z.infer<typeof HermesPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Cline. Cline's `command-permissions.json`
@@ -303,7 +349,6 @@ const ClinePermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   allowRedirects: z.optional(z.boolean()),
 });
-export type ClinePermissionsOverride = z.infer<typeof ClinePermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Kilo Code (an OpenCode fork). Kilo's permission
@@ -386,7 +431,6 @@ const ClaudecodePermissionsOverrideSchema = z.looseObject({
   permissions: z.optional(z.looseObject({})),
   sandbox: z.optional(z.looseObject({})),
 });
-export type ClaudecodePermissionsOverride = z.infer<typeof ClaudecodePermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Mistral Vibe. Vibe's per-tool `BaseToolConfig`
@@ -451,7 +495,6 @@ const CursorPermissionsOverrideSchema = z.looseObject({
   // `networkAccess` as plain strings without enumerating their accepted values.
   sandbox: z.optional(z.looseObject({})),
 });
-export type CursorPermissionsOverride = z.infer<typeof CursorPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Qwen Code. Qwen's `settings.json` exposes
@@ -589,7 +632,6 @@ const TabninePermissionsOverrideSchema = z.looseObject({
   tools: z.optional(z.looseObject({})),
   general: z.optional(z.looseObject({})),
 });
-export type TabninePermissionsOverride = z.infer<typeof TabninePermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Reasonix. Reasonix has security axes orthogonal
@@ -600,8 +642,12 @@ export type TabninePermissionsOverride = z.infer<typeof TabninePermissionsOverri
  * are merged into the matching `reasonix.toml` table and emitted only for
  * Reasonix, while the shared `permission` block continues to drive
  * `[permissions].allow`/`ask`/`deny`. Kept `looseObject` (verbatim passthrough).
- * Note: the whole `[sandbox]` table round-trips, but only the plan-mode keys are
- * re-extracted from `[agent]` on import — other `agent` keys authored here reach
+ * The user-only `[sandbox]` keys (`allow_devices`, `egress_unlisted`,
+ * `host_authorities`) are written only by `--global` generate: Reasonix replaces
+ * a project value with the user's (`narrowSandbox` in `project_scope.go`).
+ * Note: the whole `[sandbox]` table round-trips (minus the user-only keys of a
+ * project file), but only the plan-mode keys are re-extracted from `[agent]` on
+ * import — other `agent` keys authored here reach
  * `reasonix.toml` on generate but are not re-extracted back into the override.
  *
  * @example
@@ -610,6 +656,8 @@ export type TabninePermissionsOverride = z.infer<typeof TabninePermissionsOverri
  * { "allowDynamicBash": true, "rawAllow": ["Bash=pnpm test"] }
  * @example
  * { "mode": "deny" }
+ * @example
+ * { "tools": { "disabled": ["web_fetch"] }, "askOnExternalOrigin": true }
  */
 const ReasonixPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
@@ -645,6 +693,23 @@ const ReasonixPermissionsOverrideSchema = z.looseObject({
   // is written only by `--global` generate.
   // @see https://github.com/esengine/DeepSeek-Reasonix/blob/main-v2/docs/SPEC.md
   mode: z.optional(z.enum(["ask", "allow", "deny"])),
+  // `[permissions] ask_on_external_origin` (v2.47.0): makes Auto and YOLO ask
+  // before a call that repeats text a web page or tool result gave the task.
+  // Off by default and user config only (`narrowPermissions` in
+  // `project_scope.go`), so like `mode` it is written only by `--global`
+  // generate.
+  // @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.47.1/docs/GUIDE.md
+  askOnExternalOrigin: z.optional(z.boolean()),
+  // `[tools] disabled` (v2.45.0): built-in, framework and MCP tools removed
+  // from every request by name. A project file can only add to the user's
+  // list, so the key only ever narrows. Only `disabled` is written; the rest
+  // of the `[tools]` table is left as the file has it.
+  // @see https://github.com/esengine/DeepSeek-Reasonix/blob/studio-v2.47.1/internal/contract/config/config.go
+  tools: z.optional(
+    z.strictObject({
+      disabled: z.optional(z.array(z.string())),
+    }),
+  ),
 });
 export type ReasonixPermissionsOverride = z.infer<typeof ReasonixPermissionsOverrideSchema>;
 
@@ -656,16 +721,120 @@ export type ReasonixPermissionsOverride = z.infer<typeof ReasonixPermissionsOver
  * output-style` rule option) or a `plugin-name:style-name` reference. The
  * shared `permission` block continues to drive `permissions.allow`/`ask`/`deny`.
  *
+ * The other documented settings with no canonical category are authored here
+ * too and merged into the same file, key by key, over what the file already
+ * holds: `general.defaultPermissionMode`, `tools.core` / `tools.exclude`, the
+ * MCP approval and loading keys under `mcp` (`allowed`, `excluded`,
+ * `enableAllProjectMcpServers`, `enabledProjectMcpServers`, `lazyLoad`),
+ * `agents.overrides`, the top-level `agentsMdExcludes` and the top-level
+ * `autoMode` classifier guidance (`allow` / `soft_deny` / `environment`).
+ * Qoder reads `autoMode` from the user settings only, so it is written by
+ * `--global` generate alone. Only the keys listed here are written; any other
+ * key of these groups or of `autoMode` (`tools.shell.pager`,
+ * `general.preferredEditor`, ...) is skipped with a warning. Each authored key
+ * is laid over what the file holds; removing it from the override leaves the
+ * previously written value in place.
+ *
  * @see https://docs.qoder.com/cli/output-styles
  * @see https://docs.qoder.com/cli/settings-reference
+ * @see https://docs.qoder.com/en/cli/permissions
  * @example
  * { "outputStyle": "concise-review" }
+ * @example
+ * { "mcp": { "enabledProjectMcpServers": ["playwright"], "lazyLoad": true },
+ *   "tools": { "exclude": ["WebSearch"] },
+ *   "autoMode": { "environment": ["This is a pnpm monorepo"] } }
  */
 const QoderPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   outputStyle: z.optional(z.string().check(z.trim(), z.minLength(1))),
+  general: z.optional(
+    z.looseObject({
+      // `default`, `accept_edits`, `plan`, `auto`, `bypass_permissions`,
+      // `dont_ask` (cspell:disable-line) or one of their aliases (case-insensitive), so left a string.
+      defaultPermissionMode: z.optional(z.string().check(z.trim(), z.minLength(1))),
+    }),
+  ),
+  tools: z.optional(
+    z.looseObject({
+      core: z.optional(z.array(z.string())),
+      exclude: z.optional(z.array(z.string())),
+    }),
+  ),
+  mcp: z.optional(
+    z.looseObject({
+      allowed: z.optional(z.array(z.string())),
+      excluded: z.optional(z.array(z.string())),
+      enableAllProjectMcpServers: z.optional(z.boolean()),
+      enabledProjectMcpServers: z.optional(z.array(z.string())),
+      lazyLoad: z.optional(z.boolean()),
+    }),
+  ),
+  agents: z.optional(
+    z.looseObject({
+      overrides: z.optional(z.record(z.string(), z.looseObject({}))),
+    }),
+  ),
+  autoMode: z.optional(
+    z.looseObject({
+      allow: z.optional(z.array(z.string())),
+      soft_deny: z.optional(z.array(z.string())),
+      environment: z.optional(z.array(z.string())),
+    }),
+  ),
+  agentsMdExcludes: z.optional(z.array(z.string())),
 });
-export type QoderPermissionsOverride = z.infer<typeof QoderPermissionsOverrideSchema>;
+
+/**
+ * Tool-scoped override block for CodeBuddy Code. The shared `permission` block
+ * continues to drive `permissions.allow`/`ask`/`deny` of
+ * `.codebuddy/settings.json` (project) / `~/.codebuddy/settings.json` (global).
+ *
+ * The other documented settings with no canonical category are authored here
+ * and merged into the same file, key by key, over what the file already
+ * holds:
+ *
+ * - `autoReview` (`policy` replaces the built-in security policy of the `auto`
+ *   permission mode, `extraPolicy` is appended to it) and the legacy
+ *   `autoMode` rules (`environment` / `allow` / `soft_deny` / `hard_deny`).
+ *   CodeBuddy reads both from the user and project-local settings only, never
+ *   from the shared project file, so they are written by `--global` generate
+ *   alone.
+ * - `memory.parentDiscovery`: whether project instruction files
+ *   (`CODEBUDDY.md` / `AGENTS.md`) are also discovered in parent directories.
+ *
+ * Only the keys listed here are written; any other key of these groups is
+ * skipped with a warning. Removing a key from the override leaves the
+ * previously written value in place.
+ *
+ * @see https://www.codebuddy.ai/docs/cli/settings
+ * @see https://www.codebuddy.ai/docs/cli/memory
+ * @example
+ * { "autoReview": { "extraPolicy": "Allow dev namespace releases" },
+ *   "memory": { "parentDiscovery": false } }
+ */
+const CodebuddyPermissionsOverrideSchema = z.looseObject({
+  permission: z.optional(ToolScopedPermissionSchema),
+  autoReview: z.optional(
+    z.looseObject({
+      policy: z.optional(z.string()),
+      extraPolicy: z.optional(z.string()),
+    }),
+  ),
+  autoMode: z.optional(
+    z.looseObject({
+      environment: z.optional(z.array(z.string())),
+      allow: z.optional(z.array(z.string())),
+      soft_deny: z.optional(z.array(z.string())),
+      hard_deny: z.optional(z.array(z.string())),
+    }),
+  ),
+  memory: z.optional(
+    z.looseObject({
+      parentDiscovery: z.optional(z.boolean()),
+    }),
+  ),
+});
 
 /**
  * One native Factory Droid permission rule. `match.prefix` positions are either
@@ -727,7 +896,6 @@ const FactorydroidPermissionsOverrideSchema = z.looseObject({
   // https://docs.factory.com/autonomy-and-safety/permission-rules
   permissionRules: z.optional(FactorydroidPermissionRulesSchema),
 });
-export type FactorydroidPermissionsOverride = z.infer<typeof FactorydroidPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Warp. Warp's `[agents.profiles]` table exposes
@@ -808,7 +976,6 @@ const WarpPermissionsOverrideSchema = z.looseObject({
   execution_profile: z.optional(WarpExecutionProfileOverrideSchema),
   auto_approve_bypasses_command_denylist: WarpAutoApproveBypassSchema,
 });
-export type WarpPermissionsOverride = z.infer<typeof WarpPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for the standalone Warp Agent CLI. The CLI reads
@@ -965,7 +1132,6 @@ const JuniePermissionsOverrideSchema = z.looseObject({
     }),
   ),
 });
-export type JuniePermissionsOverride = z.infer<typeof JuniePermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Takt. Takt's `config.yaml` carries two
@@ -1008,11 +1174,11 @@ const TaktPermissionsOverrideSchema = z.looseObject({
   ),
   workflow_runtime_prepare: z.optional(z.object({ custom_scripts: z.optional(z.boolean()) })),
   workflow_command_gates: z.optional(z.object({ custom_scripts: z.optional(z.boolean()) })),
+  workflow_system_commands: z.optional(z.object({ custom_scripts: z.optional(z.boolean()) })),
   sync_conflict_resolver: z.optional(z.object({ auto_approve_tools: z.optional(z.boolean()) })),
   allow_git_hooks: z.optional(z.boolean()),
   allow_git_filters: z.optional(z.boolean()),
 });
-export type TaktPermissionsOverride = z.infer<typeof TaktPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Amp. Amp's `amp.permissions` array and sibling
@@ -1057,7 +1223,6 @@ const AmpPermissionsOverrideSchema = z.looseObject({
   guardedFiles: z.optional(z.looseObject({ allowlist: z.optional(z.array(z.string())) })),
   dangerouslyAllowAll: z.optional(z.boolean()),
 });
-export type AmpPermissionsOverride = z.infer<typeof AmpPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Pi Coding Agent. Pi has no allow/ask/deny rule
@@ -1081,7 +1246,6 @@ const PiPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   defaultTools: z.optional(z.array(z.string())),
 });
-export type PiPermissionsOverride = z.infer<typeof PiPermissionsOverrideSchema>;
 
 /**
  * The Antigravity CLI's four documented `toolPermission` autonomy presets.
@@ -1113,9 +1277,12 @@ export const ANTIGRAVITY_CLI_ARTIFACT_REVIEW_POLICIES = [
 /**
  * The baseline execution modes the CLI persists as `agentMode`. Shared with the
  * import filter for the same reason as {@link ANTIGRAVITY_CLI_TOOL_PERMISSIONS}.
+ * `auto` (Preview) requires the terminal sandbox (`enableTerminalSandbox`), is
+ * not offered to business or enterprise accounts, and falls back to `default`
+ * when unavailable.
  * @see https://antigravity.google/docs/cli/modes
  */
-export const ANTIGRAVITY_CLI_AGENT_MODES = ["default", "accept-edits", "plan"] as const;
+export const ANTIGRAVITY_CLI_AGENT_MODES = ["default", "accept-edits", "plan", "auto"] as const;
 
 /**
  * Tool-scoped override block for the Google Antigravity CLI. Antigravity's CLI
@@ -1128,8 +1295,8 @@ export const ANTIGRAVITY_CLI_AGENT_MODES = ["default", "accept-edits", "plan"] a
  * (default) / `agent-decides` / `always-proceed`) and `allowNonWorkspaceAccess`
  * (a boolean, off by default, letting the agent read or write files outside the
  * active workspace roots), and `agentMode` (the baseline execution mode a session
- * starts in — `default` / `accept-edits` / `plan`). Antigravity applies the allow/deny
- * lists as per-rule exceptions to the preset at runtime, so rulesync only
+ * starts in — `default` / `accept-edits` / `plan` / `auto`). Antigravity applies
+ * the allow/deny lists as per-rule exceptions to the preset at runtime, so rulesync only
  * authors these keys verbatim — no precedence modeling is needed on our side.
  * Fields placed here are merged onto the top level of
  * `~/.gemini/antigravity-cli/settings.json` (global-only) and emitted only for
@@ -1160,9 +1327,6 @@ const AntigravityCliPermissionsOverrideSchema = z.looseObject({
    */
   agentMode: z.optional(z.enum(ANTIGRAVITY_CLI_AGENT_MODES)),
 });
-export type AntigravityCliPermissionsOverride = z.infer<
-  typeof AntigravityCliPermissionsOverrideSchema
->;
 
 /**
  * Tool-scoped override block for AugmentCode. AugmentCode's `toolPermissions[]`
@@ -1183,7 +1347,8 @@ export type AntigravityCliPermissionsOverride = z.infer<
  * The same override also carries the two plugin-consumption keys Auggie reads
  * from `settings.json`: `recommendedMarketplaces` (`"owner/repo"` marketplaces
  * a workspace prompts its contributors to install; honored only in the
- * project's `.augment/settings.json`) and `enabledPlugins` (plugin ids of the
+ * project's `.augment/settings.json`, and only by Auggie 0.x — 1.x no longer
+ * reads it) and `enabledPlugins` (plugin ids of the
  * form `"plugin@marketplace"` mapped to on/off, deep-merged across the user,
  * project and local tiers).
  *
@@ -1266,7 +1431,6 @@ const KiroPermissionsOverrideSchema = z.looseObject({
     }),
   ),
 });
-export type KiroPermissionsOverride = z.infer<typeof KiroPermissionsOverrideSchema>;
 
 /**
  * Codex CLI's approval-workflow policy. Serialized as a kebab-case string in
@@ -1292,6 +1456,9 @@ const CodexApprovalPolicySchema = z.enum(["untrusted", "on-request", "on-failure
  * @see https://learn.chatgpt.com/docs/config-file/config-reference
  */
 const CodexSandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
+
+// Largest value of Codex's `u32` config fields.
+const CODEX_U32_MAX = 4_294_967_295;
 
 /**
  * Codex CLI's reviewer for approval requests. `guardian_subagent` is a legacy
@@ -1320,7 +1487,7 @@ export const CODEX_EXTENDABLE_BASELINE_PROFILES = [":read-only", ":workspace"] a
  * `[permissions.rulesync]` profile entirely (there is no sandbox for
  * filesystem/network rules to refine in that mode).
  */
-export const CODEX_BASE_PERMISSION_PROFILES = [
+const CODEX_BASE_PERMISSION_PROFILES = [
   ...CODEX_EXTENDABLE_BASELINE_PROFILES,
   ":danger-full-access",
 ] as const;
@@ -1363,6 +1530,9 @@ const CodexBasePermissionProfileSchema = z.enum(CODEX_BASE_PERMISSION_PROFILES);
  *   | `guardian_subagent`), or a table for the richer reviewer config.
  *   Defaults to `auto_review` when neither the override nor the existing
  *   config sets it.
+ * - `auto_review` — the `[auto_review]` table that configures the reviewer
+ *   `approvals_reviewer = "auto_review"` selects (`policy`, `extra_policy`,
+ *   `timeout_ms`, …). A loose table, shallow-merged like `apps` / `tui`.
  * - `git_write_rules` — whether the managed profile's `:workspace_roots` table
  *   emits the default `.git` carve-out (`".git/**" = "write"`). Codex's
  *   `:workspace` baseline makes `.git` read-only, which denies basic git
@@ -1372,14 +1542,23 @@ const CodexBasePermissionProfileSchema = z.enum(CODEX_BASE_PERMISSION_PROFILES);
  *   `true`; only an explicit `false` suppresses it. Like
  *   `base_permission_profile` it is consumed by the profile builder, not
  *   written as a top-level config key.
+ * - `bash_canonical_matching` — when `true`, the `forbidden` (deny) and
+ *   `prompt` (ask) rules generated from `permission.bash` into
+ *   `.codex/rules/rulesync.rules` carry `canonical_matching = True`, so Codex
+ *   compares their tokens after Unicode canonical case-insensitive folding (`rm` also
+ *   matches `RM`). `allow` rules stay exact so the opt-in never widens what is
+ *   auto-approved. Requires Codex 0.167.0 or later — an older Codex rejects the
+ *   keyword and fails to load the rules file — so it defaults to `false`. Not
+ *   written as a config key.
  *
  * The keys written to `config.toml` are an **allowlist**, not verbatim
  * passthrough: only `CODEXCLI_OVERRIDE_KEYS`
  * (`src/constants/codexcli-paths.ts` — `approval_policy`, `sandbox_mode`,
- * `sandbox_workspace_write`, `apps`, `approvals_reviewer`) are emitted, and
+ * `sandbox_workspace_write`, `apps`, `approvals_reviewer`, `auto_review`,
+ * `tui`, `tools`) are emitted, and
  * `computeCodexcliOverridePatch` skips anything else with a warning.
- * `base_permission_profile` and `git_write_rules` are consumed by the profile
- * builder rather than written, as described above, and `permission` is the
+ * `base_permission_profile`, `git_write_rules` and `bash_canonical_matching`
+ * are consumed by the generators rather than written, as described above, and `permission` is the
  * tool-scoped canonical block, which `RulesyncPermissions.forTarget` strips out
  * of the override before it ever reaches the patch. The allowlist is what keeps
  * the override from clobbering a feature-owned key: `mcp_servers.*` per-MCP
@@ -1408,6 +1587,28 @@ const CodexcliPermissionsOverrideSchema = z.looseObject({
   apps: z.optional(z.looseObject({})),
   approvals_reviewer: z.optional(z.union([CodexApprovalsReviewerSchema, z.looseObject({})])),
   /**
+   * The `[auto_review]` table of `config.toml`, which configures the reviewer
+   * that `approvals_reviewer = "auto_review"` (Rulesync's default) selects:
+   * `policy` / `extra_policy` (text inserted into the reviewer prompt),
+   * `timeout_ms` (the review budget, Codex 0.165.0+; `0` waits without a
+   * deadline), `circuit_break_action` (`default` | `strict`) and
+   * `conversation_history_max_output_tokens` (a positive token cap). Codex
+   * rejects the whole config file when one of these has the wrong type or is
+   * out of range (`timeout_ms` is a `u32`, the token cap a `NonZeroUsize`), so
+   * they are checked here; every other key passes through verbatim.
+   *
+   * @see https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/config/src/config_toml.rs (`AutoReviewToml`)
+   */
+  auto_review: z.optional(
+    z.looseObject({
+      policy: z.optional(z.string()),
+      extra_policy: z.optional(z.string()),
+      timeout_ms: z.optional(z.int().check(z.nonnegative(), z.lte(CODEX_U32_MAX))),
+      circuit_break_action: z.optional(z.enum(["default", "strict"])),
+      conversation_history_max_output_tokens: z.optional(z.int().check(z.positive())),
+    }),
+  ),
+  /**
    * The `[tui]` table of `config.toml` (e.g. `vim_mode_default`, `keymap.*`).
    * Not a permission surface, but like `apps` it is a top-level table with no
    * canonical category, and Codex adds keys to it faster than an explicit model
@@ -1416,9 +1617,18 @@ const CodexcliPermissionsOverrideSchema = z.looseObject({
    * @see https://developers.openai.com/codex/config-reference
    */
   tui: z.optional(z.looseObject({})),
+  /**
+   * The `[tools]` table of `config.toml` (e.g. `update_plan.enabled`, which
+   * Codex 0.152.0+ needs to register the `update_plan` tool). Values are
+   * written verbatim: Codex ignores unknown keys inside this table unless
+   * strict config validation is on, and its JSON schema flags them.
+   *
+   * @see https://github.com/openai/codex/blob/main/codex-rs/config/src/config_toml.rs (`ToolsToml`)
+   */
+  tools: z.optional(z.looseObject({})),
   git_write_rules: z.optional(z.boolean()),
+  bash_canonical_matching: z.optional(z.boolean()),
 });
-export type CodexcliPermissionsOverride = z.infer<typeof CodexcliPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Zed. These Zed `agent` keys sit outside the
@@ -1480,7 +1690,6 @@ const ZedPermissionsOverrideSchema = z.looseObject({
   // `AgentSettingsContent.default_profile` in Zed's `crates/settings_content/src/agent.rs`
   default_profile: z.optional(z.string()),
 });
-export type ZedPermissionsOverride = z.infer<typeof ZedPermissionsOverrideSchema>;
 
 /**
  * Tool-scoped override block for Devin Local. `sandbox` is the sibling
@@ -1499,16 +1708,57 @@ export type ZedPermissionsOverride = z.infer<typeof ZedPermissionsOverrideSchema
  *
  * @example
  * { "sandbox": { "allowed_domains": ["github.com"], "network_mode": "limited" } }
+ * The same override carries the repo-level plugin governance lists Devin reads
+ * from a checkout's `.devin/config.json`: `requiredPlugins` (plugin sources
+ * installed automatically), `optionalPlugins` (endorsed sources that carve an
+ * exception out of a forbidden entry; never installed) and `forbiddenPlugins`
+ * (plugin identities or `*` globs that may not load). A source is a string
+ * (`"owner/repo"` or a git URL) or an object such as
+ * `{ "source": "github", "repo": "owner/repo" }`. They are a repo governance
+ * level, so they are emitted at project scope only.
+ *
  * @example
  * { "sandbox": { "excluded": { "allow": ["Exec(git status *)"], "deny": ["Exec(git tag *)"] } } }
+ * @example
+ * { "forbiddenPlugins": ["*"], "optionalPlugins": ["acme/approved"] }
+ *
+ * `permission_mode` (CLI v3000.12.17+) is the mode new local sessions start in
+ * (`normal`, the upstream default, `accept-edits`, `smart` or `dangerous`).
+ * Like `sandbox` it is a **User Config Only** key, so it is emitted at global
+ * scope only. It is never derived from the canonical rules.
+ *
+ * @example
+ * { "permission_mode": "accept-edits" }
  * @see https://docs.devin.ai/cli/sandbox
  * @see https://docs.devin.ai/cli/reference/configuration/config-file
+ * @see https://docs.devin.ai/cli/extensibility/plugins/overview
  */
+const DevinPluginSourceListSchema = z.array(z.union([z.string(), z.looseObject({})]));
+/**
+ * Shapes of the Devin repo-level plugin governance lists, keyed by their
+ * `.devin/config.json` name. Shared by the override schema and the import,
+ * which drops a list that would not pass it.
+ */
+export const DEVIN_PLUGIN_GOVERNANCE_SCHEMAS = {
+  requiredPlugins: DevinPluginSourceListSchema,
+  optionalPlugins: DevinPluginSourceListSchema,
+  forbiddenPlugins: z.array(z.string()),
+} as const;
+/**
+ * Values Devin accepts for the user-config `permission_mode` key. Shared by the
+ * override schema and the import, which drops a value that would not pass it.
+ *
+ * @see https://docs.devin.ai/cli/reference/configuration/config-file
+ */
+export const DevinPermissionModeSchema = z.enum(["normal", "accept-edits", "smart", "dangerous"]);
 const DevinPermissionsOverrideSchema = z.looseObject({
   permission: z.optional(ToolScopedPermissionSchema),
   sandbox: z.optional(z.looseObject({})),
+  requiredPlugins: z.optional(DEVIN_PLUGIN_GOVERNANCE_SCHEMAS.requiredPlugins),
+  optionalPlugins: z.optional(DEVIN_PLUGIN_GOVERNANCE_SCHEMAS.optionalPlugins),
+  forbiddenPlugins: z.optional(DEVIN_PLUGIN_GOVERNANCE_SCHEMAS.forbiddenPlugins),
+  permission_mode: z.optional(DevinPermissionModeSchema),
 });
-export type DevinPermissionsOverride = z.infer<typeof DevinPermissionsOverrideSchema>;
 
 /**
  * Permissions configuration.
@@ -1540,6 +1790,7 @@ export type DevinPermissionsOverride = z.infer<typeof DevinPermissionsOverrideSc
 export const PermissionsConfigSchema = z.looseObject({
   permission: z.record(PermissionCategorySchema, PermissionRulesSchema),
   opencode: z.optional(OpencodePermissionsOverrideSchema),
+  opencodev1: z.optional(OpencodePermissionsOverrideSchema),
   hermes: z.optional(HermesPermissionsOverrideSchema),
   cline: z.optional(ClinePermissionsOverrideSchema),
   kilo: z.optional(KiloPermissionsOverrideSchema),
@@ -1568,15 +1819,15 @@ export const PermissionsConfigSchema = z.looseObject({
   zed: z.optional(ZedPermissionsOverrideSchema),
   devin: z.optional(DevinPermissionsOverrideSchema),
   qoder: z.optional(QoderPermissionsOverrideSchema),
+  copilotcli: z.optional(CopilotcliPermissionsOverrideSchema),
   // Tools without tool-specific override keys still accept the canonical
   // tool-scoped `permission` block (see ToolScopedPermissionSchema).
   "antigravity-ide": z.optional(CanonicalPermissionsOverrideSchema),
   continue: z.optional(CanonicalPermissionsOverrideSchema),
   copilot: z.optional(CopilotPermissionsOverrideSchema),
-  codebuddy: z.optional(CanonicalPermissionsOverrideSchema),
+  codebuddy: z.optional(CodebuddyPermissionsOverrideSchema),
   commandcode: z.optional(CanonicalPermissionsOverrideSchema),
   lettacode: z.optional(CanonicalPermissionsOverrideSchema),
-  copilotcli: z.optional(CanonicalPermissionsOverrideSchema),
   crush: z.optional(CanonicalPermissionsOverrideSchema),
   goose: z.optional(CanonicalPermissionsOverrideSchema),
   omp: z.optional(OmpPermissionsOverrideSchema),
@@ -1585,6 +1836,7 @@ export const PermissionsConfigSchema = z.looseObject({
   "kimi-code": z.optional(KimiCodePermissionsOverrideSchema),
   roo: z.optional(CanonicalPermissionsOverrideSchema),
   rovodev: z.optional(CanonicalPermissionsOverrideSchema),
+  trae: z.optional(CanonicalPermissionsOverrideSchema),
   zoocode: z.optional(CanonicalPermissionsOverrideSchema),
 });
 export type PermissionsConfig = z.infer<typeof PermissionsConfigSchema>;

@@ -2,24 +2,19 @@ import { join } from "node:path";
 
 import { uniq } from "es-toolkit";
 
-import {
-  AMP_DIR,
-  AMP_GLOBAL_DIR,
-  AMP_SETTINGS_FILE_NAME,
-  AMP_SETTINGS_JSONC_FILE_NAME,
-} from "../../constants/amp-paths.js";
+import { AMP_DIR, AMP_GLOBAL_DIR, AMP_SETTINGS_FILE_NAME } from "../../constants/amp-paths.js";
 import type { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import type { PermissionAction, PermissionsConfig } from "../../types/permissions.js";
 import { formatError } from "../../utils/error.js";
-import { readFileContentOrNull } from "../../utils/file.js";
+import { getOrCreateOwn, lookupOwn } from "../../utils/own-lookup.js";
 import { isPrototypePollutionKey } from "../../utils/prototype-pollution.js";
 import { isPlainObject } from "../../utils/type-guards.js";
-import { parseAmpSettings } from "../shared/amp-settings.js";
+import { parseAmpSettings, resolveAmpSettingsFile } from "../shared/amp-settings.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
+import { isStricterAction } from "./single-action-collapse.js";
 import {
   ToolPermissions,
-  type ToolPermissionsForDeletionParams,
   type ToolPermissionsFromFileParams,
   type ToolPermissionsFromRulesyncPermissionsParams,
   type ToolPermissionsSettablePaths,
@@ -190,41 +185,12 @@ export class AmpPermissions extends ToolPermissions {
     });
   }
 
-  /**
-   * The settings file may carry other Amp settings (e.g. `amp.mcpServers`), so
-   * we never delete it; only the managed `amp.tools.disable` /
-   * `amp.permissions` keys are rewritten.
-   */
-  override isDeletable(): boolean {
-    return false;
-  }
-
   static getSettablePaths({
     global = false,
   }: { global?: boolean } = {}): ToolPermissionsSettablePaths {
     return global
       ? { relativeDirPath: AMP_GLOBAL_DIR, relativeFilePath: AMP_SETTINGS_FILE_NAME }
       : { relativeDirPath: AMP_DIR, relativeFilePath: AMP_SETTINGS_FILE_NAME };
-  }
-
-  /**
-   * Probe `<jsonDir>/settings.jsonc` first, falling back to `settings.json`, so
-   * an existing user file is read-modified-written in place instead of a fresh
-   * sibling being created next to a hand-authored `.jsonc`. Defaults to
-   * `settings.json` when neither file exists.
-   */
-  private static async resolveSettingsFile(
-    jsonDir: string,
-  ): Promise<{ fileContent: string | null; relativeFilePath: string }> {
-    const jsoncContent = await readFileContentOrNull(join(jsonDir, AMP_SETTINGS_JSONC_FILE_NAME));
-    if (jsoncContent !== null) {
-      return { fileContent: jsoncContent, relativeFilePath: AMP_SETTINGS_JSONC_FILE_NAME };
-    }
-    const jsonContent = await readFileContentOrNull(join(jsonDir, AMP_SETTINGS_FILE_NAME));
-    if (jsonContent !== null) {
-      return { fileContent: jsonContent, relativeFilePath: AMP_SETTINGS_FILE_NAME };
-    }
-    return { fileContent: null, relativeFilePath: AMP_SETTINGS_FILE_NAME };
   }
 
   static async fromFile({
@@ -234,7 +200,7 @@ export class AmpPermissions extends ToolPermissions {
   }: ToolPermissionsFromFileParams): Promise<AmpPermissions> {
     const basePaths = AmpPermissions.getSettablePaths({ global });
     const jsonDir = join(outputRoot, basePaths.relativeDirPath);
-    const { fileContent, relativeFilePath } = await this.resolveSettingsFile(jsonDir);
+    const { fileContent, relativeFilePath } = await resolveAmpSettingsFile(jsonDir);
 
     const json = fileContent ? parseAmpSettings({ fileContent }) : {};
     const newJson = {
@@ -259,7 +225,7 @@ export class AmpPermissions extends ToolPermissions {
   }: ToolPermissionsFromRulesyncPermissionsParams): Promise<AmpPermissions> {
     const basePaths = AmpPermissions.getSettablePaths({ global });
     const jsonDir = join(outputRoot, basePaths.relativeDirPath);
-    const { fileContent, relativeFilePath } = await this.resolveSettingsFile(jsonDir);
+    const { fileContent, relativeFilePath } = await resolveAmpSettingsFile(jsonDir);
 
     const json = fileContent ? parseAmpSettings({ fileContent }) : {};
 
@@ -391,20 +357,6 @@ export class AmpPermissions extends ToolPermissions {
         error: error instanceof Error ? error : new Error(formatError(error)),
       };
     }
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolPermissionsForDeletionParams): AmpPermissions {
-    return new AmpPermissions({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ [AMP_TOOLS_DISABLE_KEY]: [] }, null, 2),
-      validate: false,
-    });
   }
 }
 
@@ -573,19 +525,14 @@ function convertAmpToRulesync({
   disable: string[];
   permissions: AmpPermissionEntry[];
 }): PermissionsConfig {
-  const actionPriority: Record<PermissionAction, number> = {
-    deny: 2,
-    ask: 1,
-    allow: 0,
-  };
   const permission: Record<string, Record<string, PermissionAction>> = {};
 
   const assign = (tool: string, pattern: string, action: PermissionAction): void => {
     if (isPrototypePollutionKey(tool)) return;
     if (isPrototypePollutionKey(pattern)) return;
-    const bucket = (permission[tool] ??= {});
-    const existing = bucket[pattern];
-    if (existing === undefined || actionPriority[action] > actionPriority[existing]) {
+    const bucket = getOrCreateOwn({ record: permission, key: tool, create: () => ({}) });
+    const existing = lookupOwn({ record: bucket, key: pattern });
+    if (isStricterAction({ action, existing })) {
       bucket[pattern] = action;
     }
   };

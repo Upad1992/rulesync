@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_OVERVIEW_FILE_NAME,
@@ -15,7 +15,6 @@ import {
   ToolRule,
   type ToolRuleFromFileParams,
   type ToolRuleFromRulesyncRuleParams,
-  buildToolPath,
 } from "./tool-rule.js";
 
 // Create a concrete implementation of ToolRule for testing
@@ -1011,6 +1010,34 @@ describe("ToolRule", () => {
   });
 
   describe("isTargetedByRulesyncRule", () => {
+    it("should check targets against the declared toolTarget, which subclasses inherit", () => {
+      class NoTargetRule extends ToolRule {
+        toRulesyncRule(): RulesyncRule {
+          return this.toRulesyncRuleDefault();
+        }
+        validate(): ValidationResult {
+          return { success: true, error: null };
+        }
+      }
+      class CursorTargetRule extends NoTargetRule {
+        protected static override readonly toolTarget = "cursor";
+      }
+      class InheritingRule extends CursorTargetRule {}
+      const rulesyncRule = new RulesyncRule({
+        outputRoot: testDir,
+        relativeDirPath: RULESYNC_RELATIVE_DIR_PATH,
+        relativeFilePath: "test.md",
+        frontmatter: { targets: ["cursor"] },
+        body: "Test content",
+      });
+
+      expect(CursorTargetRule.isTargetedByRulesyncRule(rulesyncRule)).toBe(true);
+      expect(InheritingRule.isTargetedByRulesyncRule(rulesyncRule)).toBe(true);
+      expect(() => NoTargetRule.isTargetedByRulesyncRule(rulesyncRule)).toThrow(
+        "Please implement this method in the subclass.",
+      );
+    });
+
     it("should return true for rules targeting claudecode", () => {
       const rulesyncRule = new RulesyncRule({
         outputRoot: testDir,
@@ -1092,24 +1119,5 @@ describe("ToolRule", () => {
 
       expect(TestToolRule.isTargetedByRulesyncRule(rulesyncRule)).toBe(true);
     });
-  });
-});
-
-describe("buildToolPath", () => {
-  it("should join toolDir and subDir when excludeToolDir is undefined", () => {
-    expect(buildToolPath(".claude", "rules")).toBe(join(".claude", "rules"));
-  });
-
-  it("should join toolDir and subDir when excludeToolDir is false", () => {
-    expect(buildToolPath(".claude", "rules", false)).toBe(join(".claude", "rules"));
-  });
-
-  it("should return only subDir when excludeToolDir is true", () => {
-    expect(buildToolPath(".claude", "rules", true)).toBe("rules");
-  });
-
-  it("should handle subDir of '.' correctly", () => {
-    expect(buildToolPath(".claude", ".", true)).toBe(".");
-    expect(buildToolPath(".claude", ".", false)).toBe(join(".claude", "."));
   });
 });

@@ -9,9 +9,13 @@ import {
 } from "../constants/rulesync-paths.js";
 import { formatError } from "../utils/error.js";
 import {
+  assertLandingOutsideVcsMetadata,
+  assertPathResolvesInsideRoot,
   ensureDir,
   fileExists,
   getHomeDirectory,
+  isSymlink,
+  PathOutsideRootError,
   readFileContent,
   writeFileContent,
 } from "../utils/file.js";
@@ -21,9 +25,14 @@ import { createFeatureScaffold } from "./feature-scaffold.js";
 type InitFileResult = {
   created: boolean;
   path: string;
+  /**
+   * Set when the file was not created because writing it would have gone
+   * through a symbolic link that leads outside the project or is dangling.
+   */
+  outsideProject?: true;
 };
 
-export type InitConfigFileResult = InitFileResult & {
+type InitConfigFileResult = InitFileResult & {
   /**
    * The user-level config file whose `targets` / `features` seeded the new
    * `rulesync.jsonc`, when one was found and the file was created.
@@ -118,16 +127,26 @@ async function loadUserConfigTemplate(): Promise<UserConfigTemplate | undefined>
   };
 }
 
+/**
+ * Whether anything occupies `path`, a symbolic link included. A plain `stat`
+ * reads a dangling link as absent, and writing to it would then create the
+ * link's target, wherever that is.
+ */
+async function pathEntryExists(path: string): Promise<boolean> {
+  return (await fileExists(path)) || (await isSymlink(path));
+}
+
 async function createConfigFile(): Promise<InitConfigFileResult> {
   const path = RULESYNC_CONFIG_RELATIVE_FILE_PATH;
 
-  if (await fileExists(path)) {
+  if (await pathEntryExists(path)) {
     return { created: false, path };
   }
 
   const userConfig = await loadUserConfigTemplate();
   const template = userConfig?.template ?? DEFAULT_CONFIG_TEMPLATE;
 
+  await assertInitWriteInsideProject(path);
   await writeFileContent(
     path,
     JSON.stringify(
@@ -154,8 +173,8 @@ async function createConfigFile(): Promise<InitConfigFileResult> {
     : { created: true, path, seededFrom: userConfig.path };
 }
 
-async function createSampleFiles(): Promise<InitFileResult[]> {
-  const samples = [
+function createSampleScaffolds() {
+  return [
     createFeatureScaffold({ feature: "rule", name: "overview" }),
     createFeatureScaffold({ feature: "mcp" }),
     createFeatureScaffold({ feature: "subagent", name: "planner" }),
@@ -163,10 +182,30 @@ async function createSampleFiles(): Promise<InitFileResult[]> {
     createFeatureScaffold({ feature: "hooks" }),
     createFeatureScaffold({ feature: "permissions" }),
   ];
+}
 
+/**
+ * Refuse a write `init` is about to make when it would go through a symbolic
+ * link (dangling or not) that leads outside the project — a cloned repository
+ * committing `.rulesync -> ~/elsewhere`, say. A link that stays inside the
+ * project is written through.
+ */
+async function assertInitWriteInsideProject(path: string): Promise<void> {
+  await assertPathResolvesInsideRoot({ rootPath: process.cwd(), targetPath: path });
+  // Nor into `.git/` (a committed `rulesync.jsonc -> .git/config`, say).
+  await assertLandingOutsideVcsMetadata({ rootPath: process.cwd(), targetPath: path });
+}
+
+/**
+ * Create each sample file that does not exist yet. A sample whose write would
+ * leave the project through a symbolic link is skipped and reported with
+ * `outsideProject`, rather than failing the run: a `.rulesync` linked to a
+ * shared tree elsewhere is a supported layout, the sample content is fixed
+ * text, and the project's own files (`rulesync.jsonc`) should still be created.
+ */
+async function createSampleFiles(): Promise<InitFileResult[]> {
   const results: InitFileResult[] = [];
-  for (const sample of samples) {
-    await ensureDir(dirname(sample.relativeFilePath));
+  for (const sample of createSampleScaffolds()) {
     results.push(
       await writeIfNotExists({
         path: sample.relativeFilePath,
@@ -188,11 +227,23 @@ async function writeIfNotExists({
   content: string;
 }): Promise<InitFileResult> {
   for (const candidatePath of candidatePaths) {
-    if (await fileExists(candidatePath)) {
+    if (await pathEntryExists(candidatePath)) {
       return { created: false, path: candidatePath };
     }
   }
 
+  try {
+    // Checked before the directory is created and again right before the
+    // write, as `add` does, so neither step goes through a link out.
+    await assertInitWriteInsideProject(path);
+    await ensureDir(dirname(path));
+    await assertInitWriteInsideProject(path);
+  } catch (error) {
+    if (error instanceof PathOutsideRootError) {
+      return { created: false, path, outsideProject: true };
+    }
+    throw error;
+  }
   await writeFileContent(path, content);
   return { created: true, path };
 }

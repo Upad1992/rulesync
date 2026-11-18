@@ -7,9 +7,14 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -122,14 +127,13 @@ export class FactorydroidSubagent extends ToolSubagent {
       ...factorydroidSection,
     };
 
-    const result = FactorydroidSubagentFrontmatterSchema.safeParse(rawFactorydroidFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid factorydroid subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
+    const factorydroidFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: FactorydroidSubagentFrontmatterSchema,
+      frontmatter: rawFactorydroidFrontmatter,
+      toolTarget: "factorydroid",
+      rulesyncSubagent,
+    });
 
-    const factorydroidFrontmatter = result.data;
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, factorydroidFrontmatter);
 
@@ -152,17 +156,12 @@ export class FactorydroidSubagent extends ToolSubagent {
       return { success: true, error: null };
     }
 
-    const result = FactorydroidSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    } else {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-        ),
-      };
-    }
+    return validateFrontmatterSchema({
+      schema: FactorydroidSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

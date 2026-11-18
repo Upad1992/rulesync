@@ -3,9 +3,8 @@ import { join } from "node:path";
 import { z } from "zod/mini";
 
 import { SKILL_FILE_NAME } from "../../constants/general.js";
-import { RULESYNC_SKILLS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { ValidationResult } from "../../types/ai-dir.js";
-import { formatError } from "../../utils/error.js";
+import { ToolTarget } from "../../types/tool-targets.js";
 import type { Logger } from "../../utils/logger.js";
 import { quoteValueForWarning } from "../../utils/quote-value.js";
 import {
@@ -15,10 +14,9 @@ import {
   SkillFile,
 } from "./rulesync-skill.js";
 import {
-  resolveCompatibility,
+  pickStandardSkillFields,
   resolveDisableModelInvocation,
-  resolveLicense,
-  resolveMetadata,
+  resolveStandardSkillFields,
   resolveUserInvocable,
 } from "./skills-utils.js";
 import {
@@ -56,16 +54,17 @@ export type VibeSkillParams = {
 };
 
 /**
- * Skill names Vibe's built-in skills occupy. `SkillManager` treats them as
- * reserved: a project or user skill whose frontmatter `name` matches one is
- * skipped at load time with only a debug log ("Skipping skill '<name>' ...
- * because builtin skill names are reserved"), so a generated skill by that
- * name is silently never offered. That is the legacy backend, still the
- * default; the unified harness constructs the manager with
- * `include_builtins=False` because its built-ins arrive as skills of the
- * shipped `vibe` plugin under namespaced names, so it reserves nothing.
- * @see https://github.com/mistralai/mistral-vibe/blob/v2.25.3/vibe/core/skills/builtins/__init__.py
- * @see https://github.com/mistralai/mistral-vibe/blob/v2.25.3/vibe/core/skills/manager.py
+ * Skill names Vibe's built-in skills occupy. Before v3.0.4, `SkillManager`
+ * treats them as reserved: a project or user skill whose frontmatter `name`
+ * matches one is skipped at load time with only a debug log ("Skipping skill
+ * '<name>' ... because builtin skill names are reserved"), so a generated
+ * skill by that name is silently never offered. v3.0.4 removed
+ * `_reserved_builtins` and that skip ("A user skill named vibe or
+ * skill-creator is no longer silently skipped"), so the warning below is
+ * scoped to older Vibe releases.
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.3/vibe/core/skills/manager.py
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.4/vibe/core/skills/manager.py
+ * @see https://github.com/mistralai/mistral-vibe/blob/v3.0.4/CHANGELOG.md
  */
 const VIBE_RESERVED_SKILL_NAMES: ReadonlySet<string> = new Set(["vibe", "skill-creator"]);
 
@@ -76,12 +75,6 @@ const VIBE_RESERVED_SKILL_NAMES: ReadonlySet<string> = new Set(["vibe", "skill-c
 function buildVibeFrontmatter(rulesyncFrontmatter: RulesyncSkillFrontmatter): VibeSkillFrontmatter {
   const vibeSection = rulesyncFrontmatter.vibe;
 
-  const license = resolveLicense({ rootFrontmatter: rulesyncFrontmatter, section: vibeSection });
-  const compatibility = resolveCompatibility({
-    rootFrontmatter: rulesyncFrontmatter,
-    section: vibeSection,
-  });
-  const metadata = resolveMetadata({ rootFrontmatter: rulesyncFrontmatter, section: vibeSection });
   const resolvedUserInvocable = resolveUserInvocable({
     rootFrontmatter: rulesyncFrontmatter,
     section: vibeSection,
@@ -94,9 +87,7 @@ function buildVibeFrontmatter(rulesyncFrontmatter: RulesyncSkillFrontmatter): Vi
   return {
     name: rulesyncFrontmatter.name,
     description: rulesyncFrontmatter.description,
-    ...(license !== undefined && { license }),
-    ...(compatibility !== undefined && { compatibility }),
-    ...(metadata !== undefined && { metadata }),
+    ...resolveStandardSkillFields({ rootFrontmatter: rulesyncFrontmatter, section: vibeSection }),
     ...(resolvedUserInvocable !== undefined && {
       "user-invocable": resolvedUserInvocable,
     }),
@@ -112,7 +103,8 @@ function buildVibeFrontmatter(rulesyncFrontmatter: RulesyncSkillFrontmatter): Vi
 /**
  * The skill is still generated under the reserved name — the name is the
  * user's to change, and a rename here would make it diverge from the other
- * targets — but Vibe would drop it without a visible word, so say so now.
+ * targets — but Vibe before v3.0.4 would drop it without a visible word, so
+ * say so now.
  */
 function warnAboutReservedSkillName({
   name,
@@ -125,9 +117,9 @@ function warnAboutReservedSkillName({
     return;
   }
   logger?.warn(
-    `Vibe skills: the skill name ${quoteValueForWarning(name)} is reserved for a Vibe built-in ` +
-      `skill, so Vibe skips a project or user skill by that name when it loads skills. ` +
-      `Rename the skill for it to be available in Vibe.`,
+    `Vibe skills: the skill name ${quoteValueForWarning(name)} matches a Vibe built-in skill. ` +
+      `Vibe before v3.0.4 skips a project or user skill by that name when it loads skills; ` +
+      `upgrade Vibe to v3.0.4 or later, or rename the skill, for it to be available.`,
   );
 }
 
@@ -189,37 +181,14 @@ export class VibeSkill extends ToolSkill {
     return VibeSkillFrontmatterSchema.parse(this.requireMainFileFrontmatter());
   }
 
-  getBody(): string {
-    return this.mainFile?.body ?? "";
-  }
-
   validate(): ValidationResult {
-    if (!this.mainFile) {
-      return {
-        success: false,
-        error: new Error(`${this.getDirPath()}: ${SKILL_FILE_NAME} file does not exist`),
-      };
-    }
-
-    const result = VibeSkillFrontmatterSchema.safeParse(this.mainFile.frontmatter);
-    if (!result.success) {
-      return {
-        success: false,
-        error: new Error(
-          `Invalid frontmatter in ${this.getDirPath()}: ${formatError(result.error)}`,
-        ),
-      };
-    }
-
-    return { success: true, error: null };
+    return this.validateMainFileFrontmatter(VibeSkillFrontmatterSchema);
   }
 
   toRulesyncSkill(): RulesyncSkill {
     const frontmatter = this.getFrontmatter();
     const vibeSection = {
-      ...(frontmatter.license !== undefined && { license: frontmatter.license }),
-      ...(frontmatter.compatibility !== undefined && { compatibility: frontmatter.compatibility }),
-      ...(frontmatter.metadata !== undefined && { metadata: frontmatter.metadata }),
+      ...pickStandardSkillFields(frontmatter),
       ...(frontmatter["user-invocable"] !== undefined && {
         "user-invocable": frontmatter["user-invocable"],
       }),
@@ -237,16 +206,7 @@ export class VibeSkill extends ToolSkill {
       ...(Object.keys(vibeSection).length > 0 && { vibe: vibeSection }),
     };
 
-    return new RulesyncSkill({
-      outputRoot: this.outputRoot,
-      relativeDirPath: RULESYNC_SKILLS_RELATIVE_DIR_PATH,
-      dirName: this.getDirName(),
-      frontmatter: rulesyncFrontmatter,
-      body: this.getBody(),
-      otherFiles: this.getOtherFiles(),
-      validate: true,
-      global: this.global,
-    });
+    return this.toRulesyncSkillWith(rulesyncFrontmatter);
   }
 
   static fromRulesyncSkill({
@@ -276,53 +236,15 @@ export class VibeSkill extends ToolSkill {
     });
   }
 
-  static isTargetedByRulesyncSkill(rulesyncSkill: RulesyncSkill): boolean {
-    const targets = rulesyncSkill.getFrontmatter().targets;
-    return targets.includes("*") || targets.includes("vibe");
-  }
+  protected static override readonly toolTarget: ToolTarget = "vibe";
 
   static async fromDir(params: ToolSkillFromDirParams): Promise<VibeSkill> {
-    const loaded = await this.loadSkillDirContent({
-      ...params,
-      getSettablePaths: (options) => this.getSettablePaths(options),
-    });
-
-    const result = VibeSkillFrontmatterSchema.safeParse(loaded.frontmatter);
-    if (!result.success) {
-      const skillDirPath = join(loaded.outputRoot, loaded.relativeDirPath, loaded.dirName);
-      throw new Error(
-        `Invalid frontmatter in ${join(skillDirPath, SKILL_FILE_NAME)}: ${formatError(result.error)}`,
-      );
-    }
-
-    return new VibeSkill({
-      outputRoot: loaded.outputRoot,
-      relativeDirPath: loaded.relativeDirPath,
-      dirName: loaded.dirName,
-      frontmatter: result.data,
-      body: loaded.body,
-      otherFiles: loaded.otherFiles,
-      validate: true,
-      global: loaded.global,
-    });
+    return new VibeSkill(
+      await this.loadStandardSkillParams({ params, schema: VibeSkillFrontmatterSchema }),
+    );
   }
 
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    dirName,
-    global = false,
-  }: ToolSkillForDeletionParams): VibeSkill {
-    const settablePaths = this.getSettablePaths({ global });
-    return new VibeSkill({
-      outputRoot,
-      relativeDirPath: relativeDirPath ?? settablePaths.relativeDirPath,
-      dirName,
-      frontmatter: { name: "", description: "" },
-      body: "",
-      otherFiles: [],
-      validate: false,
-      global,
-    });
+  static forDeletion(params: ToolSkillForDeletionParams): VibeSkill {
+    return new VibeSkill(this.forDeletionParams(params));
   }
 }

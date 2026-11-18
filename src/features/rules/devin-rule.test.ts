@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -125,13 +125,6 @@ This is a test rule.`);
       // surface uses.
       const nonRoot = (paths as { nonRoot?: { relativeDirPath: string } }).nonRoot;
       expect(nonRoot?.relativeDirPath).toBe(join(".devin", "rules"));
-    });
-
-    it("should exclude the tool dir for project scope when requested", () => {
-      const paths = DevinRule.getSettablePaths({ excludeToolDir: true });
-
-      const nonRoot = (paths as { nonRoot: { relativeDirPath: string } }).nonRoot;
-      expect(nonRoot.relativeDirPath).toBe("rules");
     });
   });
 

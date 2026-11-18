@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import * as smolToml from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -654,6 +654,28 @@ describe("CodewhalePermissions", () => {
       const second = await generate(imported);
 
       expect(second.getFileContent()).toBe(first.getFileContent());
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("skips a canonical category named like a prototype member as unsupported", async () => {
+      const logger = createMockLogger();
+      const perms = await generate({ permission: { toString: { "src/**": "allow" } } }, logger);
+
+      expect(parseRules(perms)).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('skipping unsupported category "toString"'),
+      );
+    });
+
+    it("does not map a native tool named like a prototype member to a path category", () => {
+      const perms = fromContent(
+        smolToml.stringify({
+          rules: [{ tool: "toString", path: "src/**", action: "allow" }],
+        }),
+      );
+
+      expect(perms.toRulesyncPermissions().getJson().permission).toEqual({});
     });
   });
 });

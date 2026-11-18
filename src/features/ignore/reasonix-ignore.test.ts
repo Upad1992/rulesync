@@ -1,12 +1,13 @@
 import { join } from "node:path";
 
 import { parse as parseToml } from "smol-toml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   RULESYNC_AIIGNORE_FILE_NAME,
   RULESYNC_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
+import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
 import { ensureDir, readFileContent, writeFileContent } from "../../utils/file.js";
 import { ReasonixIgnore } from "./reasonix-ignore.js";
@@ -83,6 +84,20 @@ describe("ReasonixIgnore", () => {
   });
 
   describe("fromRulesyncIgnore", () => {
+    it("warns when generate would shadow a nested .reasonix/reasonix.toml", async () => {
+      await writeFileContent(join(testDir, ".reasonix", "reasonix.toml"), "");
+      const logger = createMockLogger();
+
+      await ReasonixIgnore.fromRulesyncIgnore({
+        outputRoot: testDir,
+        rulesyncIgnore: rulesyncIgnoreOf("*.log\n"),
+        logger,
+      });
+
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(String(logger.warn.mock.calls[0]?.[0])).toContain(".reasonix/reasonix.toml exists");
+    });
+
     it("should write read_file(...) deny entries into the project config", async () => {
       const ignore = await ReasonixIgnore.fromRulesyncIgnore({
         outputRoot: testDir,
@@ -213,6 +228,35 @@ describe("ReasonixIgnore", () => {
 
       // Legacy `Read(...)` entries from an older rulesync still import.
       expect(ignore.toRulesyncIgnore().getFileContent()).toBe("*.log\n*.env");
+    });
+
+    it("should anchor ./ paths to the project root and skip home paths", () => {
+      const ignore = new ReasonixIgnore({
+        relativeDirPath: ".",
+        relativeFilePath: "reasonix.toml",
+        fileContent:
+          '[permissions]\ndeny = ["read_file(./.env)", "Read(./secrets/**)", "read_file(~/.aws/**)"]\n',
+      });
+
+      expect(ignore.toRulesyncIgnore().getFileContent()).toBe("/.env\n/secrets/**");
+    });
+
+    it("should place the imported file in the project even when read from the global config", async () => {
+      await ensureDir(join(testDir, ".reasonix"));
+      await writeFileContent(
+        join(testDir, ".reasonix", "config.toml"),
+        '[permissions]\ndeny = ["read_file(*.env)"]\n',
+      );
+
+      const ignore = await ReasonixIgnore.fromFile({ outputRoot: testDir, global: true });
+      const rulesyncIgnore = ignore.toRulesyncIgnore();
+
+      // rulesync sources always belong to the project, never to the home
+      // directory the global adapter reads from.
+      expect(rulesyncIgnore.getOutputRoot()).toBe(".");
+      expect(rulesyncIgnore.getRelativeDirPath()).toBe(RULESYNC_RELATIVE_DIR_PATH);
+      expect(rulesyncIgnore.getRelativeFilePath()).toBe(RULESYNC_AIIGNORE_FILE_NAME);
+      expect(rulesyncIgnore.getFileContent()).toBe("*.env");
     });
   });
 

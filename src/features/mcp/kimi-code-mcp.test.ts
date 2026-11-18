@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -49,6 +49,61 @@ describe("KimiCodeMcp global config defaults", () => {
       expect(files[0]!.getFileContent()).toContain("tool_timeout_ms = 90000");
     });
 
+    it("should emit default_deferred when defaultDeferred is authored", async () => {
+      const files = await KimiCodeMcp.getAuxiliaryFiles({
+        outputRoot: testDir,
+        global: true,
+        rulesyncMcp: rulesyncMcp({ mcpServers: {}, "kimi-code": { defaultDeferred: false } }),
+      });
+
+      expect(files).toHaveLength(1);
+      expect(files[0]!.getFileContent()).toContain("default_deferred = false");
+      expect(files[0]!.getFileContent()).not.toContain("timeout_ms");
+    });
+
+    it("should emit the reconnect delays when they are authored", async () => {
+      const files = await KimiCodeMcp.getAuxiliaryFiles({
+        outputRoot: testDir,
+        global: true,
+        rulesyncMcp: rulesyncMcp({
+          mcpServers: {},
+          "kimi-code": { reconnectInitialDelayMs: 2000, reconnectMaxDelayMs: 60000 },
+        }),
+      });
+
+      expect(files).toHaveLength(1);
+      expect(files[0]!.getFileContent()).toContain("reconnect_initial_delay_ms = 2000");
+      expect(files[0]!.getFileContent()).toContain("reconnect_max_delay_ms = 60000");
+      expect(files[0]!.getFileContent()).not.toContain("timeout_ms");
+    });
+
+    it.each([
+      { name: "a negative", value: -1 },
+      { name: "a fractional", value: 1.5 },
+      { name: "a NaN", value: Number.NaN },
+    ])("should drop $name reconnect delay with a warning", async ({ value }) => {
+      const logger = createMockLogger();
+      const block = { reconnectInitialDelayMs: value, reconnectMaxDelayMs: 60000 };
+      // Built directly so the guard is exercised even if schema validation is
+      // bypassed (NaN cannot even survive JSON.stringify).
+      const mcp = rulesyncMcp({ mcpServers: {} });
+      (mcp.getJson() as Record<string, unknown>)["kimi-code"] = block;
+
+      const files = await KimiCodeMcp.getAuxiliaryFiles({
+        outputRoot: testDir,
+        global: true,
+        rulesyncMcp: mcp,
+        logger,
+      });
+
+      expect(files).toHaveLength(1);
+      expect(files[0]!.getFileContent()).not.toContain("reconnect_initial_delay_ms");
+      expect(files[0]!.getFileContent()).toContain("reconnect_max_delay_ms = 60000");
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Kimi Code MCP: dropping kimi-code.reconnectInitialDelayMs because it is not a non-negative integer number of milliseconds.",
+      );
+    });
+
     it("should emit nothing at project scope, where config.toml has no counterpart", async () => {
       expect(
         await KimiCodeMcp.getAuxiliaryFiles({
@@ -70,6 +125,14 @@ describe("KimiCodeMcp global config defaults", () => {
         name: "non-numeric timeouts",
         json: { mcpServers: {}, "kimi-code": { startupTimeoutMs: "45000" } },
       },
+      {
+        name: "a non-boolean defaultDeferred",
+        json: { mcpServers: {}, "kimi-code": { defaultDeferred: "true" } },
+      },
+      {
+        name: "non-numeric reconnect delays",
+        json: { mcpServers: {}, "kimi-code": { reconnectMaxDelayMs: "60000" } },
+      },
     ])("should emit nothing for $name", async ({ json }) => {
       expect(
         await KimiCodeMcp.getAuxiliaryFiles({
@@ -86,7 +149,7 @@ describe("KimiCodeMcp global config defaults", () => {
       defaults,
       outputRoot,
     }: {
-      defaults: Record<string, number>;
+      defaults: Record<string, number | boolean>;
       outputRoot: string;
     }) =>
       (
@@ -110,13 +173,15 @@ describe("KimiCodeMcp global config defaults", () => {
       // partial override must not delete anything else in the section.
       await writeFileContent(
         join(testDir, ...CONFIG_PATH),
-        'my_unmanaged = "keep"\n\n[mcp]\nstartup_timeout_ms = 1000\ntool_timeout_ms = 2000\nsome_future_key = "x"\n',
+        'my_unmanaged = "keep"\n\n[mcp]\nstartup_timeout_ms = 1000\ntool_timeout_ms = 2000\ndefault_deferred = true\nreconnect_max_delay_ms = 60000\nsome_future_key = "x"\n',
       );
 
       const file = await emit({ defaults: { startupTimeoutMs: 45000 }, outputRoot: testDir });
 
       expect(file!.getFileContent()).toContain("startup_timeout_ms = 45000");
       expect(file!.getFileContent()).toContain("tool_timeout_ms = 2000");
+      expect(file!.getFileContent()).toContain("default_deferred = true");
+      expect(file!.getFileContent()).toContain("reconnect_max_delay_ms = 60000");
       expect(file!.getFileContent()).toContain('some_future_key = "x"');
       expect(file!.getFileContent()).toContain('my_unmanaged = "keep"');
     });
@@ -207,7 +272,7 @@ describe("KimiCodeMcp global config defaults", () => {
               type: "stdio",
               command: "npx",
               args: ["-y", "server"],
-              executor: "kaos",
+              executor: "local",
               runtime_id: "runtime-1",
             },
           },
@@ -218,7 +283,7 @@ describe("KimiCodeMcp global config defaults", () => {
         transport: "stdio",
         command: "npx",
         args: ["-y", "server"],
-        executor: "kaos",
+        executor: "local",
         runtime_id: "runtime-1",
       });
 
@@ -229,7 +294,7 @@ describe("KimiCodeMcp global config defaults", () => {
             sandboxed: {
               transport: "stdio",
               command: "npx",
-              executor: "kaos",
+              executor: "local",
               runtime_id: "runtime-1",
             },
           },
@@ -241,9 +306,153 @@ describe("KimiCodeMcp global config defaults", () => {
       expect(JSON.parse(imported.getFileContent()).mcpServers.sandboxed).toEqual({
         type: "stdio",
         command: "npx",
-        executor: "kaos",
+        executor: "local",
         runtime_id: "runtime-1",
       });
+    });
+
+    it("should drop an executor other than local with a warning on generate", async () => {
+      const logger = createMockLogger();
+      const generated = await KimiCodeMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        logger,
+        rulesyncMcp: rulesyncMcp({
+          mcpServers: {
+            sandboxed: {
+              type: "stdio",
+              command: "npx",
+              executor: "kaos",
+              runtime_id: "runtime-1",
+            },
+          },
+        }),
+      });
+
+      expect(JSON.parse(generated.getFileContent()).mcpServers.sandboxed).toEqual({
+        transport: "stdio",
+        command: "npx",
+        runtime_id: "runtime-1",
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Kimi Code MCP: dropping executor "kaos" from "sandboxed" because Kimi Code 2.2.0 through 2.4.x accept only "local".',
+      );
+    });
+
+    it("should drop an executor other than local with a warning on import", async () => {
+      const logger = createMockLogger();
+      await writeFileContent(
+        join(testDir, ".kimi-code", "mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            sandboxed: { transport: "stdio", command: "npx", executor: "kaos" },
+          },
+        }),
+      );
+
+      const imported = (
+        await KimiCodeMcp.fromFile({ outputRoot: testDir, logger })
+      ).toRulesyncMcp();
+
+      expect(JSON.parse(imported.getFileContent()).mcpServers.sandboxed).toEqual({
+        type: "stdio",
+        command: "npx",
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Kimi Code MCP: dropping executor "kaos" from "sandboxed" because Kimi Code 2.2.0 through 2.4.x accept only "local".',
+      );
+    });
+
+    it("should pass environment_id through on generate and import", async () => {
+      const generated = await KimiCodeMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        rulesyncMcp: rulesyncMcp({
+          mcpServers: {
+            "remote-fs": { type: "stdio", command: "npx", environment_id: "dev-box" },
+          },
+        }),
+      });
+
+      expect(JSON.parse(generated.getFileContent()).mcpServers["remote-fs"]).toEqual({
+        transport: "stdio",
+        command: "npx",
+        environment_id: "dev-box",
+      });
+
+      await writeFileContent(
+        join(testDir, ".kimi-code", "mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            "remote-fs": { command: "npx", environment_id: "dev-box" },
+          },
+        }),
+      );
+
+      const imported = (await KimiCodeMcp.fromFile({ outputRoot: testDir })).toRulesyncMcp();
+
+      expect(JSON.parse(imported.getFileContent()).mcpServers["remote-fs"]).toEqual({
+        command: "npx",
+        environment_id: "dev-box",
+      });
+    });
+
+    it("should drop an empty environment_id with a warning on generate", async () => {
+      const logger = createMockLogger();
+      const generated = await KimiCodeMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        logger,
+        rulesyncMcp: rulesyncMcp({
+          mcpServers: {
+            "remote-fs": { type: "stdio", command: "npx", environment_id: "" },
+          },
+        }),
+      });
+
+      expect(JSON.parse(generated.getFileContent()).mcpServers["remote-fs"]).toEqual({
+        transport: "stdio",
+        command: "npx",
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Kimi Code MCP: dropping environment_id "" from "remote-fs" because Kimi Code requires a non-empty string.',
+      );
+    });
+
+    it("should drop environment_id from a non-stdio server with a warning on generate and import", async () => {
+      const logger = createMockLogger();
+      const generated = await KimiCodeMcp.fromRulesyncMcp({
+        outputRoot: testDir,
+        logger,
+        rulesyncMcp: rulesyncMcp({
+          mcpServers: {
+            linear: { url: "https://mcp.linear.app/mcp", environment_id: "dev-box" },
+          },
+        }),
+      });
+
+      expect(JSON.parse(generated.getFileContent()).mcpServers.linear).toEqual({
+        transport: "http",
+        url: "https://mcp.linear.app/mcp",
+      });
+
+      await writeFileContent(
+        join(testDir, ".kimi-code", "mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            linear: { url: "https://mcp.linear.app/mcp", environment_id: "dev-box" },
+          },
+        }),
+      );
+
+      const imported = (
+        await KimiCodeMcp.fromFile({ outputRoot: testDir, logger })
+      ).toRulesyncMcp();
+
+      expect(JSON.parse(imported.getFileContent()).mcpServers.linear).toEqual({
+        url: "https://mcp.linear.app/mcp",
+      });
+      expect(logger.warn).toHaveBeenCalledTimes(2);
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Kimi Code MCP: dropping environment_id from "linear" because Kimi Code only accepts it on stdio servers.',
+      );
     });
   });
 
@@ -251,7 +460,7 @@ describe("KimiCodeMcp global config defaults", () => {
     it("should read the defaults back for the round trip", async () => {
       await writeFileContent(
         join(testDir, ...CONFIG_PATH),
-        "[mcp]\nstartup_timeout_ms = 45000\ntool_timeout_ms = 90000\n",
+        "[mcp]\nstartup_timeout_ms = 45000\ntool_timeout_ms = 90000\ndefault_deferred = true\nreconnect_initial_delay_ms = 2000\nreconnect_max_delay_ms = 60000\n",
       );
       await writeFileContent(join(testDir, ".kimi-code", "mcp.json"), '{"mcpServers":{}}');
 
@@ -262,6 +471,9 @@ describe("KimiCodeMcp global config defaults", () => {
       expect(JSON.parse(imported.getFileContent())["kimi-code"]).toEqual({
         startupTimeoutMs: 45000,
         toolTimeoutMs: 90000,
+        defaultDeferred: true,
+        reconnectInitialDelayMs: 2000,
+        reconnectMaxDelayMs: 60000,
       });
     });
 
@@ -269,6 +481,11 @@ describe("KimiCodeMcp global config defaults", () => {
       { name: "an absent config file", content: undefined },
       { name: "unparseable TOML", content: "this is not = = toml" },
       { name: "a non-table mcp key", content: 'mcp = "nope"\n' },
+      { name: "a non-boolean default_deferred", content: '[mcp]\ndefault_deferred = "yes"\n' },
+      {
+        name: "a non-numeric reconnect delay",
+        content: '[mcp]\nreconnect_initial_delay_ms = "5000"\n',
+      },
     ])("should import without defaults for $name", async ({ content }) => {
       if (content !== undefined) {
         await writeFileContent(join(testDir, ...CONFIG_PATH), content);
@@ -280,6 +497,26 @@ describe("KimiCodeMcp global config defaults", () => {
       ).toRulesyncMcp();
 
       expect(JSON.parse(imported.getFileContent())["kimi-code"]).toBeUndefined();
+    });
+
+    it("should drop an invalid reconnect delay with a warning on import", async () => {
+      const logger = createMockLogger();
+      await writeFileContent(
+        join(testDir, ...CONFIG_PATH),
+        "[mcp]\nreconnect_initial_delay_ms = -1\nreconnect_max_delay_ms = 60000\n",
+      );
+      await writeFileContent(join(testDir, ".kimi-code", "mcp.json"), '{"mcpServers":{}}');
+
+      const imported = (
+        await KimiCodeMcp.fromFile({ outputRoot: testDir, global: true, logger })
+      ).toRulesyncMcp();
+
+      expect(JSON.parse(imported.getFileContent())["kimi-code"]).toEqual({
+        reconnectMaxDelayMs: 60000,
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        "Kimi Code MCP: dropping [mcp] reconnect_initial_delay_ms because it is not a non-negative integer number of milliseconds.",
+      );
     });
 
     it("should not read the config file at project scope", async () => {

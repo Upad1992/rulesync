@@ -1,5 +1,5 @@
 import * as smolToml from "smol-toml";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { KimiCodePermissions } from "./kimi-code-permissions.js";
 import { RulesyncPermissions } from "./rulesync-permissions.js";
@@ -301,5 +301,17 @@ describe("KimiCodePermissions [tools] section", () => {
       enabled: ["Bash"],
       disabled: ["mcp__github__*"],
     });
+  });
+});
+
+describe("KimiCodePermissions tool names that match Object.prototype members", () => {
+  it("skips a category named like a prototype member as unsupported", () => {
+    const parsed = generate({
+      json: { permission: { bash: { ls: "allow" }, toString: { "*": "allow" } } },
+    });
+
+    expect((parsed.permission as { rules: unknown[] }).rules).toEqual([
+      { decision: "allow", pattern: "Bash(ls)", scope: "user" },
+    ]);
   });
 });

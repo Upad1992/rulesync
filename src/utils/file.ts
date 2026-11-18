@@ -24,6 +24,7 @@ import { mapWithConcurrency } from "./concurrency.js";
 import { quoteForLog, stripControlCharacters } from "./control-characters.js";
 import { formatError } from "./error.js";
 import { isEnvTest } from "./vitest.js";
+import { getKnownNonLinkPaths } from "./write-landing-cache.js";
 
 /**
  * Whether a relative path leads out of the root it is relative to. Matching
@@ -74,14 +75,199 @@ export async function assertWritablePathInsideRoot(params: {
   }
 }
 
-export async function assertTreeContainsNoSymlinks(dirPath: string): Promise<void> {
+/**
+ * Thrown by {@link assertPathResolvesInsideRoot} when a symbolic link leads
+ * the target outside the root, or the target is reached through a dangling
+ * link. Any other error it throws comes from the filesystem itself.
+ */
+export class PathOutsideRootError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PathOutsideRootError";
+  }
+}
+
+/**
+ * Thrown by {@link assertNoSymlinkBelowRoot} when the target is reached
+ * through a symbolic link below the root, even one that stays inside it. A
+ * subclass of {@link PathOutsideRootError}, so callers that tell refusals from
+ * filesystem errors keep working.
+ */
+export class SymlinkRefusedError extends PathOutsideRootError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SymlinkRefusedError";
+  }
+}
+
+/**
+ * Refuse a write or removal target whose real location is outside `rootPath`.
+ *
+ * Unlike {@link assertWritablePathInsideRoot}, a symbolic link on the way is
+ * allowed as long as it resolves inside the root: projects deliberately link a
+ * skill directory to a shared one next to it. What this stops is a link that
+ * leads elsewhere — a cloned repository committing `.rulesync/skills/x ->
+ * ~/.ssh`, say — which a textual check such as {@link checkPathTraversal}
+ * cannot see. The deepest existing ancestor of `targetPath` is resolved, and
+ * an existing target that is itself a link is resolved too.
+ */
+export async function assertPathResolvesInsideRoot(params: {
+  rootPath: string;
+  targetPath: string;
+}): Promise<void> {
+  const { rootPath, targetPath } = params;
+  let realRoot: string;
+  try {
+    realRoot = await realpath(rootPath);
+  } catch (error) {
+    // A root that does not exist yet has nothing inside it, so no link either;
+    // the write will create the whole tree. A dangling link in its place would
+    // send that tree elsewhere, though.
+    if (isFileNotFoundError(error)) {
+      if (await isSymlink(rootPath)) {
+        throw new PathOutsideRootError(
+          `Refusing to write through a dangling symbolic link: ${rootPath}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+      return;
+    }
+    throw error;
+  }
+  let existingPath = resolve(targetPath);
+  while (true) {
+    let realExisting: string;
+    try {
+      realExisting = await realpath(existingPath);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+      // A dangling link has no real path; resolve where it points instead of
+      // skipping past it to its parent.
+      if (await isSymlink(existingPath)) {
+        throw new PathOutsideRootError(
+          `Refusing to write through a dangling symbolic link: ${targetPath}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+      const parentPath = dirname(existingPath);
+      if (parentPath === existingPath) {
+        throw error;
+      }
+      existingPath = parentPath;
+      continue;
+    }
+    if (pathEscapesRoot(relative(realRoot, realExisting))) {
+      throw new PathOutsideRootError(
+        `Path resolves outside ${rootPath} through a symbolic link: ${targetPath}.`,
+      );
+    }
+    return;
+  }
+}
+
+/**
+ * Refuse a write target that lies outside `rootPath`, or that is reached
+ * through a symbolic link anywhere below `rootPath` — the target itself
+ * included. `rootPath` itself may be a link (a project checked out under a
+ * linked directory is fine).
+ *
+ * This is stricter than {@link assertPathResolvesInsideRoot}, which accepts a
+ * link whose real path stays inside the root. That is not enough for files
+ * whose bytes come from a remote source: a cloned repository can commit
+ * `.agents/skills/x/config -> ../../../.git/config`, a link that stays inside
+ * the root while still sending the remote bytes into `.git/`. Every existing
+ * path component between the root and the target is `lstat`ed; once one is
+ * missing, nothing below it exists and the write's `mkdir -p` creates it.
+ */
+export async function assertNoSymlinkBelowRoot(params: {
+  rootPath: string;
+  targetPath: string;
+}): Promise<void> {
+  const { rootPath, targetPath } = params;
+  const relativeTarget = relative(resolve(rootPath), resolve(targetPath));
+  if (relativeTarget === "" || pathEscapesRoot(relativeTarget)) {
+    throw new PathOutsideRootError(`Path is outside ${rootPath}: ${targetPath}.`);
+  }
+  let currentPath = resolve(rootPath);
+  for (const segment of relativeTarget.split(sep)) {
+    currentPath = join(currentPath, segment);
+    let stats: Stats;
+    try {
+      stats = await lstat(currentPath);
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return;
+      }
+      throw error;
+    }
+    if (stats.isSymbolicLink()) {
+      throw new SymlinkRefusedError(
+        `Refusing to follow a symbolic link: ${currentPath} (for ${targetPath}).`,
+      );
+    }
+  }
+}
+
+/**
+ * Remove a stale file below `rootPath` without following any symbolic link.
+ * Every parent component between the root and the target must be a real
+ * directory (as {@link assertNoSymlinkBelowRoot} checks); a target that is
+ * itself a link is unlinked rather than followed, so the link goes and
+ * whatever it points at stays. A missing target is a no-op, and a directory
+ * is refused, since only files are ever recorded as deployed.
+ */
+export async function removeFileWithoutFollowingSymlinks(params: {
+  rootPath: string;
+  targetPath: string;
+}): Promise<void> {
+  const { rootPath, targetPath } = params;
+  const relativeTarget = relative(resolve(rootPath), resolve(targetPath));
+  if (relativeTarget === "" || pathEscapesRoot(relativeTarget)) {
+    throw new PathOutsideRootError(`Path is outside ${rootPath}: ${targetPath}.`);
+  }
+  const parentPath = dirname(resolve(targetPath));
+  if (parentPath !== resolve(rootPath)) {
+    await assertNoSymlinkBelowRoot({ rootPath, targetPath: parentPath });
+  }
+  let stats: Stats;
+  try {
+    stats = await lstat(targetPath);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+  if (stats.isDirectory()) {
+    throw new Error(`Refusing to remove a directory: ${targetPath}.`);
+  }
+  // `rm` removes a link itself (it `lstat`s first), never what it points at.
+  await rm(targetPath, { force: true });
+}
+
+/**
+ * Refuse a directory tree that holds a symbolic link anywhere inside it.
+ * `operation` names what the caller is about to do, for the message.
+ */
+export async function assertTreeContainsNoSymlinks(
+  dirPath: string,
+  { operation = "write into" }: { operation?: "write into" | "read" } = {},
+): Promise<void> {
   for (const entry of await readdir(dirPath, { withFileTypes: true })) {
     const entryPath = join(dirPath, entry.name);
     if (entry.isSymbolicLink()) {
-      throw new Error(`Refusing to write into a tree containing a symbolic link: ${entryPath}.`);
+      throw new SymlinkRefusedError(
+        `Refusing to ${operation} a tree containing a symbolic link: ${entryPath}.`,
+      );
     }
     if (entry.isDirectory()) {
-      await assertTreeContainsNoSymlinks(entryPath);
+      await assertTreeContainsNoSymlinks(entryPath, { operation });
     }
   }
 }
@@ -246,6 +432,22 @@ export function toPosixPath(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+/**
+ * Normalizes a directory path to POSIX form: forward slashes, `.`/`..`
+ * segments resolved, and no trailing slash. The root comes back as `.`
+ * (or `""`), which `isRootDirPath` recognizes.
+ */
+export function normalizePosixDirPath(p: string): string {
+  return posix.normalize(toPosixPath(p)).replace(/\/+$/, "");
+}
+
+/**
+ * Whether a path produced by `normalizePosixDirPath` points at the root.
+ */
+export function isRootDirPath(normalizedPath: string): boolean {
+  return normalizedPath === "" || normalizedPath === ".";
+}
+
 export function checkPathTraversal({
   relativePath,
   intendedRootDir,
@@ -279,41 +481,6 @@ export function resolvePath(relativePath: string, outputRoot?: string): string {
 }
 
 /**
- * Creates a path resolver function bound to a specific base directory
- */
-export function createPathResolver(outputRoot?: string) {
-  return (relativePath: string) => resolvePath(relativePath, outputRoot);
-}
-
-/**
- * Safely reads a JSON file with error handling and optional default value
- */
-export async function readJsonFile<T = unknown>(filepath: string, defaultValue?: T): Promise<T> {
-  try {
-    const content = await readFileContent(filepath);
-    const parsed: T = JSON.parse(content);
-    return parsed;
-  } catch (error) {
-    if (defaultValue !== undefined) {
-      return defaultValue;
-    }
-    throw error;
-  }
-}
-
-/**
- * Writes an object to a JSON file with proper formatting
- */
-export async function writeJsonFile(
-  filepath: string,
-  data: unknown,
-  indent: number = 2,
-): Promise<void> {
-  const content = JSON.stringify(data, null, indent);
-  await writeFileContent(filepath, content);
-}
-
-/**
  * Checks if a directory exists and is actually a directory
  */
 export async function directoryExists(dirPath: string): Promise<boolean> {
@@ -330,13 +497,34 @@ export async function readFileContent(filepath: string): Promise<string> {
 }
 
 /**
+ * Run `read`, answering `null` when the file does not exist. The read is
+ * tried first and `fileExists` is consulted only when it fails, so the
+ * common case costs one syscall instead of a `stat` plus a read, while the
+ * outcome stays what checking first gave: `null` whenever `stat` fails, and
+ * the read's own error when the path exists but cannot be read.
+ */
+async function readOrNullIfMissing<T>({
+  filepath,
+  read,
+}: {
+  filepath: string;
+  read: (filepath: string) => Promise<T>;
+}): Promise<T | null> {
+  try {
+    return await read(filepath);
+  } catch (error) {
+    if (!(await fileExists(filepath))) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
  * Read file content if it exists, otherwise return null.
  */
 export async function readFileContentOrNull(filepath: string): Promise<string | null> {
-  if (await fileExists(filepath)) {
-    return readFileContent(filepath);
-  }
-  return null;
+  return readOrNullIfMissing({ filepath, read: readFileContent });
 }
 
 export async function readFileBuffer(filepath: string): Promise<Buffer> {
@@ -347,10 +535,7 @@ export async function readFileBuffer(filepath: string): Promise<Buffer> {
  * Read file as a buffer if it exists, otherwise return null.
  */
 export async function readFileBufferOrNull(filepath: string): Promise<Buffer | null> {
-  if (await fileExists(filepath)) {
-    return readFileBuffer(filepath);
-  }
-  return null;
+  return readOrNullIfMissing({ filepath, read: readFileBuffer });
 }
 
 /**
@@ -650,15 +835,6 @@ export async function listDirectoryEntryNames(dir: string): Promise<string[]> {
   }
 }
 
-export async function findFiles(dir: string, extension: string = ".md"): Promise<string[]> {
-  try {
-    const files = await readdir(dir);
-    return files.filter((file) => file.endsWith(extension)).map((file) => join(dir, file));
-  } catch {
-    return [];
-  }
-}
-
 /** How many dot-prefixed segments a path has, used to prefer a named alias over a hidden one. */
 function countHiddenSegments(filePath: string): number {
   return splitPathSegments(filePath).filter(isHiddenPathSegment).length;
@@ -793,6 +969,7 @@ export async function writeLandingPath(targetPath: string): Promise<string | nul
   // Once a segment is missing, nothing below it can be a link.
   let exists = true;
   let linkHops = 0;
+  const knownNonLinks = getKnownNonLinkPaths();
   while (pending.length > 0) {
     const segment = pending.shift();
     if (segment === undefined || segment === "" || segment === ".") {
@@ -804,7 +981,7 @@ export async function writeLandingPath(targetPath: string): Promise<string | nul
       continue;
     }
     current = join(current, segment);
-    if (!exists) {
+    if (!exists || knownNonLinks?.has(current)) {
       continue;
     }
     let stats: Stats;
@@ -818,6 +995,7 @@ export async function writeLandingPath(targetPath: string): Promise<string | nul
       continue;
     }
     if (!stats.isSymbolicLink()) {
+      knownNonLinks?.add(current);
       continue;
     }
     linkHops += 1;
@@ -901,6 +1079,81 @@ export async function relativeWriteLanding({
     return null;
   }
   return relative(rootLanding, targetLanding);
+}
+
+/**
+ * Directory names that hold version-control metadata. Bytes landing in one of
+ * them change how the VCS behaves rather than what it tracks: `.git/config`
+ * can set `core.fsmonitor`, `.git/hooks/*` run on the next commit.
+ */
+const VCS_METADATA_DIR_NAMES: ReadonlySet<string> = new Set([".git", ".hg", ".svn", ".jj"]);
+
+function hasVcsMetadataSegment(path: string): boolean {
+  // Folded the way case-insensitive and Windows filesystems fold names, so
+  // `.GIT`, `.git.`, `.git ` and `.git::$DATA` all count as `.git`, and so
+  // does a Windows short name such as `GIT~1`, which a dangling link keeps as
+  // spelled.
+  return splitPathSegments(path).some((segment) => {
+    const folded = segment
+      .replace(/:.*$/, "")
+      .replace(/[. ]+$/, "")
+      .toLowerCase();
+    return VCS_METADATA_DIR_NAMES.has(folded) || /^(git|hg|svn|jj)~\d+$/.test(folded);
+  });
+}
+
+/**
+ * Whether a link on the way to `targetPath` carries it into version-control
+ * metadata (`.git/` and its siblings) that its spelling does not name.
+ *
+ * {@link writablePathEscapesRoot} lets a link that stays inside the root
+ * through, but a checked-out repository can commit `CLAUDE.md -> .git/config`:
+ * the landing is inside the root, yet a write there hands the repository author
+ * the operator's next `git` command. `git clone` never transfers `.git/`, so a
+ * path spelled into it is never something the repository chose; only a write
+ * that lands exactly where it is spelled may touch it.
+ *
+ * `relativeLanding` is {@link relativeWriteLanding}'s answer for the same pair,
+ * passed in so a caller that already has it does not resolve the links twice.
+ */
+export function landingEntersVcsMetadata({
+  rootPath,
+  targetPath,
+  relativeLanding,
+}: {
+  rootPath: string;
+  targetPath: string;
+  relativeLanding: string;
+}): boolean {
+  return (
+    hasVcsMetadataSegment(relativeLanding) &&
+    relativeLanding !== relative(resolve(rootPath), resolve(targetPath))
+  );
+}
+
+/**
+ * Refuse a write target that a symbolic link carries into version-control
+ * metadata (see {@link landingEntersVcsMetadata}). Meant for writes of remote
+ * bytes, next to {@link assertPathResolvesInsideRoot}: an in-root link (a
+ * skill directory linked to a shared one) stays allowed, but not one that
+ * hands the bytes to `.git/config` or `.git/hooks/`.
+ */
+export async function assertLandingOutsideVcsMetadata({
+  rootPath,
+  targetPath,
+}: {
+  rootPath: string;
+  targetPath: string;
+}): Promise<void> {
+  const relativeLanding = await relativeWriteLanding({ rootPath, targetPath });
+  if (relativeLanding === null) {
+    throw new PathOutsideRootError(`Refusing to write through a link cycle: ${targetPath}.`);
+  }
+  if (landingEntersVcsMetadata({ rootPath, targetPath, relativeLanding })) {
+    throw new PathOutsideRootError(
+      `Refusing to write ${targetPath}: a symbolic link leads it into version-control metadata.`,
+    );
+  }
 }
 
 /**
@@ -1443,11 +1696,6 @@ async function deduplicateRelativePathsByFileIdentity({
   return [...candidatesByFile.entries()]
     .map(([identity, candidates]) => relative(dirPath, chooseRepresentative(candidates, identity)))
     .toSorted();
-}
-
-export async function findRuleFiles(aiRulesDir: string): Promise<string[]> {
-  const rulesDir = join(aiRulesDir, "rules");
-  return findFiles(rulesDir, ".md");
 }
 
 export async function removeDirectory(dirPath: string): Promise<void> {

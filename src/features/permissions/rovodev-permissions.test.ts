@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { dump, load } from "js-yaml";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -94,6 +94,164 @@ describe("RovodevPermissions", () => {
   });
 
   describe("fromRulesyncPermissions", () => {
+    it("writes ask for a restricted tool key that would fall back to an allow default", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "*": "allow" },
+          edit: { "secrets/**": "deny" },
+        }),
+        global: true,
+      });
+
+      expect(toolPermissionsOf(perms.getFileContent()).default).toBe("allow");
+      const levels = toolLevelsOf(perms.getFileContent());
+      for (const key of ["find_and_replace_code", "create_file", "delete_file", "move_file"]) {
+        expect(levels[key]).toBe("ask");
+      }
+    });
+
+    it("downgrades the grep key a read allow writes when the grep category restricts a path", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          read: { "*": "allow" },
+          grep: { "secrets/**": "deny" },
+        }),
+        global: true,
+      });
+
+      const levels = toolLevelsOf(perms.getFileContent());
+      expect(levels.grep).toBe("ask");
+      expect(levels.open_files).toBe("allow");
+    });
+
+    it("keeps a per-tool allow over the tool-wide default, as Rovo Dev resolves it", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "*": "ask" },
+          read: { "*": "allow" },
+        }),
+        global: true,
+      });
+
+      expect(toolPermissionsOf(perms.getFileContent()).default).toBe("ask");
+      expect(toolLevelsOf(perms.getFileContent()).open_files).toBe("allow");
+    });
+
+    it("round-trips a native ask default with allowed read tools unchanged", async () => {
+      const yaml = dump({
+        toolPermissions: {
+          default: "ask",
+          tools: {
+            open_files: "allow",
+            expand_code_chunks: "allow",
+            expand_folder: "allow",
+            grep: "allow",
+            getJiraIssue: "allow",
+            getConfluencePage: "allow",
+          },
+        },
+      });
+      const imported = new RovodevPermissions({
+        outputRoot: testDir,
+        relativeDirPath: ".rovodev",
+        relativeFilePath: "config.yml",
+        fileContent: yaml,
+        global: true,
+      }).toRulesyncPermissions();
+
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: imported,
+        global: true,
+      });
+
+      const levels = toolLevelsOf(perms.getFileContent());
+      for (const key of ["open_files", "expand_code_chunks", "expand_folder", "grep"]) {
+        expect(levels[key]).toBe("allow");
+      }
+    });
+
+    it("writes deny for the grep key when the grep category denies everything", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          read: { "*": "allow" },
+          grep: { "*": "deny" },
+        }),
+        global: true,
+      });
+
+      expect(toolLevelsOf(perms.getFileContent()).grep).toBe("deny");
+    });
+
+    it("downgrades shared tool keys when another category restricts a path on them", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          edit: { "*": "allow" },
+          write: { "secrets/**": "deny" },
+        }),
+        global: true,
+      });
+
+      const levels = toolLevelsOf(perms.getFileContent());
+      for (const key of ["find_and_replace_code", "create_file", "delete_file", "move_file"]) {
+        expect(levels[key]).toBe("ask");
+      }
+    });
+
+    it("sets a category's tools to ask when the all-tools category restricts a pattern", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "secrets/**": "deny" },
+          read: { "*": "allow" },
+        }),
+        global: true,
+      });
+
+      expect(toolLevelsOf(perms.getFileContent()).open_files).toBe("ask");
+    });
+
+    it("sets a category's tools to ask when its catch-all allow sits beside a skipped deny or ask", async () => {
+      const mockLogger = createMockLogger();
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          edit: { "*": "allow", ".github/**": "deny" },
+          read: { "*": "allow", "secrets/**": "ask" },
+        }),
+        global: true,
+        logger: mockLogger,
+      });
+
+      const levels = toolLevelsOf(perms.getFileContent());
+      for (const key of ["find_and_replace_code", "create_file", "delete_file", "move_file"]) {
+        expect(levels[key]).toBe("ask");
+      }
+      for (const key of ["open_files", "expand_code_chunks", "expand_folder", "grep"]) {
+        expect(levels[key]).toBe("ask");
+      }
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("will not be auto-approved"),
+      );
+    });
+
+    it("sets toolPermissions.default to ask when the all-tools allow sits beside a skipped deny", async () => {
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          "*": { "*": "allow", "secrets/**": "deny" },
+        }),
+        global: true,
+      });
+
+      expect(toolPermissionsOf(perms.getFileContent()).default).toBe("ask");
+    });
+
     it("maps bash catch-all to bash.default and patterns to bash.commands", async () => {
       const perms = await RovodevPermissions.fromRulesyncPermissions({
         outputRoot: testDir,
@@ -979,6 +1137,41 @@ describe("RovodevPermissions", () => {
       const imported = JSON.parse(perms.toRulesyncPermissions().getFileContent());
 
       expect(imported.permission.edit).toBeUndefined();
+    });
+  });
+
+  describe("tool names that match Object.prototype members", () => {
+    it("skips a category named like a prototype member as having no target", async () => {
+      const logger = createMockLogger();
+      const perms = await RovodevPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: rulesyncPermissions({
+          bash: { ls: "allow" },
+          toString: { "*": "allow" },
+        }),
+        global: false,
+        logger,
+      });
+
+      expect(Object.hasOwn(toolLevelsOf(perms.getFileContent()), "toString")).toBe(false);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('"toString" category'));
+    });
+  });
+
+  describe("names that match Object.prototype members on import", () => {
+    it("imports an external path named like a prototype member into its own read entry", async () => {
+      await ensureDir(join(testDir, ".rovodev"));
+      await writeFileContent(
+        join(testDir, ".rovodev", "config.yml"),
+        dump({ toolPermissions: { allowedExternalPaths: ["toString"] } }),
+      );
+
+      const perms = await RovodevPermissions.fromFile({ outputRoot: testDir, global: false });
+      expect(perms.toRulesyncPermissions().getJson().permission.read).toEqual({
+        toString: "allow",
+      });
+      expect(Object.hasOwn(Object.prototype.toString, "*")).toBe(false);
+      expect(Object.hasOwn(Object.prototype.toString, "toString")).toBe(false);
     });
   });
 });

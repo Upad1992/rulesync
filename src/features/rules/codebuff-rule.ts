@@ -29,9 +29,7 @@ import {
  * @see https://github.com/CodebuffAI/freebuff/blob/main/common/src/constants/knowledge.ts
  */
 export class CodebuffRule extends ToolRule {
-  static getSettablePaths(
-    _options: { global?: boolean; excludeToolDir?: boolean } = {},
-  ): ToolRuleSettablePathsGlobal {
+  static getSettablePaths(_options: { global?: boolean } = {}): ToolRuleSettablePathsGlobal {
     return {
       root: {
         relativeDirPath: ".",
@@ -109,10 +107,5 @@ export class CodebuffRule extends ToolRule {
     });
   }
 
-  static isTargetedByRulesyncRule(rulesyncRule: RulesyncRule): boolean {
-    return this.isTargetedByRulesyncRuleDefault({
-      rulesyncRule,
-      toolTarget: "codebuff",
-    });
-  }
+  protected static override readonly toolTarget = "codebuff";
 }

@@ -1,13 +1,10 @@
 import { basename, join } from "node:path";
 
-import { z } from "zod/mini";
-
 import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../constants/rulesync-paths.js";
 import {
   RulesyncRule,
   type RulesyncRuleFrontmatter,
   type RulesyncRuleFrontmatterInput,
-  RulesyncRuleFrontmatterSchema,
 } from "../features/rules/rulesync-rule.js";
 import { formatError } from "../utils/error.js";
 import {
@@ -18,11 +15,10 @@ import {
   writeFileContent,
 } from "../utils/file.js";
 import { ConsoleLogger, withFallbackLoggerTarget } from "../utils/logger.js";
+import { assertEntryCountWithinLimit, assertEntrySizeWithinLimit } from "./entry-limits.js";
+import { assertNoSymlinkInFeaturePath, isFeatureSymlinkRefusal } from "./feature-symlinks.js";
 
 const logger = new ConsoleLogger({ verbose: false, silent: true });
-
-const maxRuleSizeBytes = 1024 * 1024; // 1MB
-const maxRulesCount = 1000;
 
 /**
  * The rule tools return `getAuthoredFrontmatter()`, the frontmatter as the
@@ -77,6 +73,11 @@ async function listRules(): Promise<
         await Promise.all(
           mdFiles.map(async (file) => {
             try {
+              // A linked rule file is not listed: `get` would refuse it.
+              await assertNoSymlinkInFeaturePath({
+                featureDirPath: rulesDir,
+                targetPath: join(rulesDir, file),
+              });
               // Read the rule file using RulesyncRule
               const rule = await RulesyncRule.fromFile({
                 relativeFilePath: file,
@@ -88,7 +89,11 @@ async function listRules(): Promise<
                 frontmatter: authoredFrontmatterOf({ rule }),
               };
             } catch (error) {
-              logger.error(`Failed to read rule file ${file}: ${formatError(error)}`);
+              if (isFeatureSymlinkRefusal(error)) {
+                logger.debug(`Skipping rule file ${file}: ${formatError(error)}`);
+              } else {
+                logger.error(`Failed to read rule file ${file}: ${formatError(error)}`);
+              }
               return null;
             }
           }),
@@ -119,8 +124,13 @@ async function getRule({ relativePathFromCwd }: { relativePathFromCwd: string })
   });
 
   const filename = basename(relativePathFromCwd);
+  const rulesDir = join(process.cwd(), RULESYNC_RULES_RELATIVE_DIR_PATH);
 
   try {
+    await assertNoSymlinkInFeaturePath({
+      featureDirPath: rulesDir,
+      targetPath: join(rulesDir, filename),
+    });
     const rule = await withoutConsoleWarnings({
       operation: async () =>
         await RulesyncRule.fromFile({
@@ -166,11 +176,7 @@ async function putRule({
 
   // Check file size constraint
   const estimatedSize = JSON.stringify(frontmatter).length + body.length;
-  if (estimatedSize > maxRuleSizeBytes) {
-    throw new Error(
-      `Rule size ${estimatedSize} bytes exceeds maximum ${maxRuleSizeBytes} bytes (1MB) for ${relativePathFromCwd}`,
-    );
-  }
+  assertEntrySizeWithinLimit({ label: "Rule", estimatedSize, path: relativePathFromCwd });
 
   try {
     // Check rule count constraint
@@ -179,11 +185,12 @@ async function putRule({
       (rule) => rule.relativePathFromCwd === join(RULESYNC_RULES_RELATIVE_DIR_PATH, filename),
     );
 
-    if (!isUpdate && existingRules.length >= maxRulesCount) {
-      throw new Error(
-        `Maximum number of rules (${maxRulesCount}) reached in ${RULESYNC_RULES_RELATIVE_DIR_PATH}`,
-      );
-    }
+    assertEntryCountWithinLimit({
+      plural: "rules",
+      dirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+      existingCount: existingRules.length,
+      isUpdate,
+    });
 
     // Create a new RulesyncRule instance
     const rule = await withoutConsoleWarnings({
@@ -202,7 +209,11 @@ async function putRule({
     const rulesDir = join(process.cwd(), RULESYNC_RULES_RELATIVE_DIR_PATH);
     await ensureDir(rulesDir);
 
-    // Write the file
+    // Write the file, never through a symbolic link a cloned repository planted
+    await assertNoSymlinkInFeaturePath({
+      featureDirPath: rulesDir,
+      targetPath: rule.getFilePath(),
+    });
     await writeFileContent(rule.getFilePath(), rule.getFileContent());
 
     return {
@@ -245,31 +256,10 @@ async function deleteRule({ relativePathFromCwd }: { relativePathFromCwd: string
 }
 
 /**
- * Schema for rule-related tool parameters
- */
-const ruleToolSchemas = {
-  listRules: z.object({}),
-  getRule: z.object({
-    relativePathFromCwd: z.string(),
-  }),
-  putRule: z.object({
-    relativePathFromCwd: z.string(),
-    frontmatter: RulesyncRuleFrontmatterSchema,
-    body: z.string(),
-  }),
-  deleteRule: z.object({
-    relativePathFromCwd: z.string(),
-  }),
-} as const;
-
-/**
  * Tool definitions for rule-related operations
  */
 export const ruleTools = {
   listRules: {
-    name: "listRules",
-    description: `List all rules from ${join(RULESYNC_RULES_RELATIVE_DIR_PATH, "*.md")} with their frontmatter.`,
-    parameters: ruleToolSchemas.listRules,
     execute: async () => {
       const rules = await listRules();
       const output = { rules };
@@ -277,20 +267,12 @@ export const ruleTools = {
     },
   },
   getRule: {
-    name: "getRule",
-    description:
-      "Get detailed information about a specific rule. relativePathFromCwd parameter is required.",
-    parameters: ruleToolSchemas.getRule,
     execute: async (args: { relativePathFromCwd: string }) => {
       const result = await getRule({ relativePathFromCwd: args.relativePathFromCwd });
       return JSON.stringify(result, null, 2);
     },
   },
   putRule: {
-    name: "putRule",
-    description:
-      "Create or update a rule (upsert operation). relativePathFromCwd, frontmatter, and body parameters are required.",
-    parameters: ruleToolSchemas.putRule,
     execute: async (args: {
       relativePathFromCwd: string;
       frontmatter: RulesyncRuleFrontmatterInput;
@@ -305,9 +287,6 @@ export const ruleTools = {
     },
   },
   deleteRule: {
-    name: "deleteRule",
-    description: "Delete a rule file. relativePathFromCwd parameter is required.",
-    parameters: ruleToolSchemas.deleteRule,
     execute: async (args: { relativePathFromCwd: string }) => {
       const result = await deleteRule({ relativePathFromCwd: args.relativePathFromCwd });
       return JSON.stringify(result, null, 2);

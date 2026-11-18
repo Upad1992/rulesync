@@ -1,6 +1,6 @@
 # Decisions
 
-<!-- cspell:ignore agentsync traecn Doubao -->
+<!-- cspell:ignore agentsync traecn Doubao forwardable codegraph -->
 
 Append-only decision log for this fork. New entries get the next `D-NNN`; do not rewrite old entries.
 Each entry records context, the decision, the alternatives considered, the consequences, and the evidence.
@@ -202,6 +202,54 @@ Pitfalls are collected at the end.
 - `codearts_cli.jsonc` is accepted by the CLI, but rulesync writes only `.json` so a project never holds both.
 - The CLI merges user-level and project-level `mcp` maps, project winning on a name clash.
 
+## D-015: Track upstream by full fast-forward, activate selectively
+
+**Context:** Upstream was 1020 commits ahead of the local `main` (versions 37.1.0 to 43.9.0). The fork adds targets upstream does not support, plus localizations of targets it does support. The user wants every upstream adaptation to platforms it already supports to be followed up.
+
+**Decision:** Fast-forward `main` from `upstream/main` with `--ff-only` and merge `main` into `dev`. Take all five categories of upstream change (existing-platform fixes and features, new tool targets, core and security changes, dependency and major-version bumps, docs and generated artifacts). "Partial" means the activation scope in `rulesync.jsonc`, not a selective set of commits: no commit-level cherry-picking, so `main` stays a clean mirror and `git merge --ff-only upstream/main` keeps working. "Mirror" here does not mean a live replica; `main` may lag upstream between syncs. Do not use GitHub's "Sync fork"; fix the local `git fetch upstream` instead. Do not push `main` or `dev` until acceptance passes and a separate authorization is given.
+
+**Alternatives:** cherry-pick selected commits into `main`; sync through GitHub "Sync fork" and fetch from `origin`; push `main` immediately so the fork page looks current; keep `main` permanently behind upstream.
+
+**Consequences:** `main` carries no local work and is always fast-forwardable; conflicts are resolved once on `dev` with full history. All upstream targets land in the tree even when the fork does not enable them. A major toolchain bump arrives together with the sync.
+
+**Evidence:** `AGENTS.md:138-141`; D-007; `git rev-list --left-right --count main...upstream/main` = `0 1020`; `package.json:3` = `43.9.0`.
+
+## D-016: Resolve upstream/local conflicts by acceptance, defaulting to local-first
+
+**Context:** Local customizations (Trae CN-first user paths, Trae subagents, `codearts-cli` and `codearts-ide` targets) overlap upstream files. A blanket "ours" or "theirs" rule is wrong in either direction.
+
+**Decision:** Use the acceptance suite as the arbiter, with local-first (option B) as the default implementation: keep the local customization and rewrite the upstream change to fit it (for example route the upstream Trae permission path through `getTraeUserDir()` instead of hardcoded `.trae/permission`). Add one regression assertion so the acceptance suite can actually distinguish A (upstream as-is) from B (local-first); without it, both pass `pnpm cicheck` and the rule silently degenerates to the default. Fallback chain: B, then A or C (merge but do not enable).
+
+**Alternatives:** always prefer upstream; implement both A and B and pick whichever passes; exclude overlapping changes entirely.
+
+**Consequences:** Every future upstream change touching Trae needs a manual review. The Q12 assertion is the only scope expansion of the acceptance criteria.
+
+**Evidence:** D-002, D-003, D-012; upstream commit `d2b7a695` (Trae global permissions hardcoded to `.trae/permission`); `AGENTS.md:9-14,22,23,50` for the acceptance suite.
+
+## D-017: Port local targets onto the 43.9.0 architecture instead of resolving merge markers
+
+**Context:** Merging `main` into `dev` produced 11 conflicted files, but the real incompatibility is structural: upstream 43.9.0 replaced Trae base classes (`TraeCommand` now extends `FrontmatterMarkdownToolCommand`), replaced `getTraeCommandsDirPath()` with `TRAE_COMMANDS_DIR_PATH`, refactored `rules-processor.ts` into tool-rule factories, moved about 20 `src/cli/commands/*` files to `src/lib/*`, and switched the build toolchain from `tsdown`/oxlint/oxfmt to `vp` (vite+). It also added `trae-permissions.ts` and `trae-hooks.ts`, which the fork had explicitly kept out of scope.
+
+**Decision:** Treat the work as a port, not a conflict resolution. Use upstream 43.9.0 as the base and re-apply the local customizations (CN-first paths, Trae subagents, both `codearts-*` targets, tuple and processor registrations, docs and generated artifacts) on top. Run `pnpm typecheck` first to size the damage, then iterate to `pnpm cicheck` green. Hand off to a fresh session via `HANDOFF.md`, `DECISIONS.md` and `CONTEXT.md` rather than carrying a long interview session into the port.
+
+**Alternatives:** abort the merge and only cherry-pick the frontmatter RCE fix; defer the whole merge; mechanically resolve markers with "ours" or "theirs".
+
+**Consequences:** 18+ local files may need rewriting, and D-016's "local-first" has to be re-expressed against new base classes. The `main` mirror is already updated, so the port can be redone from a clean state at any time.
+
+**Evidence:** `package.json:3` = `43.9.0`; merge output (11 `UU` files, about 20 `R`, 5 `D`, 200+ `A`); stage 2 versus stage 3 of `src/features/commands/trae-command.ts`; `package.json:47-69` (generate scripts and `cicheck` still present).
+
+## D-018: Finish the 43.9.0 port as one merge commit on dev
+
+**Context:** Upstream 43.9.0 was merged into `dev` with 11 conflicts. The port could be isolated on a temporary branch, validated only after landing on `dev`, or followed by a local package/install step.
+
+**Decision:** Keep the in-progress merge on `dev`, resolve it with 43.9.0 as the base (D-017), re-apply every local customization, and commit one merge commit once `pnpm cicheck` and the E2E matrix are green. Do not create a dedicated merge branch, do not package or install locally in this round, do not push `main`/`dev`, and switch back to `feat/codearts-ide` afterwards. Defer D-014/P-010 numbering reconciliation (3A, P-013).
+
+**Alternatives:** A dedicated `port/43.9.0` branch (A2); a post-commit validation branch (A3); a local bundle/install (B2/B3); pushing `main`/`dev`.
+
+**Consequences:** `dev` keeps full merge history and `main` stays a clean mirror. Local install stays a later, separately authorized task. The two handoff-document versions and the numbering stay unreconciled until `feat/codearts-ide` is merged.
+
+**Evidence:** HANDOFF.md Next steps 1-10; D-015/D-016/D-017; this session's `pnpm cicheck` (exit 0) and E2E results.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
@@ -239,3 +287,19 @@ The committed JSON is not in oxfmt format, so `pnpm check` and `pnpm cicheck` fa
 ### P-009: CodeArts subagents do not appear in the agent picker
 
 `mode: subagent` agents are only reachable through delegation by the main agent; the TUI's "Select agent" list shows primary agents only. Verify a subagent by delegating to it and checking the reply, not by looking for it in the picker. Use `mode: all` if it must be selectable.
+
+### P-011: Upstream 43.9.0 replaced Trae base classes and moved CLI commands
+
+`TraeCommand` extends `FrontmatterMarkdownToolCommand` upstream but `ToolCommand` locally; `getTraeCommandsDirPath()` was replaced by `TRAE_COMMANDS_DIR_PATH` (hardcoded `.trae`, no `.trae-cn`); `src/cli/commands/*` moved to `src/lib/*`; the `tsdown`, oxfmt and oxlint configs were removed in favour of `vp`. Local CN-first logic and the `codearts-*` targets must be re-based rather than merged at the marker level. See D-017.
+
+### P-012: An unresolved merge plus unstaged handoff docs is fragile
+
+The `dev` worktree is left with `git merge main` in progress and 11 unresolved conflicts. `git merge --abort` discards all worktree edits, including `HANDOFF.md`, `DECISIONS.md` and `CONTEXT.md`. Copy those three files out of the repository before aborting. Backups live under `/tmp/codebuddy-backups/20261117-200706/`.
+
+### P-013: `dev` has older copies of the process documents than `feat/codearts-ide`
+
+`feat/codearts-ide` (`2d93b7c`) carries D-014, P-010 and the 2026-10-20 `HANDOFF.md`; the `dev` worktree has the 2026-10-19 / D-013 / P-009 versions. New decisions here start at D-015 and new pitfalls at P-011 on purpose, leaving D-014 and P-010 free. When `feat/codearts-ide` is merged, reconcile the numbering and the two handoff versions.
+
+### P-014: `pnpm generate` overwrites generated files holding fork-only content
+
+When `pnpm`'s `verifyDepsBeforeRun` triggers an install, the `prepare` hook runs `pnpm generate`, and `rulesync.jsonc` regenerates the root `AGENTS.md` and `.claude/settings.json`. Content added by hand to those two files — the `Fork Workflow` / `Session Handoff` sections (D-008) and the `UserPromptSubmit` codegraph hook (8ee6e0594) — is dropped whenever that regeneration happens (observed on the first `pnpm typecheck` after the 43.9.0 sync, but not on every command). Verify the two files before committing, and restore/stage that content after the last command that regenerates them and right before `git commit`, which does not run `prepare`. The `pnpm cicheck` drift checks do not cover these files, so a green cicheck is unaffected. Moving the content into `.rulesync/` sources is the durable fix but is out of scope here.

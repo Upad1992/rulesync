@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createMockLogger } from "../../test-utils/mock-logger.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -47,16 +47,6 @@ describe("RooPermissions", () => {
     });
   });
 
-  describe("isDeletable", () => {
-    it("is not deletable (shared workspace settings file)", () => {
-      const permissions = RooPermissions.forDeletion({
-        relativeDirPath: ".vscode",
-        relativeFilePath: "settings.json",
-      });
-      expect(permissions.isDeletable()).toBe(false);
-    });
-  });
-
   describe("fromRulesyncPermissions", () => {
     it("splits bash allow/deny into the two command lists and omits ask", async () => {
       const permissions = await RooPermissions.fromRulesyncPermissions({
@@ -70,6 +60,89 @@ describe("RooPermissions", () => {
         [ALLOWED_KEY]: ["git "],
         [DENIED_KEY]: ["rm -rf"],
       });
+    });
+
+    it("withholds a catch-all allow that covers a bash ask", async () => {
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { "*": "allow", "git push *": "ask" },
+        }),
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({ [ALLOWED_KEY]: [] });
+    });
+
+    it("withholds a shorter prefix allow that covers a longer bash ask", async () => {
+      const logger = createMockLogger();
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { git: "allow", "git push": "ask", "npm ": "allow" },
+        }),
+        logger,
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({ [ALLOWED_KEY]: ["npm "] });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("allow rule(s) for git"));
+    });
+
+    it("withholds an allow that extends a denied prefix, since the longer match would win", async () => {
+      const logger = createMockLogger();
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { git: "deny", "git push": "allow", "npm ": "allow" },
+        }),
+        logger,
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({
+        [ALLOWED_KEY]: ["npm "],
+        [DENIED_KEY]: ["git"],
+      });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("extend a denied command"));
+    });
+
+    it("withholds every literal allow beside a bare '*' deny, the extension's wildcard", async () => {
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { "*": "deny", "git status": "allow" },
+        }),
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({
+        [ALLOWED_KEY]: [],
+        [DENIED_KEY]: ["*"],
+      });
+    });
+
+    it("compares an allow against a denied prefix case-insensitively, as the extension does", async () => {
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { git: "deny", "Git push": "allow" },
+        }),
+      });
+
+      expect(JSON.parse(permissions.getFileContent())).toEqual({
+        [ALLOWED_KEY]: [],
+        [DENIED_KEY]: ["git"],
+      });
+    });
+
+    it("withholds an allow that extends the literal prefix added for a glob deny", async () => {
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { "rm -rf *": "deny", "rm -rf node_modules": "allow" },
+        }),
+      });
+
+      const json = JSON.parse(permissions.getFileContent());
+      expect(json[ALLOWED_KEY]).toEqual([]);
+      expect(json[DENIED_KEY]).toEqual(["rm -rf *", "rm -rf "]);
     });
 
     // The two empty lists are treated differently because their contributed
@@ -231,7 +304,25 @@ describe("RooPermissions", () => {
         }),
       });
 
-      expect(JSON.parse(permissions.getFileContent())[DENIED_KEY]).toEqual(["rm -rf ", "rm -rf *"]);
+      // The literal prefix `rm -rf ` already denies everything `rm -rf *` names.
+      expect(JSON.parse(permissions.getFileContent())[DENIED_KEY]).toEqual(["rm -rf "]);
+    });
+
+    it("folds a `<prefix> *` deny into the literal prefix deny beside it", async () => {
+      const logger = createMockLogger();
+      const permissions = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: createRulesyncPermissions({
+          bash: { "*": "allow", curl: "deny", "curl *": "deny", "npm *": "deny" },
+        }),
+        logger,
+      });
+
+      const denied = JSON.parse(permissions.getFileContent())[DENIED_KEY];
+      expect(denied).toContain("curl");
+      expect(denied).not.toContain("curl *");
+      // Without a literal `npm` deny the glob still gets its prefix added.
+      expect(denied).toContain("npm ");
     });
 
     // `/…/` delimiters alone do not make a regex: an absolute command path has
@@ -470,9 +561,50 @@ describe("RooPermissions", () => {
 
       expect(JSON.parse(permissions.toRulesyncPermissions().getFileContent())).toEqual({
         permission: {
-          bash: { "git ": "allow", "npm run ": "allow", "rm -rf": "deny" },
+          bash: {
+            "git ": "allow",
+            "npm run ": "allow",
+            "rm -rf": "deny",
+            "rm -rf *": "deny",
+          },
         },
       });
+    });
+
+    // A native deny is a command prefix, so it must keep blocking every command
+    // under it once canonical deny > allow is applied by another target.
+    it("imports a prefix deny with its glob reach beside a bare `*` allow", async () => {
+      await writeSettings(testDir, {
+        [ALLOWED_KEY]: ["*"],
+        [DENIED_KEY]: ["curl", "git reset", "npm *"],
+      });
+
+      const permissions = await RooPermissions.fromFile({ outputRoot: testDir });
+
+      expect(JSON.parse(permissions.toRulesyncPermissions().getFileContent())).toEqual({
+        permission: {
+          bash: {
+            "*": "allow",
+            curl: "deny",
+            "curl *": "deny",
+            "git reset": "deny",
+            "git reset *": "deny",
+            "npm *": "deny",
+          },
+        },
+      });
+    });
+
+    it("does not import an allow holding glob syntax wider than it matched", async () => {
+      const logger = createMockLogger();
+      await writeSettings(testDir, { [ALLOWED_KEY]: ["*", "npm *", "git status"] });
+
+      const permissions = await RooPermissions.fromFile({ outputRoot: testDir });
+
+      expect(JSON.parse(permissions.toRulesyncPermissions({ logger }).getFileContent())).toEqual({
+        permission: { bash: { "*": "allow", "git status": "allow" } },
+      });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('"npm *"'));
     });
 
     it("imports a pattern present in both lists as deny", async () => {
@@ -484,7 +616,7 @@ describe("RooPermissions", () => {
       const permissions = await RooPermissions.fromFile({ outputRoot: testDir });
 
       expect(JSON.parse(permissions.toRulesyncPermissions().getFileContent())).toEqual({
-        permission: { bash: { "git ": "deny" } },
+        permission: { bash: { "git ": "deny", "git *": "deny" } },
       });
     });
 
@@ -527,9 +659,19 @@ describe("RooPermissions", () => {
 
       const reimported = await RooPermissions.fromFile({ outputRoot: testDir });
 
-      expect(JSON.parse(reimported.toRulesyncPermissions().getFileContent())).toEqual({
-        permission: { bash: { "git ": "allow", "rm -rf": "deny" } },
+      const reimportedRulesync = reimported.toRulesyncPermissions();
+      expect(JSON.parse(reimportedRulesync.getFileContent())).toEqual({
+        permission: { bash: { "git ": "allow", "rm -rf": "deny", "rm -rf *": "deny" } },
       });
+
+      // Regenerating from the import gives back the same native lists.
+      const regenerated = await RooPermissions.fromRulesyncPermissions({
+        outputRoot: testDir,
+        rulesyncPermissions: reimportedRulesync,
+      });
+      expect(JSON.parse(regenerated.getFileContent())).toEqual(
+        JSON.parse(generated.getFileContent()),
+      );
     });
   });
 });

@@ -14,6 +14,7 @@ import { isFileNotFoundError } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { getRulesyncSourceCandidates } from "../../utils/rulesync-source-path.js";
 import { AiassistantIgnore } from "./aiassistant-ignore.js";
+import { AndroidstudioIgnore } from "./androidstudio-ignore.js";
 import { AntigravityCliIgnore } from "./antigravity-cli-ignore.js";
 import { AugmentcodeIgnore } from "./augmentcode-ignore.js";
 import { BobIgnore } from "./bob-ignore.js";
@@ -24,6 +25,7 @@ import { ContinueIgnore } from "./continue-ignore.js";
 import { CrushIgnore } from "./crush-ignore.js";
 import { CursorIgnore } from "./cursor-ignore.js";
 import { DevinIgnore } from "./devin-ignore.js";
+import { FirebenderIgnore } from "./firebender-ignore.js";
 import { GrokcliIgnore } from "./grokcli-ignore.js";
 import { HermesagentIgnore } from "./hermesagent-ignore.js";
 import { JunieIgnore } from "./junie-ignore.js";
@@ -71,6 +73,9 @@ type ToolIgnoreFactory = {
 
 export const toolIgnoreFactories = new Map<IgnoreProcessorToolTarget, ToolIgnoreFactory>([
   ["aiassistant", { class: AiassistantIgnore }],
+  // Gemini in Android Studio reads `.aiexclude` (gitignore syntax); project only.
+  // https://developer.android.com/studio/gemini/aiexclude
+  ["androidstudio", { class: AndroidstudioIgnore }],
   ["antigravity-cli", { class: AntigravityCliIgnore }],
   ["augmentcode", { class: AugmentcodeIgnore }],
   ["bob", { class: BobIgnore }],
@@ -82,6 +87,8 @@ export const toolIgnoreFactories = new Map<IgnoreProcessorToolTarget, ToolIgnore
   ["continue", { class: ContinueIgnore }],
   ["crush", { class: CrushIgnore }],
   ["cursor", { class: CursorIgnore }],
+  // Firebender keeps its ignore list in the `ignore` key of `firebender.json`.
+  ["firebender", { class: FirebenderIgnore }],
   // Grok CLI has no ignore file; the deny list goes into a sandbox profile.
   ["grokcli", { class: GrokcliIgnore }],
   ["hermesagent", { class: HermesagentIgnore }],
@@ -111,13 +118,17 @@ const ignoreProcessorToolTargets: ToolTarget[] = [...toolIgnoreFactories.keys()]
 const ignoreProcessorGlobalToolTargets: ToolTarget[] = [
   "continue",
   "devin",
+  // Firebender appends the personal `~/.firebender/firebender.json` `ignore`
+  // list to the project one. https://docs.firebender.com/api-reference/syntax
+  "firebender",
   "grokcli",
   // Kilo's global ignore file is the legacy `~/.kilocode/.kilocodeignore`.
   "kilo",
   "kiro",
-  // Not `kiro-cli`: Kiro's docs mark the global `~/.kiro/settings/kiroignore`
-  // as IDE-only, so the CLI never reads it.
+  // Kiro CLI reads the global `~/.kiro/settings/kiroignore` too (Kiro's
+  // capability matrix lists only CLI V3); the file is shared with `kiro-ide`.
   // https://kiro.dev/docs/kiroignore/
+  "kiro-cli",
   "kiro-ide",
   "reasonix",
   "zed",
@@ -138,6 +149,10 @@ export class IgnoreProcessor extends FeatureProcessor {
   private readonly getFactory: GetFactory;
   private readonly featureOptions: FeatureOptions | undefined;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
 
   constructor({
     outputRoot = process.cwd(),
@@ -169,11 +184,6 @@ export class IgnoreProcessor extends FeatureProcessor {
     this.getFactory = getFactory;
     this.featureOptions = featureOptions;
     this.global = global;
-  }
-
-  async writeToolIgnoresFromRulesyncIgnores(rulesyncIgnores: RulesyncIgnore[]): Promise<void> {
-    const toolIgnores = await this.convertRulesyncFilesToToolFiles(rulesyncIgnores);
-    await this.writeAiFiles(toolIgnores);
   }
 
   /**
@@ -305,6 +315,7 @@ export class IgnoreProcessor extends FeatureProcessor {
       rulesyncIgnore,
       options: this.featureOptions,
       global: this.global,
+      logger: this.logger,
     });
 
     const auxiliaryFiles = await factory.class.getAuxiliaryFiles?.({

@@ -6,7 +6,6 @@ import {
   POOL_MCP_SERVERS_KEY,
   POOL_SETTINGS_FILE_NAME,
 } from "../../constants/pool-paths.js";
-import { ValidationResult } from "../../types/ai-file.js";
 import { McpServers } from "../../types/mcp.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import { type Logger, warnWithFallback } from "../../utils/logger.js";
@@ -15,15 +14,17 @@ import { quoteValueForWarning } from "../../utils/quote-value.js";
 import { isRecord, isStringArray } from "../../utils/type-guards.js";
 import {
   applySharedConfigPatch,
-  parseSharedConfig,
+  parseSharedConfigFile,
   sharedConfigFileKey,
   undefinedWhenEmpty,
 } from "../shared/shared-config-gateway.js";
 import {
   declaresNoTransport,
   isRemoteMcpServer,
+  resolveHttpOrSseRemoteType,
   resolveLocalMcpCommand,
   resolveRemoteMcpUrl,
+  skipServersWithEmptyEnabledTools,
   warnAndSkipMcpServer,
 } from "./mcp-transport.js";
 import { RulesyncMcp } from "./rulesync-mcp.js";
@@ -35,39 +36,6 @@ import {
   ToolMcpParams,
   ToolMcpSettablePaths,
 } from "./tool-mcp.js";
-
-/**
- * Single spelling of the settings.yaml codec/policy, matching the
- * `SHARED_CONFIG_OWNERSHIP` declaration for both scopes: fail closed on an
- * unparseable root rather than replacing the user's primary Pool settings with
- * generated output.
- */
-function parsePoolSettings(fileContent: string, filePath?: string): Record<string, unknown> {
-  return parseSharedConfig({
-    format: "yaml",
-    fileContent,
-    filePath,
-    invalidRootPolicy: "error",
-  });
-}
-
-/**
- * The remote transports Pool's `transport.type` accepts. `streamable-http` is
- * the canonical rulesync name for what Pool calls `http`; everything else is
- * left to the caller to reject.
- *
- * @see https://docs.poolside.ai/mcp-servers
- */
-function asPoolRemoteType(stated: string | undefined, url: string): "http" | "sse" | undefined {
-  if (stated === "sse") return "sse";
-  if (stated === "http" || stated === "streamable-http") return "http";
-  if (stated === undefined) {
-    // With no transport stated, a `ws://`/`wss://` URL is not something Pool
-    // can reach; every other URL is HTTP, its default remote transport.
-    return /^wss?:\/\//i.test(url) ? undefined : "http";
-  }
-  return undefined;
-}
 
 /**
  * Pool spells remote headers as a list of `"Name: value"` strings rather than
@@ -170,7 +138,12 @@ function toPoolTransport(
     });
   }
   const stated = config.type ?? config.transport;
-  const type = asPoolRemoteType(stated, url);
+  // The remote transports Pool's `transport.type` accepts. `streamable-http` is
+  // the canonical rulesync name for what Pool calls `http`; everything else is
+  // left to the caller to reject.
+  //
+  // @see https://docs.poolside.ai/mcp-servers
+  const type = resolveHttpOrSseRemoteType({ stated, url });
   if (type === undefined) {
     // Rewriting a WebSocket server as `http` would hand Pool a server it
     // cannot connect to, so it is skipped out loud instead.
@@ -367,10 +340,11 @@ export class PoolMcp extends ToolMcp {
 
   constructor(params: ToolMcpParams) {
     super(params);
-    this.settings = parsePoolSettings(
-      this.fileContent ?? "",
-      join(this.relativeDirPath, this.relativeFilePath),
-    );
+    this.settings = parseSharedConfigFile({
+      fileKey: sharedConfigFileKey(PoolMcp.getSettablePaths({ global: this.global })),
+      fileContent: this.fileContent ?? "",
+      filePath: join(this.relativeDirPath, this.relativeFilePath),
+    });
   }
 
   getSettings(): Record<string, unknown> {
@@ -424,7 +398,13 @@ export class PoolMcp extends ToolMcp {
     // tools' configs, so read it back off the unfiltered source JSON — the
     // same re-merge musecode does for `musecodeMode`.
     const mcpServers = Object.fromEntries(
-      Object.entries(rulesyncMcp.getMcpServers()).map(([serverName, serverConfig]) => {
+      Object.entries(
+        skipServersWithEmptyEnabledTools({
+          mcpServers: rulesyncMcp.getMcpServers(),
+          toolName: "Pool",
+          logger,
+        }),
+      ).map(([serverName, serverConfig]) => {
         const rawServer = rulesyncMcp.getRawMcpServer(serverName);
         const poolAllow = isRecord(rawServer) ? rawServer.poolAllow : undefined;
         return [serverName, { ...serverConfig, ...(isStringArray(poolAllow) && { poolAllow }) }];
@@ -461,10 +441,6 @@ export class PoolMcp extends ToolMcp {
     return this.toRulesyncMcpDefault({
       fileContent: JSON.stringify({ mcpServers: converted }, null, 2),
     });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   static forDeletion({

@@ -1,5 +1,7 @@
 import { join } from "node:path";
 
+import { AGENTSMD_SKILLS_DIR_PATH } from "./agentsmd-paths.js";
+
 // Letta Code (`@letta-ai/letta-code` on npm, the `letta` CLI) keeps its
 // project-scoped configuration under a `.letta/` directory at the project root
 // and the matching user-scoped configuration under `~/.letta/`.
@@ -32,5 +34,13 @@ export const LETTACODE_AGENTS_DIR_PATH = join(LETTACODE_DIR, "agents");
 // Skills: `<name>/SKILL.md` directories. The project root is the shared
 // `.agents/skills/`; the user root is `~/.letta/skills/`.
 // @see https://docs.letta.com/configuration/skills/index.md
-export const LETTACODE_PROJECT_SKILLS_DIR_PATH = join(".agents", "skills");
+export const LETTACODE_PROJECT_SKILLS_DIR_PATH = AGENTSMD_SKILLS_DIR_PATH;
 export const LETTACODE_GLOBAL_SKILLS_DIR_PATH = join(LETTACODE_DIR, "skills");
+
+// Custom slash commands: Markdown prompt files discovered recursively. The
+// project root is `.commands/` in the working directory (not under `.letta/`);
+// the user root is `~/.letta/commands/`.
+// @see https://docs.letta.com/platform/cli/slash-commands
+// @see https://github.com/letta-ai/letta-code/blob/main/src/cli/commands/custom.ts
+export const LETTACODE_PROJECT_COMMANDS_DIR_PATH = ".commands";
+export const LETTACODE_GLOBAL_COMMANDS_DIR_PATH = join(LETTACODE_DIR, "commands");

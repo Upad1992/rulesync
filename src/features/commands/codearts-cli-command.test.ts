@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { CODEARTS_CLI_COMMANDS_DIR_PATH } from "../../constants/codearts-cli-paths.js";
 import { RULESYNC_COMMANDS_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
@@ -36,7 +36,6 @@ describe("CodeartsCliCommand", () => {
         ...(Object.keys(section).length > 0 && { "codearts-cli": section }),
       },
       body: "Review the diff and list the risks.",
-      fileContent: "",
     });
 
   it("should resolve .codeartsdoer/commands in both scopes", () => {

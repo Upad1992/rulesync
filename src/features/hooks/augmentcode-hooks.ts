@@ -4,8 +4,6 @@ import {
   AUGMENTCODE_DIR,
   AUGMENTCODE_SETTINGS_FILE_NAME,
 } from "../../constants/augmentcode-paths.js";
-import type { AiFileParams } from "../../types/ai-file.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import {
   AUGMENTCODE_HOOK_EVENTS,
   AUGMENTCODE_TO_CANONICAL_EVENT_NAMES,
@@ -15,7 +13,6 @@ import {
   parseAugmentcodeSettingsDocument,
   readAugmentcodeSettingsWithLocalOverlay,
 } from "../../utils/augmentcode-settings.js";
-import { formatError } from "../../utils/error.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { applySharedConfigPatch, sharedConfigFileKey } from "../shared/shared-config-gateway.js";
@@ -28,7 +25,6 @@ import {
 } from "./tool-hooks-converter.js";
 import {
   ToolHooks,
-  type ToolHooksForDeletionParams,
   type ToolHooksFromFileParams,
   type ToolHooksFromRulesyncHooksParams,
   type ToolHooksSettablePaths,
@@ -83,13 +79,6 @@ export const AUGMENTCODE_CONVERTER_CONFIG: ToolHooksConverterConfig = {
  * @see https://docs.augmentcode.com/cli/hooks
  */
 export class AugmentcodeHooks extends ToolHooks {
-  constructor(params: AiFileParams) {
-    super({
-      ...params,
-      fileContent: params.fileContent ?? "{}",
-    });
-  }
-
   override isDeletable(): boolean {
     // settings.json is shared with the permissions feature, so it must never be
     // removed wholesale; clearing hooks happens via an in-place merge instead.
@@ -198,20 +187,14 @@ export class AugmentcodeHooks extends ToolHooks {
   }
 
   toRulesyncHooks({ logger }: { logger?: Logger } = {}): RulesyncHooks {
-    let settings: { hooks?: unknown };
-    try {
-      settings = parseAugmentcodeSettingsDocument({
-        fileContent: this.getFileContent(),
-        configPath: join(this.getRelativeDirPath(), this.getRelativeFilePath()),
-      });
-    } catch (error) {
-      throw new Error(
-        `Failed to parse AugmentCode hooks content in ${join(this.getRelativeDirPath(), this.getRelativeFilePath())}: ${formatError(error)}`,
-        {
-          cause: error,
-        },
-      );
-    }
+    const settings: { hooks?: unknown } = this.parseFileContentOrThrow({
+      displayName: "AugmentCode",
+      parse: (fileContent) =>
+        parseAugmentcodeSettingsDocument({
+          fileContent,
+          configPath: join(this.getRelativeDirPath(), this.getRelativeFilePath()),
+        }),
+    });
     const hooks = toolHooksToCanonical({
       logger,
       hooks: settings.hooks,
@@ -223,24 +206,6 @@ export class AugmentcodeHooks extends ToolHooks {
         null,
         2,
       ),
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-  }: ToolHooksForDeletionParams): AugmentcodeHooks {
-    return new AugmentcodeHooks({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: JSON.stringify({ hooks: {} }, null, 2),
-      validate: false,
     });
   }
 }

@@ -37,7 +37,7 @@ export type RulesyncPermissionsFromFileParams = Pick<
   "outputRoot" | "validate" | "relativeDirPath"
 >;
 
-export type RulesyncPermissionsSettablePaths = RulesyncSourceSettablePaths;
+type RulesyncPermissionsSettablePaths = RulesyncSourceSettablePaths;
 
 export class RulesyncPermissions extends RulesyncFile {
   private readonly json: PermissionsConfig;
@@ -132,11 +132,9 @@ export class RulesyncPermissions extends RulesyncFile {
    * `PERMISSION_OVERRIDE_KEY_ALIASES`) is replaced wholesale, and removed when
    * the import does not produce one: only that tool's import ever writes it, so
    * a setting removed from the tool's own config has to disappear here too.
-   * Any other tool's override block the import carries (Hermes restores them
-   * from its provenance) merges one level down: an imported field replaces the
-   * existing field, fields the import does not name are kept, and a
-   * `permission` record inside the block merges per category. Every other
-   * top-level key — `$schema` included — is kept unless the import names it.
+   * Every other top-level key — `$schema` included — is kept unless the import
+   * names it, in which case the imported value replaces it. No importer emits
+   * another tool's override block, so those blocks are never touched here.
    */
   static mergeImportedJson({
     existing,
@@ -154,15 +152,6 @@ export class RulesyncPermissions extends RulesyncFile {
       const current = merged[key];
       if (key === "permission") {
         merged[key] = mergePermissionCategories({ existing: current, imported: value });
-      } else if (isRecord(current) && isRecord(value)) {
-        const block: Record<string, unknown> = { ...current };
-        for (const [field, fieldValue] of Object.entries(value)) {
-          block[field] =
-            field === "permission"
-              ? mergePermissionCategories({ existing: block[field], imported: fieldValue })
-              : fieldValue;
-        }
-        merged[key] = block;
       } else {
         merged[key] = value;
       }
@@ -566,6 +555,7 @@ export function withoutBlankPermissionKeysIn({
  */
 const NATIVE_PERMISSION_OVERRIDE_TARGETS: ReadonlySet<ToolTarget> = new Set([
   "opencode",
+  "opencodev1",
   "kilo",
   "mimocode",
   "vibe",

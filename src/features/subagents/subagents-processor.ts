@@ -50,6 +50,7 @@ import { DeepagentsSubagent } from "./deepagents-subagent.js";
 import { DevinPluginSubagent } from "./devin-plugin-subagent.js";
 import { DevinSubagent } from "./devin-subagent.js";
 import { FactorydroidSubagent } from "./factorydroid-subagent.js";
+import { FirebenderSubagent } from "./firebender-subagent.js";
 import { GooseSubagent } from "./goose-subagent.js";
 import { GrokcliSubagent } from "./grokcli-subagent.js";
 import { HermesagentSubagent } from "./hermesagent-subagent.js";
@@ -64,6 +65,7 @@ import { LettacodeSubagent } from "./lettacode-subagent.js";
 import { MimocodeSubagent } from "./mimocode-subagent.js";
 import { OmpSubagent } from "./omp-subagent.js";
 import { OpenCodeSubagent } from "./opencode-subagent.js";
+import { Opencodev1Subagent } from "./opencodev1-subagent.js";
 import { PoolSubagent } from "./pool-subagent.js";
 import { QoderSubagent } from "./qoder-subagent.js";
 import { QwencodeSubagent } from "./qwencode-subagent.js";
@@ -84,6 +86,7 @@ import {
 import { TraeSubagent } from "./trae-subagent.js";
 import { VibePluginSubagent } from "./vibe-plugin-subagent.js";
 import { VibeSubagent } from "./vibe-subagent.js";
+import { XumSubagent } from "./xum-subagent.js";
 import { ZcodePluginSubagent } from "./zcode-plugin-subagent.js";
 import { ZcodeSubagent } from "./zcode-subagent.js";
 import { ZoocodeSubagent } from "./zoocode-subagent.js";
@@ -107,7 +110,13 @@ type ToolSubagentFactory = {
       rulesyncSubagents: RulesyncSubagent[];
       global?: boolean;
       logger?: Logger;
-    }): ToolSubagent | ToolSubagent[];
+      /**
+       * Whether this run's `--delete` sweep will remove the orphaned files in
+       * the tool's subagent directory, so an aggregate that indexes those
+       * files (Firebender's `agents` registry) can drop them in the same run.
+       */
+      deleteOrphans?: boolean;
+    }): ToolSubagent | ToolSubagent[] | Promise<ToolSubagent | ToolSubagent[]>;
     fromFile(params: ToolSubagentFromFileParams): Promise<ToolSubagent>;
     forDeletion(params: ToolSubagentForDeletionParams): ToolSubagent;
     getSettablePaths(options?: { global?: boolean }): ToolSubagentSettablePaths;
@@ -120,6 +129,7 @@ type ToolSubagentFactory = {
     loadAdditionalImportFiles?(params: {
       outputRoot: string;
       global: boolean;
+      logger?: Logger;
     }): Promise<ToolSubagent[]>;
     /**
      * Optional content-aware ownership filter for tools whose subagent files
@@ -152,6 +162,15 @@ type ToolSubagentFactory = {
      * unset and rely on orphan deletion instead.
      */
     emitsEmptyAggregate?: boolean;
+    /**
+     * With {@link emitsEmptyAggregate}, also emit the empty aggregate when the
+     * rulesync subagents directory does not exist at all, as long as the run
+     * sweeps orphans (`--delete`). Set by a tool whose aggregate indexes
+     * per-agent files that the sweep deletes even without a source directory
+     * (Firebender's `agents` registry), so the index is not left pointing at
+     * files that are gone.
+     */
+    emitsEmptyAggregateOnDelete?: boolean;
     /**
      * File pattern for import (e.g., "*.md", "*.json").
      *
@@ -568,6 +587,27 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
     },
   ],
   [
+    "firebender",
+    {
+      // Firebender agents are Markdown files that only load once listed in
+      // the `agents` array of `firebender.json` (project root, or
+      // `~/.firebender/firebender.json`). rulesync writes them to
+      // .firebender/agents/ (project) and ~/.firebender/agents/ (global) and
+      // registers each one; the shared config file is never deleted, so an
+      // empty aggregate is what unregisters stale agents.
+      // https://docs.firebender.com/api-reference/agents
+      class: FirebenderSubagent,
+      meta: {
+        supportsProject: true,
+        supportsSimulated: false,
+        supportsGlobal: true,
+        emitsEmptyAggregate: true,
+        emitsEmptyAggregateOnDelete: true,
+        filePattern: "*.md",
+      },
+    },
+  ],
+  [
     "goose",
     {
       class: GooseSubagent,
@@ -633,7 +673,9 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
   [
     // Kiro CLI loads agent configs from both `.kiro/agents/` (workspace) and
     // `~/.kiro/agents/` (global); local agents take precedence over global
-    // ones with the same name. https://kiro.dev/docs/cli/custom-agents/configuration-reference/
+    // ones with the same name. Nested directories are read too, and the agent
+    // name is the path without the extension (`team/planner.json` is
+    // `team/planner`). https://kiro.dev/docs/custom-agents/
     "kiro-cli",
     {
       class: KiroCliSubagent,
@@ -641,13 +683,15 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
         supportsProject: true,
         supportsSimulated: false,
         supportsGlobal: true,
-        filePattern: "*.json",
+        filePattern: "**/*.json",
+        supportsNestedPaths: true,
       },
     },
   ],
   [
     // Kiro IDE loads custom agents from `.kiro/agents/` (workspace) and
-    // `~/.kiro/agents/` (global). https://kiro.dev/docs/chat/subagents/
+    // `~/.kiro/agents/` (global), including nested directories.
+    // https://kiro.dev/docs/chat/subagents/ https://kiro.dev/docs/custom-agents/
     "kiro-ide",
     {
       class: KiroIdeSubagent,
@@ -655,7 +699,8 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
         supportsProject: true,
         supportsSimulated: false,
         supportsGlobal: true,
-        filePattern: "*.md",
+        filePattern: "**/*.md",
+        supportsNestedPaths: true,
       },
     },
   ],
@@ -740,6 +785,18 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
     "opencode",
     {
       class: OpenCodeSubagent,
+      meta: {
+        supportsProject: true,
+        supportsSimulated: false,
+        supportsGlobal: true,
+        filePattern: "*.md",
+      },
+    },
+  ],
+  [
+    "opencodev1",
+    {
+      class: Opencodev1Subagent,
       meta: {
         supportsProject: true,
         supportsSimulated: false,
@@ -929,6 +986,22 @@ export const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolS
     },
   ],
   [
+    "xum",
+    {
+      // Xum agent definitions are native Markdown + YAML frontmatter directly
+      // under `.xum/agents/` (project) and `~/.xum/agents/` (user/global);
+      // subfolders are ignored.
+      // https://xum.cdr.dev/agents
+      class: XumSubagent,
+      meta: {
+        supportsProject: true,
+        supportsSimulated: false,
+        supportsGlobal: true,
+        filePattern: "*.md",
+      },
+    },
+  ],
+  [
     "zcode",
     {
       // ZCode subagents are Markdown files with YAML frontmatter under
@@ -978,17 +1051,15 @@ const defaultGetFactory: GetFactory = (target) => {
 // Derive tool target arrays from factory metadata
 const allToolTargetKeys = [...toolSubagentFactories.keys()];
 
-export const subagentsProcessorToolTargets: ToolTarget[] = allToolTargetKeys.filter((target) => {
+const subagentsProcessorToolTargets: ToolTarget[] = allToolTargetKeys.filter((target) => {
   const factory = toolSubagentFactories.get(target);
   return factory?.meta.supportsProject ?? false;
 });
 
-export const subagentsProcessorToolTargetsSimulated: ToolTarget[] = allToolTargetKeys.filter(
-  (target) => {
-    const factory = toolSubagentFactories.get(target);
-    return factory?.meta.supportsSimulated ?? false;
-  },
-);
+const subagentsProcessorToolTargetsSimulated: ToolTarget[] = allToolTargetKeys.filter((target) => {
+  const factory = toolSubagentFactories.get(target);
+  return factory?.meta.supportsSimulated ?? false;
+});
 
 const subagentsProcessorToolTargetsGlobal: ToolTarget[] = allToolTargetKeys.filter((target) => {
   const factory = toolSubagentFactories.get(target);
@@ -1020,6 +1091,11 @@ function compareRelativePathsShallowestFirst(left: string, right: string): numbe
 export class SubagentsProcessor extends FeatureProcessor {
   private readonly toolTarget: SubagentsProcessorToolTarget;
   private readonly global: boolean;
+
+  protected override sweepsThroughInRootLinks(): boolean {
+    return this.global;
+  }
+  private readonly deleteOrphans: boolean;
   private readonly getFactory: GetFactory;
   /**
    * Whether the last `loadRulesyncFiles` found a `subagents/` directory under
@@ -1035,6 +1111,7 @@ export class SubagentsProcessor extends FeatureProcessor {
     global = false,
     getFactory = defaultGetFactory,
     dryRun = false,
+    deleteOrphans = false,
     logger,
   }: {
     outputRoot?: string;
@@ -1043,9 +1120,12 @@ export class SubagentsProcessor extends FeatureProcessor {
     global?: boolean;
     getFactory?: GetFactory;
     dryRun?: boolean;
+    /** Whether the run sweeps orphaned subagent files (`--delete`). */
+    deleteOrphans?: boolean;
     logger: Logger;
   }) {
     super({ outputRoot, inputRoots, dryRun, logger });
+    this.deleteOrphans = deleteOrphans;
     const result = SubagentsProcessorToolTargetSchema.safeParse(toolTarget);
     if (!result.success) {
       throw new Error(
@@ -1058,9 +1138,13 @@ export class SubagentsProcessor extends FeatureProcessor {
   }
 
   override emitsToolFilesForEmptySource(): boolean {
+    const { meta } = this.getFactory(this.toolTarget);
+    if (meta.emitsEmptyAggregate !== true) {
+      return false;
+    }
     return (
-      this.rulesyncSourceDirFound &&
-      this.getFactory(this.toolTarget).meta.emitsEmptyAggregate === true
+      this.rulesyncSourceDirFound ||
+      (this.deleteOrphans && meta.emitsEmptyAggregateOnDelete === true)
     );
   }
 
@@ -1096,11 +1180,14 @@ export class SubagentsProcessor extends FeatureProcessor {
       if (targeted.length === 0 && !this.emitsToolFilesForEmptySource()) {
         return [];
       }
-      const toolSubagents = factory.class.fromRulesyncSubagents({
+      const toolSubagents = await factory.class.fromRulesyncSubagents({
         outputRoot: this.outputRoot,
         rulesyncSubagents: targeted,
         global: this.global,
         logger: this.logger,
+        // The sweep is skipped when a source failed to load (see generate.ts),
+        // so the aggregate must not assume those files go away either.
+        deleteOrphans: this.deleteOrphans && !this.hasRulesyncSourceLoadFailure(),
       });
 
       return Array.isArray(toolSubagents) ? toolSubagents : [toolSubagents];
@@ -1478,6 +1565,7 @@ export class SubagentsProcessor extends FeatureProcessor {
       const additionalSubagents = await factory.class.loadAdditionalImportFiles({
         outputRoot: this.outputRoot,
         global: this.global,
+        logger: this.logger,
       });
       toolSubagents.push(
         ...this.claimInlineSubagents({

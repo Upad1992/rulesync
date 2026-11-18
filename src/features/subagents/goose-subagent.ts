@@ -10,9 +10,14 @@ import { RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH } from "../../constants/rulesync-p
 import { AiFileParams, ValidationResult } from "../../types/ai-file.js";
 import { formatError } from "../../utils/error.js";
 import { readFileContent } from "../../utils/file.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import {
+  parseFrontmatter,
+  stringifyFrontmatter,
+  validateFrontmatterSchema,
+} from "../../utils/frontmatter.js";
 import { RulesyncSubagent, RulesyncSubagentFrontmatter } from "./rulesync-subagent.js";
 import {
+  parseGeneratedSubagentFrontmatter,
   ToolSubagent,
   ToolSubagentForDeletionParams,
   ToolSubagentFromFileParams,
@@ -34,7 +39,7 @@ import {
  *
  * @see https://goose-docs.ai/docs/guides/context-engineering/custom-agents/
  */
-export const GooseSubagentFrontmatterSchema = z.looseObject({
+const GooseSubagentFrontmatterSchema = z.looseObject({
   name: z.string(),
   description: z.optional(z.string()),
   model: z.optional(z.string()),
@@ -141,14 +146,13 @@ export class GooseSubagent extends ToolSubagent {
       ...gooseSection,
     };
 
-    const result = GooseSubagentFrontmatterSchema.safeParse(rawFrontmatter);
-    if (!result.success) {
-      throw new Error(
-        `Invalid goose subagent frontmatter in ${rulesyncSubagent.getRelativeFilePath()}: ${formatError(result.error)}`,
-      );
-    }
+    const gooseFrontmatter = parseGeneratedSubagentFrontmatter({
+      schema: GooseSubagentFrontmatterSchema,
+      frontmatter: rawFrontmatter,
+      toolTarget: "goose",
+      rulesyncSubagent,
+    });
 
-    const gooseFrontmatter = result.data;
     const body = rulesyncSubagent.getBody();
     const fileContent = stringifyFrontmatter(body, gooseFrontmatter);
     const paths = this.getSettablePaths({ global });
@@ -170,16 +174,12 @@ export class GooseSubagent extends ToolSubagent {
       return { success: true, error: null };
     }
 
-    const result = GooseSubagentFrontmatterSchema.safeParse(this.frontmatter);
-    if (result.success) {
-      return { success: true, error: null };
-    }
-    return {
-      success: false,
-      error: new Error(
-        `Invalid frontmatter in ${join(this.relativeDirPath, this.relativeFilePath)}: ${formatError(result.error)}`,
-      ),
-    };
+    return validateFrontmatterSchema({
+      schema: GooseSubagentFrontmatterSchema,
+      frontmatter: this.frontmatter,
+      relativeDirPath: this.relativeDirPath,
+      relativeFilePath: this.relativeFilePath,
+    });
   }
 
   static isTargetedByRulesyncSubagent(rulesyncSubagent: RulesyncSubagent): boolean {

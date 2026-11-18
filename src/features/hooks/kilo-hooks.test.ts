@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { RULESYNC_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
@@ -371,7 +371,7 @@ describe("KiloHooks", () => {
       // Canonical Kilo plugin shape: default export with id + server descriptor.
       expect(content).toContain("export default {");
       expect(content).toContain('  id: "rulesync-hooks",');
-      expect(content).toContain("  server: async ({ $ }) => {");
+      expect(content).toContain("  server: async ({ $, directory }) => {");
       // Must NOT emit the legacy named export used by the OpenCode target.
       expect(content).not.toContain("export const RulesyncHooksPlugin");
       // Handlers are still present, just nested under `server`.

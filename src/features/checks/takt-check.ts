@@ -1,4 +1,4 @@
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { z } from "zod/mini";
 
@@ -8,7 +8,6 @@ import {
   TAKT_DIR,
   TAKT_WORKFLOW_OVERRIDES_KEY,
 } from "../../constants/takt-paths.js";
-import type { ValidationResult } from "../../types/ai-file.js";
 import { readFileContentOrNull } from "../../utils/file.js";
 import type { Logger } from "../../utils/logger.js";
 import { isPlainObject } from "../../utils/type-guards.js";
@@ -17,13 +16,10 @@ import {
   parseSharedConfig,
   TAKT_CONFIG_SHARED_FILE_KEY,
 } from "../shared/shared-config-gateway.js";
-import { slugifyCheckName } from "./check-slug.js";
+import { checkStem, parseCheckOverride, slugifyCheckName } from "./check-slug.js";
 import { RulesyncCheck } from "./rulesync-check.js";
+import { SingleFileToolCheck } from "./single-file-tool-check.js";
 import {
-  ToolCheck,
-  type ToolCheckForDeletionParams,
-  type ToolCheckFromFileParams,
-  type ToolCheckFromRulesyncCheckParams,
   type ToolCheckFromRulesyncChecksParams,
   type ToolCheckSettablePaths,
 } from "./tool-check.js";
@@ -63,25 +59,6 @@ type TaktCheckOverride = z.infer<typeof TaktCheckOverrideSchema>;
 /** A `quality_gates` entry: an AI completion directive, or a command gate. */
 type TaktQualityGate = string | Record<string, unknown>;
 
-function parseOverride(raw: unknown, filePath: string, logger?: Logger): TaktCheckOverride {
-  if (raw === undefined) {
-    return {};
-  }
-  if (!isPlainObject(raw)) {
-    // An invalid block throws below; one of the wrong shape entirely would
-    // otherwise silently produce a string gate where a command was intended.
-    logger?.warn(`Ignoring the \`takt\` block in ${filePath}: expected a mapping.`);
-    return {};
-  }
-  const result = TaktCheckOverrideSchema.safeParse(raw);
-  if (!result.success) {
-    throw new Error(`Invalid \`takt\` block in ${filePath}: ${result.error.message}`, {
-      cause: result.error,
-    });
-  }
-  return result.data;
-}
-
 /**
  * Build the gate a single check contributes. A `command` in the `takt` block
  * makes it a command gate — Takt runs the command after the agent step and
@@ -94,7 +71,7 @@ function toQualityGate(rulesyncCheck: RulesyncCheck, override: TaktCheckOverride
       type: "command",
       // Takt's own logs identify a gate by `name`, so fall back to the check's
       // file stem rather than leaving it unnamed.
-      name: override.name ?? stemOf(rulesyncCheck),
+      name: override.name ?? checkStem(rulesyncCheck),
       command: override.command,
       ...(override.cwd !== undefined && { cwd: override.cwd }),
       ...(override.timeout_ms !== undefined && { timeout_ms: override.timeout_ms }),
@@ -104,12 +81,7 @@ function toQualityGate(rulesyncCheck: RulesyncCheck, override: TaktCheckOverride
   const description = rulesyncCheck.getFrontmatter().description?.trim();
   // A gate is one directive string. The body is the authored text; the
   // description is a summary, used only when there is no body to inject.
-  return body.length > 0 ? body : (description ?? stemOf(rulesyncCheck));
-}
-
-function stemOf(rulesyncCheck: RulesyncCheck): string {
-  // basename, so a check in a subdirectory does not name its gate `dir/name`.
-  return basename(rulesyncCheck.getRelativeFilePath(), ".md");
+  return body.length > 0 ? body : (description ?? checkStem(rulesyncCheck));
 }
 
 /**
@@ -303,7 +275,7 @@ function slugForGate({
  *
  * @see https://github.com/nrslib/takt/blob/main/docs/workflows.md
  */
-export class TaktCheck extends ToolCheck {
+export class TaktCheck extends SingleFileToolCheck {
   override isDeletable(): boolean {
     // config.yaml holds the rest of Takt's settings.
     return false;
@@ -320,9 +292,8 @@ export class TaktCheck extends ToolCheck {
     return this.isTargetedByRulesyncCheckDefault({ rulesyncCheck, toolTarget: "takt" });
   }
 
-  static override fromRulesyncCheck(_params: ToolCheckFromRulesyncCheckParams): TaktCheck {
-    // Gates share one file, so they are only ever built as a set.
-    throw new Error("Takt checks are built from all checks at once; use fromRulesyncChecks.");
+  protected static override getDisplayName(): string {
+    return "Takt";
   }
 
   static async fromRulesyncChecks({
@@ -331,9 +302,11 @@ export class TaktCheck extends ToolCheck {
     global = false,
     logger,
   }: ToolCheckFromRulesyncChecksParams): Promise<TaktCheck[]> {
-    const paths = TaktCheck.getSettablePaths({ global });
-    const configFileName = paths.relativeFilePath ?? TAKT_CONFIG_FILE_NAME;
-    const filePath = join(outputRoot, paths.relativeDirPath, configFileName);
+    const {
+      relativeDirPath,
+      relativeFilePath: configFileName,
+      filePath,
+    } = this.getSingleFilePath({ outputRoot, global });
     // Read without initializing so a dry-run does not create the user's
     // config.yaml as a side effect (mirrors the Takt MCP/permissions adapters).
     const existingContent = (await readFileContentOrNull(filePath)) ?? "";
@@ -341,7 +314,7 @@ export class TaktCheck extends ToolCheck {
     const buildConfigFile = (patch: Record<string, unknown>): TaktCheck =>
       new TaktCheck({
         outputRoot,
-        relativeDirPath: paths.relativeDirPath,
+        relativeDirPath,
         relativeFilePath: configFileName,
         fileContent: applySharedConfigPatch({
           fileKey: TAKT_CONFIG_SHARED_FILE_KEY,
@@ -375,53 +348,19 @@ export class TaktCheck extends ToolCheck {
     }
 
     const entries = rulesyncChecks.map((rulesyncCheck) => {
-      const override = parseOverride(
-        rulesyncCheck.getFrontmatter().takt,
-        join(RULESYNC_CHECKS_RELATIVE_DIR_PATH, rulesyncCheck.getRelativeFilePath()),
+      const override = parseCheckOverride({
+        raw: rulesyncCheck.getFrontmatter().takt,
+        filePath: join(RULESYNC_CHECKS_RELATIVE_DIR_PATH, rulesyncCheck.getRelativeFilePath()),
+        section: "takt",
+        schema: TaktCheckOverrideSchema,
         logger,
-      );
+      });
       return { gate: toQualityGate(rulesyncCheck, override), override };
     });
 
     return [
       buildConfigFile({ [TAKT_WORKFLOW_OVERRIDES_KEY]: buildWorkflowOverrides(entries, logger) }),
     ];
-  }
-
-  static async fromFile({
-    outputRoot = process.cwd(),
-    global = false,
-  }: ToolCheckFromFileParams): Promise<TaktCheck> {
-    const paths = TaktCheck.getSettablePaths({ global });
-    const configFileName = paths.relativeFilePath ?? TAKT_CONFIG_FILE_NAME;
-    const filePath = join(outputRoot, paths.relativeDirPath, configFileName);
-    return new TaktCheck({
-      outputRoot,
-      relativeDirPath: paths.relativeDirPath,
-      relativeFilePath: configFileName,
-      fileContent: (await readFileContentOrNull(filePath)) ?? "",
-      global,
-    });
-  }
-
-  static forDeletion({
-    outputRoot = process.cwd(),
-    relativeDirPath,
-    relativeFilePath,
-    global = false,
-  }: ToolCheckForDeletionParams): TaktCheck {
-    return new TaktCheck({
-      outputRoot,
-      relativeDirPath,
-      relativeFilePath,
-      fileContent: "",
-      validate: false,
-      global,
-    });
-  }
-
-  validate(): ValidationResult {
-    return { success: true, error: null };
   }
 
   toRulesyncCheck(): RulesyncCheck {
