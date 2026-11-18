@@ -40,14 +40,14 @@ Per target: `generate --features "*" --dry-run` -> `generate` ->
 `generate --check`. All 18 commands exited 0; every `--check` reported
 `hasDiff=false` (no drift). Dry-run planned paths == actual files written.
 
-| Target | Dry-run write paths (relative to output root) |
-| --- | --- |
-| `zcode` | `AGENTS.md`, `.zcode/config.json` (mcp+hooks), `.zcode/commands/review.md`, `.zcode/agents/reviewer.md`, `.zcode/skills/demo-skill/SKILL.md`, `.../scripts/run.sh` |
-| `trae` | `.trae/rules/overview.md`, `.trae/rules/typescript.md`, `.trae/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.trae/commands/review.md`, `.trae/agents/reviewer.md`, `.trae/mcp.json`, **`.trae/hooks.json`** |
-| `codebuddy` | `CODEBUDDY.md`, `.codebuddy/rules/typescript.md`, `.codebuddy/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.codebuddy/commands/review.md`, `.codebuddy/agents/reviewer.md`, `.mcp.json`, `.codebuddy/settings.json` (hooks+permissions) |
-| `claudecode` | `CLAUDE.md`, `.claude/rules/typescript.md`, `.claude/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.claude/commands/review.md`, `.claude/agents/reviewer.md`, `.mcp.json`, `.claude/settings.json` (hooks+permissions) |
-| `codearts-cli` | `AGENTS.md`, `.codeartsdoer/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.codeartsdoer/commands/review.md`, `.codeartsdoer/agents/reviewer.md`, `.codeartsdoer/codearts_cli.json` |
-| `codearts-ide` | `.codeartsdoer/mcp/mcp_settings.json` |
+| Target         | Dry-run write paths (relative to output root)                                                                                                                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zcode`        | `AGENTS.md`, `.zcode/config.json` (mcp+hooks), `.zcode/commands/review.md`, `.zcode/agents/reviewer.md`, `.zcode/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`                                                                             |
+| `trae`         | `.trae/rules/overview.md`, `.trae/rules/typescript.md`, `.trae/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.trae/commands/review.md`, `.trae/agents/reviewer.md`, `.trae/mcp.json`, **`.trae/hooks.json`**                             |
+| `codebuddy`    | `CODEBUDDY.md`, `.codebuddy/rules/typescript.md`, `.codebuddy/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.codebuddy/commands/review.md`, `.codebuddy/agents/reviewer.md`, `.mcp.json`, `.codebuddy/settings.json` (hooks+permissions) |
+| `claudecode`   | `CLAUDE.md`, `.claude/rules/typescript.md`, `.claude/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.claude/commands/review.md`, `.claude/agents/reviewer.md`, `.mcp.json`, `.claude/settings.json` (hooks+permissions)                   |
+| `codearts-cli` | `AGENTS.md`, `.codeartsdoer/skills/demo-skill/SKILL.md`, `.../scripts/run.sh`, `.codeartsdoer/commands/review.md`, `.codeartsdoer/agents/reviewer.md`, `.codeartsdoer/codearts_cli.json`                                                       |
+| `codearts-ide` | `.codeartsdoer/mcp/mcp_settings.json`                                                                                                                                                                                                          |
 
 Unsupported-feature warnings (measured, `--features "*"`):
 
@@ -160,14 +160,14 @@ Handed to the user. The agent must not perform these, mark them done, or fill
 any ✅. For each target, after generating into a throwaway project, confirm in
 the real client:
 
-| Target | Ask the model about a rule | Settings -> Skills / Commands | `/mcps` / MCP panel = Connected | Actually call one MCP tool | Delegate a subagent, check the reply |
-| --- | --- | --- | --- | --- | --- |
-| `zcode` | [ ] | [ ] | [ ] | [ ] | [ ] |
-| `trae` | [ ] | [ ] | [ ] | [ ] | [ ] |
-| `codebuddy` | [ ] | [ ] | [ ] | [ ] | [ ] |
-| `claudecode` | [ ] | [ ] | [ ] | [ ] | [ ] |
-| `codearts-cli` | [ ] | [ ] | [ ] | [ ] | [ ] |
-| `codearts-ide` | [ ] | [ ] | [ ] | [ ] | [ ] |
+| Target         | Ask the model about a rule | Settings -> Skills / Commands | `/mcps` / MCP panel = Connected | Actually call one MCP tool | Delegate a subagent, check the reply |
+| -------------- | -------------------------- | ----------------------------- | ------------------------------- | -------------------------- | ------------------------------------ |
+| `zcode`        | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
+| `trae`         | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
+| `codebuddy`    | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
+| `claudecode`   | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
+| `codearts-cli` | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
+| `codearts-ide` | [ ]                        | [ ]                           | [ ]                             | [ ]                        | [ ]                                  |
 
 Notes for the person running these:
 

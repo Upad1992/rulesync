@@ -1,6 +1,6 @@
 # Decisions
 
-<!-- cspell:ignore agentsync traecn Doubao forwardable codegraph hezi -->
+<!-- cspell:ignore agentsync traecn Doubao forwardable codegraph hezi repointed repoints -->
 
 Append-only decision log for this fork. New entries get the next `D-NNN`; do not rewrite old entries.
 Each entry records context, the decision, the alternatives considered, the consequences, and the evidence.
@@ -274,6 +274,18 @@ Pitfalls are collected at the end.
 
 **Evidence:** `PLATFORM-VERIFICATION.md`; `src/constants/trae-paths.ts:28,60-62`; `src/features/permissions/trae-permissions.ts:436`; `src/features/shared/shared-config-gateway.ts:1408`; `src/features/hooks/trae-hooks.ts:80`; `src/config/config-resolver.ts:480-510`.
 
+## D-021: Install the fork's 43.9.0 build as the global CLI via the `add -g` fallback
+
+**Context:** D-018 deliberately deferred local packaging/install. The global `rulesync` was still registry 36.0.2 while the fork is 43.9.0, and `dist/cli/index.js` (the `package.json:42` bin target) did not exist because `vp pack` had never run. The user approved making the global command run the fork's 43.9.0.
+
+**Decision:** Build with `./node_modules/.bin/vp pack` directly (bypassing `pnpm`, so `prepare` -> `pnpm generate` cannot rewrite `AGENTS.md` / `.claude/settings.json`, P-014), then install with `pnpm add -g --ignore-scripts file:<repo>` — the fallback already approved in the plan — because `pnpm link --global` is rejected by pnpm v12.21.0 (`pnpm link --help` shows no global option). Verify with five assertions and document the upgrade command in the external `platforms/rulesync/README.md`. Do not commit the `Agent` repo.
+
+**Alternatives:** `pnpm link --global` (rejected: absent on pnpm v12); hand-editing the shim (rejected: not pnpm-managed); `pnpm add -g rulesync@43.9.0` from the registry (rejected: loses the fork's `codearts-*` and Trae CN changes); leaving 36.0.2 (rejected by the user).
+
+**Consequences:** `rulesync --version` = 43.9.0; the global bundle contains `codearts-ide`. The shim path string is unchanged, but pnpm repointed the same virtual-store slot to a new copy whose `package.json:3` = 43.9.0. The installed `dist/cli/index.js` is a hard link to the repo's build (shared inode, link count 2), not a copy — yet `vp pack`'s `clean: true` deletes and recreates `dist/` on every build, breaking the link, so each upgrade must re-run both commands (P-017). `git status --porcelain` stayed empty. pnpm removed the old 36.0.2 slot, so a clean rollback is `pnpm add -g rulesync@36.0.2`, not restoring the backed-up shim alone. Backups: `/tmp/codebuddy-backups/20261118-171928/`.
+
+**Evidence:** `package.json:3,42,48,73`; `vite.config.ts:9-16`; `rulesync.jsonc:55`; `pnpm link --help` / `pnpm add --help`; `~/Library/pnpm/bin/rulesync:111`; `rulesync --version` = 43.9.0; `codearts-ide` found in both bundles; shared inode between the repo and installed `dist/cli/index.js`; `git status --porcelain` (empty); `platforms/rulesync/README.md`.
+
 ## Pitfalls
 
 ### P-001: `~/.trae` can exist as an empty stub
@@ -335,3 +347,7 @@ When `pnpm`'s `verifyDepsBeforeRun` triggers an install, the `prepare` hook runs
 ### P-016: Trae CN-first + global permissions fails, and global hooks ignore CN-first
 
 43.9.0 added Trae hooks (`trae-hooks.ts`) and permissions (`trae-permissions.ts`). `TraePermissions.getSettablePaths()` resolves CN-first through `getTraeUserDir()`, producing `.trae-cn/permission/global.json` when `~/.trae-cn/` exists, but `SHARED_CONFIG_OWNERSHIP` (`src/features/shared/shared-config-gateway.ts:1408`) declares only the international `.trae/permission/global.json`, so `generate --global --targets trae --features permissions` exits 1 on a CN machine. `TraeHooks.getSettablePaths()` hardcodes `.trae/hooks.json`, so global hooks are **not** CN-first even though skills / commands / subagents are. The Q12 unit test (`trae-permissions.test.ts:80`) only asserts `getSettablePaths`, and the E2E permissions test uses a fresh home without `.trae-cn`, so neither reaches the gateway write. Verify Trae global permissions on a CN home with the real CLI before trusting a green suite. Recorded in `PLATFORM-VERIFICATION.md`; not fixed here (source change is out of scope for D-019/D-020).
+
+### P-017: pnpm v12 has no global `link`, and `add -g file:` hard links the build
+
+`pnpm link --global` fails on pnpm v12.21.0 (`unexpected argument '--global'`); `pnpm link --help` lists only `[PACKAGE_PATHS]...`. Use `pnpm add -g --ignore-scripts file:<repo>` instead (D-021). Three traps: (1) the shim path string is unchanged — pnpm repoints the same virtual-store slot rather than referencing the worktree — so do not expect the shim to literally point at the repo; (2) `file:` installs the build as a hard link to the repo's `dist/`, which looks self-updating, but `vp pack` has `clean: true` (`vite.config.ts:14`) and recreates `dist/` on every build, breaking that link; (3) `--ignore-scripts` is required or `prepare` -> `pnpm generate` may rewrite `AGENTS.md` / `.claude/settings.json` (P-014). Therefore every fork upgrade needs both `./node_modules/.bin/vp pack` and `pnpm add -g --ignore-scripts file:<repo>`, and `~/Library/pnpm/bin/rulesync` must never be hand-edited. pnpm also removed the old 36.0.2 slot during install, so restoring only the backed-up shim does not roll back.

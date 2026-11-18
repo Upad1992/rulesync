@@ -18,6 +18,8 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
   - These 8 files live in the **separate `Agent` git repo** (branch `main`), not this fork. They are updated in place but **left uncommitted there**: that repo has unrelated pre-existing edits (`.gitignore`, `mac/config/zshenv`) and the task's commits target `dev` here. Committing them in the `Agent` repo is a separate, separately authorized action.
 - Backups: `/tmp/codebuddy-backups/20261118-112847/project-tree.tar` (handoff round), `/tmp/codebuddy-backups/20261118-104938/project-tree.tar` (merge round), `/tmp/codebuddy-backups/20261118-port-session/` (three handoff docs, 11 original conflicted files with markers, `codearts-ide-src/`, `resolve-file-formats.py`, and all logs: `typecheck-*.txt`, `cicheck-*.txt`, `unit-all.txt`, `e2e-full.txt`, `proc-tests.txt`), `/tmp/codebuddy-backups/20261117-200706/`, `/tmp/codebuddy-backups/20261118-114223-platform-verify/` (this session: pre-change copies of `AGENTS.md`, `.claude/settings.json`, `HANDOFF.md`, `DECISIONS.md`, `CONTEXT.md`, `package.json`, all 8 manuals). Isolated verification artifacts and logs are under `/tmp/rulesync-platform-check/`.
 
+- **Local install done (D-021)**: the global `rulesync` now runs this fork's 43.9.0 build instead of registry 36.0.2. `vp pack` generated `dist/cli/index.js`; `pnpm add -g --ignore-scripts file:<repo>` replaced the global slot (`pnpm link --global` does not exist on pnpm v12.21.0, P-017). `rulesync --version` = 43.9.0, both bundles contain `codearts-ide`, and `git status --porcelain` is empty (P-014 did not fire). The external `platforms/rulesync/README.md` gained an upgrade-command section, still uncommitted in the `Agent` repo. Backups: `/tmp/codebuddy-backups/20261118-171928/`.
+
 ## Completed
 
 - Decision interview Q1-Q13 -> D-015..D-017. Round choices A1/B1/1A/2A/3A and "no extra acceptance scope" recorded as **D-018**; **P-014** added to `DECISIONS.md`.
@@ -35,6 +37,8 @@ Update "Current state", "Completed", and "Next steps" at the end of every sessio
 - **Merge round**: fresh `pnpm cicheck` green after one reproduced flaky, P-014 verified (no restore needed), `git add -A`, single merge commit `309aa38`, all 7 success criteria passed, switched back to `feat/codearts-ide`.
 - **Handoff round**: user approved the real-platform verification plan (**D-019**) but deferred execution to a new session. That session only updated `HANDOFF.md` / `DECISIONS.md` on `dev` and committed them; no `pnpm` command was run.
 - **D-019 execution round (this session)**: see Verification below. Produced `PLATFORM-VERIFICATION.md` (drift list, six-target evidence, per-platform GUI checklist), updated all 8 external platform manuals in Chinese (Trae hooks/permissions drift, command-frontmatter tool-block requirement, version stamps), appended **D-020 / P-015 / P-016** to `DECISIONS.md`, and added `hezi` to the `cspell:ignore` comments of `HANDOFF.md` / `DECISIONS.md` (the word was introduced by `d836685` but never cspell-checked). No fork source or committed `rulesync.jsonc` was changed.
+
+- **Local-install round (D-021)**: backed up the project tree and global pnpm state; built via `./node_modules/.bin/vp pack` (bypassing `pnpm` so `prepare` never ran); installed with `pnpm add -g --ignore-scripts file:<repo>` after `pnpm link --global` was rejected. Verified `--version` = 43.9.0, `--help` exit 0, `codearts-ide` in both bundles, global copy `package.json:3` = 43.9.0, clean worktree. The shim path string is unchanged because pnpm reused the virtual-store slot; that deviation from the plan is recorded in D-021 / P-017. Added the upgrade commands to the external `platforms/rulesync/README.md`.
 
 ## Verification
 
@@ -60,6 +64,7 @@ D-019 is executed (see Completed / Verification). What remains, in priority orde
 2. **Decide whether to fix the two Trae 43.9.0 defects** (P-016): (a) add a `SHARED_CONFIG_OWNERSHIP` declaration for `.trae-cn/permission/global.json` so CN-home global permissions generate; (b) make global Trae hooks CN-first, or document the divergence as intentional. Both are fork **source** changes — out of scope for D-019/D-020, need separate authorization. If fixed, add a regression test that reaches the real `--global` gateway write (current Q12 unit + E2E do not).
 3. Still deferred from earlier rounds: D-014 / P-010 numbering reconciliation and the two handoff-document versions when `feat/codearts-ide` is merged (3A / P-013). Do NOT push `main` or `dev` (Q13=A) without separate authorization.
 4. Before any future `pnpm` command, remember P-014 (regenerates `AGENTS.md` / `.claude/settings.json`) and P-015 (isolated `--config` runs). `origin/main` / `origin/dev` intentionally unchanged.
+5. After each future fork upgrade, re-run the two commands documented in the upgrade section of `platforms/rulesync/README.md`: `vp pack` then `pnpm add -g --ignore-scripts file:<repo>`. `pnpm link --global` is unavailable on pnpm v12 (P-017).
 
 ## Environment facts
 
@@ -69,9 +74,10 @@ D-019 is executed (see Completed / Verification). What remains, in priority orde
 - CodeArts CLI and the CodeArts Agent IDE share `.codeartsdoer/` for rules, skills, commands and agents; the IDE reads MCP from `.codeartsdoer/mcp/mcp_settings.json`.
 - `~/.trae/` does not exist on this machine (measured 2026-11-18); `~/.trae-cn/` is the real Trae user config, which is why CN-first detection (D-003) is required.
 - `pnpm dev generate --help` is the authoritative source for 43.9.0 CLI flags; `dev:docs/reference/cli-commands.md` documents `--targets` / `--features` / `--dry-run` / `--check` / `--input-roots` / `--output-roots`.
+- pnpm is **v12.21.0**; `pnpm link` has no global option (only `[PACKAGE_PATHS]...`). The global `rulesync` shim is `~/Library/pnpm/bin/rulesync` (a shim script, not a symlink), and the installed build is a hard link to the repo's `dist/` (P-017).
 
 ## Known issues
 
 - P-005 still applies: `check:docs-content` compares the worktree to the index, so stage documentation changes before running `pnpm cicheck`.
-- P-011 through P-016 are in `DECISIONS.md`; read them there. P-014 is the `pnpm generate` side-effect, P-015 the isolated-`--config` invocation gotcha, P-016 the Trae CN-first permissions/hooks defect.
+- P-011 through P-017 are in `DECISIONS.md`; read them there. P-014 is the `pnpm generate` side-effect, P-015 the isolated-`--config` invocation gotcha, P-016 the Trae CN-first permissions/hooks defect, P-017 the pnpm v12 global-link limitation and the hard-link/`clean` upgrade trap.
 - The platform manuals' section 6 checklists contain GUI-only steps; an agent cannot perform them (D-019). The consolidated unchecked checklist is `PLATFORM-VERIFICATION.md` §4.
