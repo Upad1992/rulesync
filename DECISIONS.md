@@ -230,7 +230,7 @@ Pitfalls are collected at the end.
 
 **Context:** Merging `main` into `dev` produced 11 conflicted files, but the real incompatibility is structural: upstream 43.9.0 replaced Trae base classes (`TraeCommand` now extends `FrontmatterMarkdownToolCommand`), replaced `getTraeCommandsDirPath()` with `TRAE_COMMANDS_DIR_PATH`, refactored `rules-processor.ts` into tool-rule factories, moved about 20 `src/cli/commands/*` files to `src/lib/*`, and switched the build toolchain from `tsdown`/oxlint/oxfmt to `vp` (vite+). It also added `trae-permissions.ts` and `trae-hooks.ts`, which the fork had explicitly kept out of scope.
 
-**Decision:** Treat the work as a port, not a conflict resolution. Use upstream 43.9.0 as the base and re-apply the local customizations (CN-first paths, Trae subagents, both `codearts-*` targets, tuple and processor registrations, docs and generated artifacts) on top. Run `pnpm typecheck` first to size the damage, then iterate to `pnpm cicheck` green. Hand off to a fresh session via `HANDOFF.md`, `DECISIONS.md` and `CONTEXT.md` rather than carrying a long interview session into the port.
+**Decision:** Treat the work as a port, not a conflict resolution. Use upstream 43.9.0 as the base and re-apply the local customizations (CN-first paths, Trae subagents, both `codearts-*` targets, tuple and processor registrations, docs and generated artifacts) on top. Run `pnpm typecheck` first to size the damage, then iterate to `pnpm cicheck` green. Hand off to a fresh session via `HANDOFF.md`, `DECISIONS.md` and `GLOSSARY.md` rather than carrying a long interview session into the port.
 
 **Alternatives:** abort the merge and only cherry-pick the frontmatter RCE fix; defer the whole merge; mechanically resolve markers with "ours" or "theirs".
 
@@ -330,7 +330,7 @@ The committed JSON is not in oxfmt format, so `pnpm check` and `pnpm cicheck` fa
 
 ### P-012: An unresolved merge plus unstaged handoff docs is fragile
 
-The `dev` worktree is left with `git merge main` in progress and 11 unresolved conflicts. `git merge --abort` discards all worktree edits, including `HANDOFF.md`, `DECISIONS.md` and `CONTEXT.md`. Copy those three files out of the repository before aborting. Backups live under `/tmp/codebuddy-backups/20261117-200706/`.
+The `dev` worktree is left with `git merge main` in progress and 11 unresolved conflicts. `git merge --abort` discards all worktree edits, including `HANDOFF.md`, `DECISIONS.md` and `GLOSSARY.md`. Copy those three files out of the repository before aborting. Backups live under `/tmp/codebuddy-backups/20261117-200706/`.
 
 ### P-013: `dev` has older copies of the process documents than `feat/codearts-ide`
 
@@ -351,3 +351,7 @@ When `pnpm`'s `verifyDepsBeforeRun` triggers an install, the `prepare` hook runs
 ### P-017: pnpm v12 has no global `link`, and `add -g file:` hard links the build
 
 `pnpm link --global` fails on pnpm v12.21.0 (`unexpected argument '--global'`); `pnpm link --help` lists only `[PACKAGE_PATHS]...`. Use `pnpm add -g --ignore-scripts file:<repo>` instead (D-021). Three traps: (1) the shim path string is unchanged — pnpm repoints the same virtual-store slot rather than referencing the worktree — so do not expect the shim to literally point at the repo; (2) `file:` installs the build as a hard link to the repo's `dist/`, which looks self-updating, but `vp pack` has `clean: true` (`vite.config.ts:14`) and recreates `dist/` on every build, breaking that link; (3) `--ignore-scripts` is required or `prepare` -> `pnpm generate` may rewrite `AGENTS.md` / `.claude/settings.json` (P-014). Therefore every fork upgrade needs both `./node_modules/.bin/vp pack` and `pnpm add -g --ignore-scripts file:<repo>`, and `~/Library/pnpm/bin/rulesync` must never be hand-edited. pnpm also removed the old 36.0.2 slot during install, so restoring only the backed-up shim does not roll back.
+
+### P-018: `CONTEXT.md` in this repo is an external tool fact, not the project glossary
+
+The root glossary was renamed `CONTEXT.md` -> `GLOSSARY.md` on 2026-11-20 with the frozen V3.1 migration script (backup `.context-migration-backup-20261119-235800.tar.gz`), but the 11 remaining `CONTEXT.md` strings (`README.md:179`, `docs/reference/file-formats.md:598`, `docs/reference/supported-tools.md:136`, `src/generated/docs-content.ts:41,45`, `DECISIONS.md:183,200`, `HANDOFF.md:19`, `src/constants/antigravity-cli-paths.ts:24`, `src/features/rules/tool-rule-factories.ts:525`, `src/features/rules/codearts-cli-rule.ts:34`) describe Antigravity / CodeArts CLI file discovery or the platform-verify backup inventory — replacing them would falsify tool documentation and source comments. Never mass-replace `CONTEXT` in this repo: the project's own glossary references live only in the handoff trio (`HANDOFF.md`, `DECISIONS.md`, `GLOSSARY.md`). CodeArts instruction loading is unchanged by the rename because the git root already has `AGENTS.md`, which takes priority over the `CONTEXT.md` fallback.
